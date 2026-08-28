@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT"></a>
-  <img src="https://img.shields.io/badge/version-0.1.0-ff6a2c" alt="v0.1.0">
+  <a href="https://github.com/coullworks/keel/releases/latest"><img src="https://img.shields.io/github/v/release/coullworks/keel?label=version&color=ff6a2c" alt="latest release"></a>
   <img src="https://img.shields.io/badge/go-1.22%2B-00ADD8" alt="Go 1.22+">
   <img src="https://img.shields.io/badge/telemetry-none-brightgreen" alt="zero telemetry">
 </p>
