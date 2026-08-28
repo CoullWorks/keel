@@ -1,0 +1,109 @@
+id: magento-pwa-studio
+kind: frontend
+label: PWA Studio (Adobe React storefront) - guided setup, not scaffolded
+appliesTo: [magento, magento-mageos]
+requires: [magento]
+provides: [frontend, headless, pwa-studio]
+conflicts: [hyva, scandipwa, alokai, magento-headless-next]
+default: false
+priority: 60 # after the Magento base is installed
+updated: 2026-08-13
+# Adobe's own React storefront, talking to Magento over GraphQL.
+#
+# READ THIS BEFORE CHOOSING IT. PWA Studio entered maintenance mode in 2024: it
+# still receives security patches and compatibility updates, and 14.5.0 (Feb
+# 2025) was bug fixes and documentation only. No new features are in
+# development, and Adobe now points new projects at Edge Delivery Services
+# instead [1][2][4].
+#
+# It is offered because a great many existing stores run it and it remains
+# supported, not because it is what a new build should start from. For a new
+# headless storefront prefer Alokai or a bespoke Next.js front end; for a fast
+# storefront that is not headless at all, prefer Hyvä.
+#
+# Sources:
+#   [1] Adobe PWA Studio setup      https://developer.adobe.com/commerce/pwa-studio/tutorials/setup-storefront/
+#   [2] PWA Studio releases         https://github.com/magento/pwa-studio/releases
+#   [3] PWA Studio project site     https://www.pwastudio.io/
+#   [4] PWA Studio history/FAQ      https://www.pwastudio.io/history
+#   [5] Magento GraphQL endpoint    https://developer.adobe.com/commerce/webapi/graphql/
+pins:
+  pwa-studio: "^14.5"
+versions:
+  node_version:
+    label: Node.js version (storefront)
+    # PWA Studio's tooling is the constraint here, not Magento: the buildpack
+    # pins its own supported range, and the OpenSSL workaround in Adobe's setup
+    # guide exists because of a Node 17+ change [1].
+    recommended: "20"
+    options:
+      - value: "18"
+        label: "Node 18"
+        note: "what most existing PWA Studio projects were built on"
+      - value: "20"
+        label: "Node 20 LTS"
+        note: "recommended: current LTS the buildpack supports"
+install:
+  # Nothing is scaffolded here, and that is an honest outcome rather than a gap.
+  #
+  # @magento/create-pwa has no non-interactive mode. It prompts for the project
+  # root even when --name, --template, --backend-url, --npm-client and
+  # --directory are all supplied, and without a TTY it exits 130 part-way
+  # through the first question. `--help` prompts as well, which is how
+  # completely it assumes a terminal.
+  #
+  # keel could pipe blank lines at it and take whatever defaults fell out, but
+  # that yields a storefront pointed at the wrong backend - exactly the silently
+  # wrong result these recipes exist to prevent. Adobe also has PWA Studio in
+  # maintenance mode, so a --yes flag is not coming.
+  #
+  # So keel writes the instructions and the backend URL, and the label says
+  # "guided setup, not scaffolded" so the choice is informed.
+  - "true"
+smoke:
+  # The instructions, not a package.json: nothing was scaffolded.
+  - "bash -lc 'test -f storefront/README.keel.md'"
+files:
+  - path: storefront/README.keel.md
+    content: |
+      > keel did not scaffold this storefront. `@magento/create-pwa` is
+      > interactive and has no non-interactive mode, so running it needs a
+      > terminal. The command below is the one keel would have run.
+      >
+      >     npx --yes @magento/create-pwa
+      >
+      > Answer its prompts, using this backend URL when it asks:
+      >
+      >     {{site_url}}/
+      >
+      > Then: `cd storefront && npm install && npm run watch`.
+
+      # PWA Studio storefront
+
+      Adobe's React storefront, scaffolded by `@magento/create-pwa` and talking
+      to the Magento container over GraphQL at `{{site_url}}/graphql`.
+
+      ## Running it
+
+          cd storefront
+          npm run watch          # dev server with hot reload
+          npm run build          # production bundle
+
+      `MAGENTO_BACKEND_URL` in `storefront/.env` points at the Magento backend.
+      It is set to this project's URL at scaffold time; change it there if the
+      backend moves.
+
+      ## Before you build on this
+
+      PWA Studio is in maintenance mode. Adobe ships security and compatibility
+      fixes but no new features, and recommends Edge Delivery Services for new
+      projects. If you are starting fresh rather than maintaining an existing
+      PWA Studio storefront, look at Alokai or a bespoke Next.js front end
+      (`keel new magento --with magento-alokai` or `magento-headless-next`), or
+      at Hyvä if you do not actually need a decoupled storefront.
+
+      ## Why GraphQL and not REST
+
+      Magento's GraphQL API is the one intended for storefronts: it is the
+      schema PWA Studio, Alokai and ScandiPWA all target, and it returns exactly
+      the fields a page needs rather than whole entities.

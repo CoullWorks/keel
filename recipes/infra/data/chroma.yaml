@@ -1,0 +1,115 @@
+id: chroma
+schema_version: 2
+kind: service
+label: Chroma v1.0 (standalone vector database)
+category: Database
+# Like Qdrant, a standalone vector store that runs beside the primary database
+# rather than replacing it, so it is a service and not a `kind: db`. Chroma is
+# the lightweight, Python-first option (its client is pip-installable and it is
+# the common choice in LangChain/LlamaIndex tutorials), so it leans toward the
+# Python frameworks while still being offered to the Node ones.
+appliesTo: [django, fastapi, flask, express, fastify, hono, nestjs, nextjs, nuxt, sveltekit]
+provides: [vectordb, chroma]
+# One vector store per project: not beside Qdrant, and not beside pgvector.
+conflicts: [qdrant, pgvector]
+updated: 2026-08-22
+vars:
+  # Chroma's server ships as chromadb/chroma and listens on 8000.
+  # https://docs.trychroma.com/production/containers/docker
+  chroma.version: "1.0.0"
+  chroma.host: chroma
+  chroma.port: "8000"
+  chroma.localPort: "8000"
+files:
+  - path: docker-compose.chroma.yml
+    content: |
+      # keel-generated: Chroma {{chroma.version}} (standalone vector database).
+      # Standalone: docker compose -f docker-compose.chroma.yml up -d
+      # Or merged:  docker compose -f docker-compose.yml -f docker-compose.chroma.yml up -d
+      services:
+        chroma:
+          image: chromadb/chroma:{{chroma.version}}
+          restart: unless-stopped
+          # Chroma is unauthenticated by default. Loopback-only is fine for
+          # development; set CHROMA_SERVER_AUTHN_CREDENTIALS + an authn provider
+          # before exposing it.
+          # https://docs.trychroma.com/production/administration/auth
+          volumes:
+            # /data is the documented persistence path for the container image.
+            - chroma-data:/data
+          ports:
+            # Loopback only: no auth is configured.
+            - "127.0.0.1:{{chroma.localPort}}:8000"
+          healthcheck:
+            # /api/v2/heartbeat returns 200 with a nanosecond timestamp when the
+            # server is up, and needs no client tools in the image.
+            # https://docs.trychroma.com/reference/python/client
+            test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8000 && printf 'GET /api/v2/heartbeat HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q '200 OK' <&3"]
+            interval: 10s
+            timeout: 5s
+            retries: 10
+            start_period: 20s
+      volumes:
+        chroma-data:
+  - path: CHROMA.md
+    content: |
+      # Chroma (scaffolded by keel)
+
+      Standalone vector database, service `docker-compose.chroma.yml` (DDEV:
+      `.ddev/docker-compose.chroma.yaml`). API `http://127.0.0.1:{{chroma.localPort}}`.
+
+      ## It sits beside your primary database
+
+      Relational data stays in its own database; Chroma holds the embeddings and
+      their metadata. Talk to it with the client, pointed at the server:
+
+          import chromadb
+          client = chromadb.HttpClient(host="127.0.0.1", port={{chroma.localPort}})
+          col = client.get_or_create_collection("items")
+          col.add(ids=["1"], embeddings=[[...]], metadatas=[{"source": "docs"}])
+
+      From Node use the `chromadb` npm client against the same host and port.
+
+      ## Before it leaves your laptop
+
+      No authentication is configured, so the port is bound to 127.0.0.1 only.
+      Set an authn provider and `CHROMA_SERVER_AUTHN_CREDENTIALS`, and put TLS in
+      front of it, before anything else can reach it.
+provision:
+  ddev:
+    files:
+      - path: .ddev/docker-compose.chroma.yaml
+        content: |
+          # keel-generated: Chroma {{chroma.version}} for DDEV.
+          services:
+            chroma:
+              container_name: ddev-${DDEV_SITENAME}-chroma
+              image: chromadb/chroma:{{chroma.version}}
+              hostname: chroma
+              restart: "no"
+              labels:
+                com.ddev.site-name: ${DDEV_SITENAME}
+                com.ddev.approot: ${DDEV_APPROOT}
+              environment:
+                - VIRTUAL_HOST=$DDEV_HOSTNAME
+                - HTTP_EXPOSE=8000:8000
+                - HTTPS_EXPOSE=8043:8000
+              expose:
+                - "8000"
+              volumes:
+                - chroma:/data
+              healthcheck:
+                test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8000 && printf 'GET /api/v2/heartbeat HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q '200 OK' <&3"]
+                interval: 10s
+                timeout: 5s
+                retries: 10
+                start_period: 20s
+          volumes:
+            chroma:
+    install:
+      - "{{restart}}"
+  compose: {}
+  sail: {}
+  local:
+    install:
+      - "docker compose -f docker-compose.chroma.yml up -d"

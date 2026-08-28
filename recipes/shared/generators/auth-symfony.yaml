@@ -1,0 +1,11 @@
+# Auth as a level:stack generator (Symfony Security). Points at the
+# symfony-security addon that already exists.
+id: gen-auth-symfony
+kind: generator
+level: stack
+label: "Authentication (Symfony Security - login, hashing, authorisation)"
+appliesTo: [symfony]
+provides: [auth]
+apply: [symfony-security]
+schema_version: 2
+updated: 2026-08-21

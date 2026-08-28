@@ -1,0 +1,79 @@
+id: sveltekit-tailwind
+kind: addon
+label: Tailwind CSS v4
+category: UI kit
+appliesTo: [sveltekit]
+requires: [sveltekit]
+provides: [tailwind, css]
+priority: 40
+install:
+  - "{{exec}} npm install tailwindcss @tailwindcss/vite"
+smoke:
+  - "{{exec}} npm run build"
+files:
+  - path: vite.config.js
+    content: |
+      import { sveltekit } from "@sveltejs/kit/vite";
+      import tailwindcss from "@tailwindcss/vite";
+      import { defineConfig } from "vite";
+
+      export default defineConfig({ plugins: [tailwindcss(), sveltekit()] });
+  - path: src/app.css
+    content: |
+      @import "tailwindcss";
+  - path: src/routes/+layout.svelte
+    content: |
+      <script>
+        import "../app.css";
+        let { children } = $props();
+      </script>
+
+      {@render children()}
+  - path: src/routes/+page.svelte
+    content: |
+      <!-- keel: a production-ready landing page that proves Tailwind is wired. -->
+      <script>
+        const features = [
+          ["Tailwind CSS v4", "Utility-first styling, compiled via the Vite plugin."],
+          ["SvelteKit / SSR + filesystem routing", "Server-rendered pages, ready to build on."],
+          ["keel-managed", "keel run dev · test · build, one vocabulary."],
+        ];
+      </script>
+
+      <main class="min-h-screen bg-slate-950 text-slate-100">
+        <div class="mx-auto max-w-3xl px-6 py-20">
+          <span class="inline-flex items-center gap-2 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-300">
+            <span class="size-1.5 rounded-full bg-emerald-400"></span> running
+          </span>
+          <h1 class="mt-6 text-4xl font-bold tracking-tight sm:text-5xl">
+            Your SvelteKit app is running
+          </h1>
+          <p class="mt-4 text-lg text-slate-400">
+            Built with Tailwind CSS, scaffolded by keel. Edit
+            <code class="rounded bg-slate-800 px-1.5 py-0.5 text-sm">src/routes/+page.svelte</code>
+            to make it yours.
+          </p>
+          <div class="mt-8 flex flex-wrap gap-3">
+            <a
+              href="https://coullworks.com/tools/keel"
+              class="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-emerald-400"
+            >
+              keel docs
+            </a>
+            <a
+              href="https://tailwindcss.com"
+              class="rounded-lg border border-slate-700 px-4 py-2 text-sm font-semibold hover:bg-slate-900"
+            >
+              Tailwind CSS docs
+            </a>
+          </div>
+          <div class="mt-12 grid gap-4 sm:grid-cols-3">
+            {#each features as [title, body] (title)}
+              <div class="rounded-xl border border-slate-800 bg-slate-900/50 p-5">
+                <h2 class="font-semibold">{title}</h2>
+                <p class="mt-1 text-sm text-slate-400">{body}</p>
+              </div>
+            {/each}
+          </div>
+        </div>
+      </main>

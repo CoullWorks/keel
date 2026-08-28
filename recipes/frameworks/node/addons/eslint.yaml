@@ -1,0 +1,91 @@
+id: node-eslint
+schema_version: 2
+kind: addon
+label: ESLint + Prettier
+appliesTo: [express, fastify, hono, nestjs, nuxt, astro, sveltekit]
+provides: [lint]
+default: true
+updated: 2026-08-13
+# This used to install eslint and prettier and write no configuration at all,
+# which made `keel run lint` fail on every fresh project:
+#
+#   ESLint couldn't find an eslint.config.(js|mjs|cjs) file.
+#   From ESLint v9.0.0, the default configuration file is now eslint.config.js.
+#
+# ESLint 9 has no implicit configuration and no built-in defaults to fall back
+# on, so a flat config file is not a refinement, it is the difference between a
+# linter and an error. Every framework here declares a lint task that runs
+# eslint, and it exited 2 on all of them.
+install:
+  # typescript and typescript-eslint go in even where the project is plain
+  # JavaScript today. Four of these seven frameworks are already TypeScript, the
+  # other three can be at any point, and a config that parses .ts only sometimes
+  # is a worse thing to hand someone than two dev dependencies they may not use.
+  - "{{exec}} npm install -D eslint @eslint/js globals typescript typescript-eslint prettier eslint-config-prettier"
+  # npm pkg set edits package.json properly rather than by string surgery. The
+  # frameworks whose lint task is `npm run lint` need these to exist; the ones
+  # that call npx directly do not care either way.
+  - "{{exec}} npm pkg set scripts.lint=\"eslint .\" scripts.format=\"prettier --write .\""
+smoke:
+  # The check that would have caught the original bug: run the linter for real.
+  - "{{exec}} npx eslint ."
+files:
+  # .mjs, not .js: nestjs has no "type": "module" in its package.json, so a .js
+  # file using import syntax is parsed as CommonJS and throws. The .mjs
+  # extension is ESM everywhere regardless of what package.json says, and ESLint
+  # looks for it by name.
+  - path: eslint.config.mjs
+    content: |
+      // keel-generated. ESLint 9 flat config.
+      import js from "@eslint/js";
+      import globals from "globals";
+      import tseslint from "typescript-eslint";
+      import prettier from "eslint-config-prettier";
+
+      export default [
+        {
+          // Dependencies and build output. Linting them is slow and reports
+          // nothing you can act on, since you did not write any of it.
+          ignores: [
+            "node_modules/",
+            "dist/",
+            "build/",
+            "coverage/",
+            ".output/",
+            ".nuxt/",
+            ".svelte-kit/",
+            ".astro/",
+            ".vercel/",
+          ],
+        },
+        js.configs.recommended,
+        ...tseslint.configs.recommended,
+        {
+          languageOptions: {
+            ecmaVersion: "latest",
+            sourceType: "module",
+            // Server-side code: process, Buffer, __dirname and the rest are
+            // real here, and without this every use of one is no-undef.
+            globals: { ...globals.node },
+          },
+        },
+        // Last, so it wins: switches off every rule that would argue with
+        // Prettier about formatting. Rules that catch bugs are untouched.
+        prettier,
+      ];
+
+      // Component files (.vue, .astro, .svelte) are not linted by this config.
+      // Each needs its framework's own parser and plugin, which only that
+      // framework's users want installed:
+      //
+      //   Nuxt:      npm i -D eslint-plugin-vue    and add ...pluginVue.configs["flat/recommended"]
+      //   Astro:     npm i -D eslint-plugin-astro  and add ...eslintPluginAstro.configs.recommended
+      //   SvelteKit: npm i -D eslint-plugin-svelte and add ...eslintPluginSvelte.configs["flat/recommended"]
+  - path: .prettierrc.json
+    content: |
+      {
+        "semi": true,
+        "singleQuote": false,
+        "printWidth": 100,
+        "trailingComma": "all"
+      }

@@ -1,0 +1,145 @@
+id: laravel-inertia-react
+kind: frontend
+label: Inertia 2 + React (SPA feel, one Laravel codebase)
+appliesTo: [laravel]
+requires: [php]
+provides: [frontend, inertia, react]
+priority: 60 # after backend + env + db + services
+install:
+  - "{{start}}"
+  - "{{composer}} require inertiajs/inertia-laravel"
+  - "{{exec}} bash -lc 'php artisan inertia:middleware'"
+  - "{{exec}} bash -lc 'npm install @inertiajs/react react react-dom @vitejs/plugin-react'"
+  - "{{exec}} bash -lc 'npm install -D tailwindcss @tailwindcss/vite'"
+  - "{{restart}}"
+smoke:
+  - "{{exec}} bash -lc 'npm run build'"
+files:
+  - path: resources/views/app.blade.php
+    content: |
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          @viteReactRefresh
+          @vite(['resources/css/app.css', 'resources/js/app.jsx'])
+          @inertiaHead
+      </head>
+      <body>
+          @inertia
+      </body>
+      </html>
+  - path: vite.config.js
+    content: |
+      import { defineConfig } from 'vite';
+      import laravel from 'laravel-vite-plugin';
+      import react from '@vitejs/plugin-react';
+      import tailwindcss from '@tailwindcss/vite';
+
+      export default defineConfig({
+          plugins: [
+              laravel({ input: ['resources/css/app.css', 'resources/js/app.jsx'], refresh: true }),
+              react(),
+              tailwindcss(),
+          ],
+      });
+  - path: resources/css/app.css
+    content: |
+      @import "tailwindcss";
+  - path: resources/js/app.jsx
+    content: |
+      import { createInertiaApp } from '@inertiajs/react';
+      import { createRoot } from 'react-dom/client';
+
+      createInertiaApp({
+          resolve: (name) => {
+              const pages = import.meta.glob('./Pages/**/*.jsx', { eager: true });
+              return pages[`./Pages/${name}.jsx`];
+          },
+          setup({ el, App, props }) {
+              createRoot(el).render(<App {...props} />);
+          },
+      });
+  - path: resources/js/Pages/Home.jsx
+    content: |
+      // keel: a production-ready landing page that proves Inertia + React + Tailwind are wired.
+      const features = [
+          ['Inertia + React', 'React pages driven by Laravel routing, no separate API.'],
+          ['Blade + Eloquent', 'Server-side routing and ORM behind the SPA feel.'],
+          ['keel-managed', 'keel run dev · test · build, one vocabulary.'],
+      ];
+
+      export default function Home() {
+          return (
+              <main className="min-h-screen bg-slate-950 text-slate-100">
+                  <div className="mx-auto max-w-3xl px-6 py-20">
+                      <span className="inline-flex items-center gap-2 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-300">
+                          <span className="size-1.5 rounded-full bg-emerald-400" /> running
+                      </span>
+                      <h1 className="mt-6 text-4xl font-bold tracking-tight sm:text-5xl">
+                          Your Laravel app is running
+                      </h1>
+                      <p className="mt-4 text-lg text-slate-400">
+                          Built with Inertia + React, scaffolded by keel. Edit{' '}
+                          <code className="rounded bg-slate-800 px-1.5 py-0.5 text-sm">resources/js/Pages/Home.jsx</code>{' '}
+                          to make it yours.
+                      </p>
+                      <div className="mt-8 flex flex-wrap gap-3">
+                          <a
+                              href="https://coullworks.com/tools/keel"
+                              className="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-emerald-400"
+                          >
+                              keel docs
+                          </a>
+                          <a
+                              href="https://inertiajs.com"
+                              className="rounded-lg border border-slate-700 px-4 py-2 text-sm font-semibold hover:bg-slate-900"
+                          >
+                              Inertia docs
+                          </a>
+                      </div>
+                      <div className="mt-12 grid gap-4 sm:grid-cols-3">
+                          {features.map(([title, body]) => (
+                              <div
+                                  key={title}
+                                  className="rounded-xl border border-slate-800 bg-slate-900/50 p-5"
+                              >
+                                  <h2 className="font-semibold">{title}</h2>
+                                  <p className="mt-1 text-sm text-slate-400">{body}</p>
+                              </div>
+                          ))}
+                      </div>
+                  </div>
+              </main>
+          );
+      }
+  - path: FRONTEND-SETUP.md
+    content: |
+      # Frontend: Inertia 2 + React (installed by keel)
+
+      keel installed `inertiajs/inertia-laravel`, generated the Inertia middleware,
+      installed the React client + Vite plugin, wired Tailwind CSS (v4, via the Vite
+      plugin), and set up `resources/views/app.blade.php`, `vite.config.js`,
+      `resources/js/app.jsx`, `resources/css/app.css` and a Tailwind-styled
+      `Pages/Home.jsx` landing page.
+
+      ## Two manual steps (Laravel 11+)
+      1. Register the middleware in `bootstrap/app.php`:
+         ```php
+         ->withMiddleware(function (Middleware $middleware) {
+             $middleware->web(append: [
+                 \App\Http\Middleware\HandleInertiaRequests::class,
+             ]);
+         })
+         ```
+      2. Point a route at a page in `routes/web.php`:
+         ```php
+         use Inertia\Inertia;
+
+         Route::get('/', fn () => Inertia::render('Home'));
+         ```
+
+      Run `npm run dev` and visit `/`. Add pages under `resources/js/Pages`.
+      Tailwind is already wired (`resources/css/app.css`); pair with shadcn/ui when
+      you need a component library.

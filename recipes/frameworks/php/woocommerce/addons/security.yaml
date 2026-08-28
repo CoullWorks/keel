@@ -1,0 +1,27 @@
+id: woo-security
+kind: addon
+label: Security hardening (disable file edit, lock down config)
+appliesTo: [woocommerce]
+provides: [security-hardening]
+default: true
+install:
+  - "{{wp}} config set DISALLOW_FILE_EDIT true --raw"
+  - "{{wp}} config set WP_AUTO_UPDATE_CORE minor"
+files:
+  - path: SECURITY.md
+    content: |
+      # Security baseline (WooCommerce / WordPress)
+
+      keel disabled the in-dashboard file editor and set minor-version auto-updates.
+      Before go-live:
+
+      - [ ] **Admin**: strong unique passwords; enforce 2FA; rename/limit the
+            default `admin` user; limit login attempts.
+      - [ ] **XML-RPC**: disable if unused (common brute-force + DDoS vector).
+      - [ ] **Least plugins**: every plugin is attack surface; remove unused ones,
+            keep the rest patched (the FishPig supply-chain compromise reached 200k+
+            stores via a trusted extension).
+      - [ ] **Checkout script integrity (PCI DSS 4.0.1, mandatory Mar 2025)**:
+            inventory + integrity-check payment-page scripts; add a CSP.
+      - [ ] **Headers/TLS**: HTTPS everywhere, HSTS, secure + HttpOnly cookies.
+      - [ ] **Backups**: automated, off-site, tested restores.

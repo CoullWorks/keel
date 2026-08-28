@@ -1,0 +1,156 @@
+id: nginx-nuxt
+schema_version: 2
+kind: config
+label: Nuxt server block for NGINX
+updated: 2026-08-12
+# Written from docs/infra/nuxt.md, and the honest headline is that almost none
+# of this is vendor guidance.
+#
+# Nuxt v4 and Nitro publish NO nginx configuration, no required forwarded
+# header, and no buffering or timeout guidance. The only nginx block Nuxt has
+# ever published is in the Nuxt 2 legacy documentation, which the site itself
+# banners as superseded and which was written for a pre-Nitro server
+# (Connect/Express). The four proxy_set_header lines and the one minute timeouts
+# below come from that page and are conventional enough to be safe; everything
+# else in this file is keel's inference. No current Nuxt or Nitro page states
+# that Nitro reads X-Forwarded-Proto or X-Forwarded-Host, or what happens if
+# they are absent, and this recipe does not claim otherwise.
+#
+# Division of labour. The shared NGINX service (recipes/infra/web/nginx.yaml)
+# owns .keel/nginx/nginx.conf: worker and http-level tuning, the log format,
+# gzip and its type list, server_tokens off, the default security headers,
+# real_ip from the trusted proxy, and the default client_max_body_size and
+# proxy timeouts. This recipe owns one server block and the compose wiring.
+when:
+  framework: nuxt
+  uses: nginx
+files:
+  - path: docker/nginx/conf.d/app.conf
+    content: |
+      # Nuxt on the Nitro node-server preset, proxied. Included by the shared
+      # nginx.conf from /etc/nginx/conf.d/*.conf; http-level config lives there.
+      server {
+        listen 80;
+        server_name _;
+
+        # Restates the shared default rather than overriding it. Nuxt and Nitro
+        # publish no body-size guidance whatsoever, so 1m is keel's number and
+        # there is no framework limit to align it with.
+        client_max_body_size 1m;
+
+        location / {
+          proxy_pass http://app:3000;
+
+          # These four are the Nuxt 2 legacy block, carried forward because they
+          # are conventional, not because a current page endorses them.
+          proxy_set_header Host              $host;
+          proxy_set_header X-Real-IP         $remote_addr;
+          proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+
+          # Append, not overwrite: nginx adds the real peer to whatever the
+          # client sent, and the framework walks the list from the right
+          # discarding trusted hops, so a client-supplied prefix is dropped
+          # before it can become the client IP. That holds while the real client
+          # is outside the trusted ranges, which is the internet-facing case. If
+          # this app only ever serves traffic that is itself inside those ranges,
+          # switch to `$remote_addr` here so the header is true by construction,
+          # which is what the Hono recipe has to do because Hono has no walk at
+          # all. Keep the append form if a CDN or load balancer sits in front and
+          # you need its hop preserved, and widen the trusted set to match.
+
+          proxy_set_header X-Forwarded-Proto $scheme;
+          # Not in the legacy block. Added for consistency with the other eight
+          # and because setting it here replaces any copy the client sent.
+          proxy_set_header X-Forwarded-Host  $host;
+
+          # The legacy block's one minute timeouts, restated because they are
+          # the only numbers Nuxt has ever published for a proxy. nginx's own
+          # defaults are 60s for both, so these agree with the shared defaults
+          # rather than overriding them; they are here so the number is visible
+          # next to its source.
+          proxy_connect_timeout 1m;
+          proxy_read_timeout    1m;
+
+          # Overrides the shared default (nginx documents proxy_buffering on).
+          # Nitro streams responses, so a buffering proxy holds a streamed body
+          # until it completes. Neither Nuxt nor Nitro makes a statement either
+          # way, so this is keel's inference, unlike Next.js where the vendor
+          # publishes the requirement outright.
+          proxy_buffering off;
+
+          # Dev-mode HMR uses a Vite WebSocket. Nuxt documents neither
+          # vite.server.hmr nor vite.server.allowedHosts, so any HMR-behind-proxy
+          # behaviour is Vite knowledge rather than Nuxt-published guidance.
+          # Harmless in production, where nothing upgrades.
+          proxy_set_header Upgrade    $http_upgrade;
+          proxy_set_header Connection "upgrade";
+        }
+
+        # /_nuxt/ is where Nitro puts the hashed client build assets. Nuxt
+        # publishes NO Cache-Control guidance, so the value below is keel's
+        # convention, justified only by the filenames being content-hashed. It
+        # is applied here and nowhere else: the HTML around these assets is
+        # rendered per request and must not be cached.
+        #
+        # proxy_hide_header first, so the app's own header cannot arrive
+        # alongside this one and leave the browser with two Cache-Control
+        # values. Note that declaring add_header in this location stops the
+        # shared http-level add_header directives being inherited into it, which
+        # is nginx's documented behaviour: if the shared nginx.conf sets
+        # security headers with add_header, repeat them here.
+        location /_nuxt/ {
+          proxy_pass http://app:3000;
+          proxy_set_header Host              $host;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          # Static assets do not stream, and buffering frees the upstream
+          # connection sooner. Overrides the proxy_buffering off above.
+          proxy_buffering on;
+          proxy_hide_header Cache-Control;
+          add_header Cache-Control "public, max-age=31536000, immutable" always;
+        }
+
+        # Answered by nginx, so the web tier's liveness does not depend on the
+        # app or on a rendering path. add_header at this level stops the shared
+        # http-level add_header directives being inherited into it, which is
+        # nginx's documented behaviour and is harmless for a health endpoint.
+        location = /healthz {
+          access_log off;
+          add_header Content-Type text/plain;
+          return 200 "ok\n";
+        }
+      }
+provision:
+  compose:
+    files:
+      - path: compose.override.yaml
+        content: |
+          # Compose merges compose.override.yaml over compose.yaml with no extra
+          # flags, so the app service written by the env recipe is untouched.
+          services:
+            nginx:
+              image: nginx:1.27-alpine
+              restart: unless-stopped
+              depends_on:
+                app:
+                  condition: service_healthy
+              ports:
+                - "${HTTP_PORT:-8080}:80"
+              volumes:
+                # Shared, owned by recipes/infra/web/nginx.yaml.
+                - ./.keel/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+                # This framework's server block, owned by this recipe.
+                - ./docker/nginx/conf.d:/etc/nginx/conf.d:ro
+              healthcheck:
+                test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+                interval: 15s
+                timeout: 5s
+                retries: 5
+                start_period: 10s
+              # Nitro's NITRO_SHUTDOWN_TIMEOUT defaults to 30000 ms, so the app
+              # can take 30 seconds to drain. The proxy in front of it gets the
+              # same grace period rather than being killed first.
+              stop_grace_period: 30s
+  # Native env: no container to add. The server block above still applies, but
+  # change proxy_pass to http://127.0.0.1:3000 because there is no `app` host,
+  # which is what the Nuxt 2 legacy block did.
+  local: {}

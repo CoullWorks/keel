@@ -1,0 +1,157 @@
+id: nginx-dash
+schema_version: 2
+kind: config
+label: Dash server block for NGINX
+updated: 2026-08-12
+# Written from docs/infra/dash.md. Dash publishes no nginx configuration: none
+# of its pages contains a reverse-proxy config, a proxy_set_header line, a
+# buffering directive or a timeout. That is a gap in the vendor documentation,
+# not in the research. Everything here is inherited from Flask's nginx page and
+# gunicorn's deploy page, because Dash is a Flask app served by gunicorn, and is
+# labelled where it is neither.
+#
+# Two things here are Dash-specific. The body-size cap matters more than for the
+# other Python blocks, because dcc.Upload pushes whole file bodies through the
+# proxy. And the read timeout is raised to 120s to match the longer gunicorn
+# --timeout a callback workload needs.
+#
+# There are no websocket upgrade headers, and that is correct: no Dash page
+# describes a websocket transport for normal callbacks, and background callbacks
+# go through a Celery broker rather than a socket.
+#
+# Division of labour. The shared NGINX service (recipes/infra/web/nginx.yaml)
+# owns .keel/nginx/nginx.conf: worker and http-level tuning, the log format,
+# gzip and its type list, server_tokens off, the default security headers,
+# real_ip from the trusted proxy, and the default client_max_body_size and proxy
+# timeouts. This recipe owns one server block and the compose wiring.
+when:
+  framework: dash
+  uses: nginx
+files:
+  - path: docker/nginx/conf.d/app.conf
+    content: |
+      # Dash behind gunicorn, proxied. Included by the shared nginx.conf from
+      # /etc/nginx/conf.d/*.conf; http-level config lives there.
+
+      upstream dash_app {
+        # The compose service name. Under the native env there is no `app` host:
+        # change this to 127.0.0.1:8000, which is the shape Flask's nginx page
+        # assumes and Dash inherits.
+        #
+        # No sticky sessions and no ip_hash, deliberately. Dash "was designed to
+        # be a stateless framework" with "independent sessions", so replicas
+        # behind a plain round robin are correct. This is the only one of Dash,
+        # Streamlit, Gradio and Reflex where that is true without extra
+        # machinery, provided the app respects the contract: with several workers
+        # "their memory is not shared", so a mutated global "would affect the
+        # next user's session", and caches belong in Flask-Caching backed by
+        # Redis rather than in process memory.
+        #
+        # fail_timeout=0 is gunicorn's own documented value.
+        server app:8000 fail_timeout=0;
+      }
+
+      server {
+        listen 80;
+        server_name _;
+
+        # Overrides the shared default, and matters more for Dash than for most:
+        # dcc.Upload pushes whole file bodies through the proxy, and nginx's
+        # default of 1m rejects them long before gunicorn sees them. gunicorn's
+        # own sample uses 4G. 25 MiB here is a denial-of-service ceiling, not a
+        # target: raise it to whatever dcc.Upload is actually expected to carry.
+        client_max_body_size 25m;
+
+        # Dash's own component bundles. Serving them through the proxy with a
+        # browser cache header keeps repeat visits off the app entirely. Dash
+        # documents no static-offload strategy at all, so this is keel's
+        # convention; the long cache is safe only because these URLs carry the
+        # Dash version.
+        location /_dash-component-suites/ {
+          proxy_pass http://dash_app;
+          proxy_set_header Host              $http_host;
+          proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          access_log off;
+          expires 7d;
+          add_header Cache-Control "public";
+        }
+
+        location / {
+          proxy_pass http://dash_app;
+          proxy_redirect off;
+
+          # Flask's block, which Dash inherits. X-Forwarded-Prefix pairs with
+          # ProxyFix's x_prefix.
+          proxy_set_header Host              $http_host;
+          proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header X-Forwarded-Host  $host;
+          proxy_set_header X-Forwarded-Prefix /;
+
+          # Buffering stays on, which is nginx's default and the reason gunicorn
+          # insists on a proxy: its sync worker "Requires a buffering proxy
+          # (nginx, HAProxy) for production".
+          proxy_connect_timeout 5s;
+          proxy_send_timeout    120s;
+          # 120s, overriding nginx's own 60s default, to match the gunicorn
+          # --timeout of 120 this stack runs. A callback that queries a warehouse
+          # legitimately outlives 60s, and if nginx gives up first the browser
+          # sees a 504 while the worker is still happily computing. Anything
+          # routinely longer belongs in a background callback, not in a bigger
+          # number here.
+          proxy_read_timeout    120s;
+        }
+
+        # Answered by nginx, so the web tier's liveness does not depend on Dash
+        # serialising a layout. add_header at this level stops the shared
+        # http-level add_header directives being inherited into it, which is
+        # nginx's documented behaviour and is harmless for a health endpoint.
+        location = /healthz {
+          access_log off;
+          add_header Content-Type text/plain;
+          return 200 "ok\n";
+        }
+      }
+
+      # None of the above is enough on its own. Whether Dash applies Werkzeug's
+      # ProxyFix to its internal Flask server is undocumented, so assume it does
+      # not and apply it to app.server, sized to the real chain:
+      #
+      #   from werkzeug.middleware.proxy_fix import ProxyFix
+      #   app.server.wsgi_app = ProxyFix(app.server.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+      #
+      # Flask: "It can be a security issue if you get this configuration wrong."
+provision:
+  compose:
+    files:
+      - path: compose.override.yaml
+        content: |
+          # Compose merges compose.override.yaml over compose.yaml with no extra
+          # flags, so the app service written by the env recipe is untouched.
+          services:
+            nginx:
+              image: nginx:1.27-alpine
+              restart: unless-stopped
+              depends_on:
+                app:
+                  condition: service_healthy
+              ports:
+                - "${HTTP_PORT:-8080}:80"
+              volumes:
+                # Shared, owned by recipes/infra/web/nginx.yaml.
+                - ./.keel/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+                # This framework's server block, owned by this recipe.
+                - ./docker/nginx/conf.d:/etc/nginx/conf.d:ro
+              healthcheck:
+                test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+                interval: 15s
+                timeout: 5s
+                retries: 5
+                start_period: 10s
+              # Matches the app's stop_grace_period, so the proxy is not killed
+              # while gunicorn is still draining a callback it forwarded.
+              stop_grace_period: 45s
+  # Native env: no container to add. The server block above still applies, but
+  # change the upstream to 127.0.0.1:8000.
+  local: {}

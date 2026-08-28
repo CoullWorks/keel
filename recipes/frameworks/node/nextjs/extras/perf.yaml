@@ -1,0 +1,69 @@
+id: nextjs-perf
+kind: extra
+label: Core Web Vitals preset (Lighthouse budget + CI)
+appliesTo: [nextjs]
+provides: [performance]
+files:
+  - path: lighthouserc.json
+    content: |
+      {
+        "ci": {
+          "collect": {
+            "startServerCommand": "npm run start",
+            "url": ["http://localhost:3000/"],
+            "numberOfRuns": 3
+          },
+          "assert": {
+            "assertions": {
+              "categories:performance": ["warn", { "minScore": 0.9 }],
+              "largest-contentful-paint": ["error", { "maxNumericValue": 2500 }],
+              "cumulative-layout-shift": ["error", { "maxNumericValue": 0.1 }],
+              "total-blocking-time": ["error", { "maxNumericValue": 200 }],
+              "first-contentful-paint": ["warn", { "maxNumericValue": 1800 }],
+              "interactive": ["warn", { "maxNumericValue": 3800 }]
+            }
+          },
+          "upload": { "target": "temporary-public-storage" }
+        }
+      }
+  - path: .github/workflows/lighthouse.yml
+    content: |
+      name: Lighthouse (Core Web Vitals)
+      on: [pull_request]
+      jobs:
+        lighthouse:
+          runs-on: ubuntu-latest
+          steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-node@v4
+              with:
+                node-version: 20
+            - run: npm ci
+            - run: npm run build
+            - run: npm install -g @lhci/cli@0.14.x
+            # Budgets live in lighthouserc.json. A regression past the CWV
+            # thresholds fails the PR before it ships.
+            - run: lhci autorun
+  - path: PERFORMANCE.md
+    content: |
+      # Core Web Vitals (Next.js)
+
+      keel wired a Lighthouse budget (`lighthouserc.json`) and a PR check
+      (`.github/workflows/lighthouse.yml`). The gate is the Google "good"
+      thresholds: **LCP <= 2.5s, INP <= 200ms (TBT proxy in lab), CLS <= 0.1**.
+
+      ## The wins that actually move CWV
+      - **Images**: always `next/image`; set `width`/`height` or `fill` to
+        reserve space (kills CLS); `priority` on the LCP image only. Run
+        `keel optimize` to find raw `<img>` and missing dimensions.
+      - **Fonts**: `next/font` (self-hosted, `display: swap`); preload the one
+        font used above the fold. No render-blocking webfont CSS.
+      - **Rendering**: Server Components by default; keep client JS small.
+        Static/ISR where you can; stream with Suspense so LCP paints early.
+      - **Third-party JS**: the #1 INP/TBT killer. Load analytics/chat with
+        `next/script strategy="lazyOnload"`; audit every tag's cost.
+      - **Layout stability**: reserve space for embeds, ads and late content;
+        never inject above existing content after load.
+
+      Measure locally: `npm run build && npm run start`, then Lighthouse in
+      Chrome DevTools (mobile, throttled). Chase field data (CrUX) not just lab.

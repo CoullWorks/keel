@@ -1,0 +1,9 @@
+id: horizon
+kind: addon
+label: Horizon (queues dashboard)
+appliesTo: [laravel]
+requires: [redis]
+provides: [queue-dashboard]
+install:
+  - "{{composer}} require laravel/horizon"
+  - "{{artisan}} horizon:install"

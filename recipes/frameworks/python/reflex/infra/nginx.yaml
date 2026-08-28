@@ -1,0 +1,277 @@
+id: nginx-reflex
+schema_version: 2
+kind: config
+label: Reflex server block for NGINX
+updated: 2026-08-12
+# Written from docs/infra/reflex.md. Reflex ships a Caddyfile and no nginx
+# config, so this is a faithful translation of it. The vendor file, verbatim:
+#
+#   {$DOMAIN}
+#
+#   encode gzip
+#
+#   @backend_routes path /_event/* /ping /_upload /_upload/*
+#   handle @backend_routes {
+#       reverse_proxy app:8000
+#   }
+#
+#   root * /srv
+#   route {
+#       try_files {path} {path}/ /404.html
+#       file_server
+#   }
+#
+# Three things in that are load-bearing and are reproduced exactly below:
+#
+#   1. ONLY four paths go to the backend: /_event/* (the event websocket),
+#      /ping, /_upload and /_upload/*. Everything else is a static file. If the
+#      app adds backend API routes, the vendor says "those should be added to
+#      the @backend_routes path matcher"; add a matching location here too.
+#   2. The fallback is /404.html, NOT /index.html. The vendor: "Most static
+#      hosts will automatically use the /404.html file to handle 404 errors.
+#      This is essential for dynamic routes to work correctly." A conventional
+#      `try_files $uri $uri/ /index.html` breaks Reflex dynamic routes.
+#   3. `encode gzip` is Caddy's compression and is deliberately NOT reproduced
+#      here, because gzip and its type list belong to the shared nginx service.
+#
+# What does not translate: Caddy upgrades websockets transparently, which is why
+# no Upgrade header appears in the vendor file. nginx does not, so the upgrade
+# directives on the /_event/ location are keel's inference rather than vendor
+# text. Caddy also provisions TLS automatically; TLS here is the shared
+# service's business.
+#
+# Division of labour. The shared NGINX service (recipes/infra/web/nginx.yaml)
+# owns .keel/nginx/nginx.conf: worker and http-level tuning, the log format,
+# gzip and its type list, server_tokens off, the default security headers,
+# real_ip from the trusted proxy, and the default client_max_body_size and proxy
+# timeouts. This recipe owns one server block and the compose wiring.
+when:
+  framework: reflex
+  uses: nginx
+files:
+  - path: docker/nginx/conf.d/app.conf
+    content: |
+      # Reflex: static frontend plus four backend routes. Translated from the
+      # vendor Caddyfile. Included by the shared nginx.conf from
+      # /etc/nginx/conf.d/*.conf; http-level config lives there.
+
+      upstream reflex_backend {
+        # The compose service name, matching the vendor's `reverse_proxy
+        # app:8000`. Under the native env there is no `app` host: change this to
+        # 127.0.0.1:8000 and set backend_host to 127.0.0.1 in rxconfig.py.
+        #
+        # No sticky sessions, deliberately. With REFLEX_REDIS_URL set the vendor
+        # calls the backend "scalable to multiple instances" and never mentions
+        # session affinity; that silence is the basis for leaving it out. Without
+        # Redis, state is on local disk and there must only ever be one instance
+        # anyway.
+        server app:8000 fail_timeout=0;
+      }
+
+      # The frontend. In dev this is Reflex's own Vite dev server, which
+      # `reflex run` starts on 3000 and which serves the app with hot reload.
+      #
+      # The vendor's Caddyfile has no equivalent, because it describes
+      # production: there the frontend has already been compiled to static files
+      # and Caddy serves them from /srv. keel followed that shape here and it
+      # could not work. The compose stack builds the Dockerfile's dev stage, and
+      # only the build stage runs `reflex export`, so nothing ever produced those
+      # files: every request for / met an empty directory and nginx answered 403.
+      #
+      # Serving a static export in dev would have been wrong even once the files
+      # existed. It freezes the frontend at build time, so editing a component
+      # changes nothing until you re-export by hand.
+      upstream reflex_frontend {
+        server app:3000 fail_timeout=0;
+      }
+
+      server {
+        listen 80;
+        server_name _;
+
+        # No root, because nothing here is served from disk. For the production
+        # topology - the Dockerfile's runtime stage, where
+        # `reflex export --frontend-only --no-zip` has run - mount the exported
+        # client build at /srv, set `root /srv;` here, and swap the `location /`
+        # block below for the vendor's static form:
+        #
+        #   location / { try_files $uri $uri/ /404.html; }
+        #
+        # The fallback is 404.html and not index.html on purpose: the vendor
+        # calls it "essential for dynamic routes to work correctly".
+
+        # Overrides the shared default. Uploads land on the backend at /_upload,
+        # and nginx's own client_max_body_size default of 1m rejects them there
+        # before Reflex sees them. Reflex publishes no figure, so 100m is keel's:
+        # set it to whatever rx.upload is actually expected to carry.
+        client_max_body_size 100m;
+
+        # ---- backend routes: the vendor's @backend_routes matcher ----
+        # Caddy's `path /_event/*` is a prefix match, so nginx's prefix location
+        # is the direct equivalent. `path /ping` and `path /_upload` are exact,
+        # so those use `location =`. Order does not matter to nginx (exact
+        # matches beat prefixes) but the set must stay exactly these four.
+
+        # The event websocket. The upgrade directives are keel's, not Reflex's:
+        # Caddy upgrades transparently, so the vendor file has nothing to copy.
+        # proxy_http_version is explicit because nginx only made 1.1 the default
+        # in 1.29.7.
+        location /_event/ {
+          proxy_pass http://reflex_backend;
+          proxy_http_version 1.1;
+          proxy_set_header Upgrade    $http_upgrade;
+          proxy_set_header Connection "upgrade";
+          proxy_set_header Host              $http_host;
+          proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header X-Real-IP         $remote_addr;
+          proxy_redirect off;
+
+          # Overrides the shared default of on. A socket is a stream, not a
+          # response to accumulate.
+          proxy_buffering off;
+
+          # Overrides nginx's own 60s default. nginx documents it: "By default,
+          # the connection will be closed if the proxied server does not transmit
+          # any data within 60 seconds." A user reading a page transmits nothing
+          # on the event socket, so at the default the session drops after a
+          # minute. 3600s is keel's number; Reflex publishes none.
+          proxy_connect_timeout 5s;
+          proxy_send_timeout    3600s;
+          proxy_read_timeout    3600s;
+        }
+
+        # The documented health probe. "Make sure when you access the ingress
+        # endpoint on /ping that it returns 'pong', indicating that the backend
+        # is up an available."
+        location = /ping {
+          proxy_pass http://reflex_backend;
+          proxy_set_header Host              $http_host;
+          proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_connect_timeout 3s;
+          proxy_read_timeout    10s;
+          access_log off;
+        }
+
+        # Uploads, both the exact path and everything under it, matching the
+        # vendor's `/_upload /_upload/*`.
+        location = /_upload {
+          proxy_pass http://reflex_backend;
+          proxy_set_header Host              $http_host;
+          proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          # Overrides the shared default of on, for the request side only: an
+          # upload should stream to the backend rather than be spooled to a
+          # temporary file on the proxy first.
+          proxy_request_buffering off;
+          proxy_connect_timeout 5s;
+          proxy_send_timeout    300s;
+          proxy_read_timeout    300s;
+        }
+        location /_upload/ {
+          proxy_pass http://reflex_backend;
+          proxy_set_header Host              $http_host;
+          proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_request_buffering off;
+          proxy_connect_timeout 5s;
+          proxy_send_timeout    300s;
+          proxy_read_timeout    300s;
+        }
+
+        # If the app adds its own backend API routes, add them here too. The
+        # vendor's instruction for the Caddyfile applies verbatim: "those should
+        # be added to the @backend_routes path matcher to ensure they are
+        # forwarded to the backend".
+
+        # ---- everything else: the frontend dev server ----
+        # This is the vendor's static file_server position in the routing order,
+        # serving from the dev server instead of from disk. It has to be a
+        # catch-all: Vite serves the app, its own client at /@vite/, source
+        # modules at /@fs/ and /node_modules/, and the hashed assets, and none of
+        # those paths are worth enumerating when the rule is simply "not a
+        # backend route".
+        location / {
+          proxy_pass http://reflex_frontend;
+          # Vite's hot module reload is a websocket. Without the upgrade
+          # headers it falls back to polling at best, and the browser console
+          # fills with failed connections.
+          proxy_http_version 1.1;
+          proxy_set_header Upgrade    $http_upgrade;
+          proxy_set_header Connection "upgrade";
+          proxy_set_header Host              $http_host;
+          proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header X-Real-IP         $remote_addr;
+          proxy_redirect off;
+
+          # A dev server streams: a rebuild pushes an update down the open
+          # socket. Buffering that would hold it back until the buffer filled.
+          proxy_buffering off;
+          proxy_connect_timeout 5s;
+          proxy_send_timeout    3600s;
+          proxy_read_timeout    3600s;
+        }
+
+        # No cache-control block for the compiled assets. Reflex's export output
+        # is content-hashed and could be served immutable for a year, but there
+        # is no export here: a dev server rebuilds on every edit, and caching its
+        # output is precisely what must not happen. Restore the vendor-adjacent
+        # form alongside `root /srv` when serving a production build:
+        #
+        #   location /assets/ { expires 1y; add_header Cache-Control "public, immutable"; }
+
+        # Answered by nginx, so the web tier's liveness does not depend on the
+        # backend. /ping is the backend's own probe and is proxied above.
+        location = /healthz {
+          access_log off;
+          add_header Content-Type text/plain;
+          return 200 "ok\n";
+        }
+      }
+provision:
+  compose:
+    files:
+      - path: compose.override.yaml
+        content: |
+          # Compose merges compose.override.yaml over compose.yaml with no extra
+          # flags, so the app service written by the env recipe is untouched.
+          services:
+            nginx:
+              image: nginx:1.27-alpine
+              restart: unless-stopped
+              depends_on:
+                app:
+                  condition: service_healthy
+              ports:
+                - "${HTTP_PORT:-8080}:80"
+              volumes:
+                # Shared, owned by recipes/infra/web/nginx.yaml.
+                - ./.keel/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+                # This framework's server block, owned by this recipe.
+                - ./docker/nginx/conf.d:/etc/nginx/conf.d:ro
+                # No /srv mount. The frontend is proxied from the dev server, not
+                # read from disk - see the upstream note in the server block. For
+                # the production topology, mount the exported client build here
+                # as `- frontend:/srv:ro`, which is the job the vendor's
+                # Caddy.Dockerfile does with
+                # `COPY --from=local/reflex-app /app/.web/build/client /srv`.
+              healthcheck:
+                # /ping through the proxy would prove the backend too, but it is
+                # the app's own healthcheck that owns that. This one is nginx's
+                # own liveness, so a backend restart does not mark the web tier
+                # unhealthy and take the static frontend down with it.
+                test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+                interval: 15s
+                timeout: 5s
+                retries: 5
+                start_period: 10s
+              # Reflex's own STOPSIGNAL is SIGKILL because it "does not pass
+              # SIGTERM on backend", so there is nothing to drain and a long
+              # window would only slow every deploy down.
+              stop_grace_period: 10s
+  # Native env: no container to add. The server block above still applies, but
+  # change the two upstreams to 127.0.0.1:8000 and 127.0.0.1:3000, and set
+  # backend_host to 127.0.0.1 in rxconfig.py.
+  local: {}

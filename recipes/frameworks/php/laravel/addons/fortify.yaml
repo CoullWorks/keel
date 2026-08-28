@@ -1,0 +1,9 @@
+id: laravel-fortify
+kind: addon
+label: Fortify (headless auth backend)
+appliesTo: [laravel]
+provides: [fortify]
+install:
+  - "{{composer}} require laravel/fortify"
+  - "{{artisan}} fortify:install"
+  - "{{artisan}} migrate --force"

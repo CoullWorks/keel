@@ -1,0 +1,272 @@
+id: rabbitmq
+schema_version: 2
+kind: service
+label: RabbitMQ 4.3 (message broker, tuned)
+category: Queue
+appliesTo: [laravel, django, magento, magento-mageos]
+provides: [rabbitmq, amqp]
+updated: 2026-08-12
+vars:
+  # The -management tag ships the management plugin already enabled, so there is
+  # no `rabbitmq-plugins enable` step and no restart to make the UI appear.
+  # https://hub.docker.com/_/rabbitmq
+  rabbitmq.version: "4.3-management"
+  rabbitmq.host: rabbitmq
+  rabbitmq.port: "5672"
+  rabbitmq.managementPort: "15672"
+  rabbitmq.user: app
+  rabbitmq.password: app
+  rabbitmq.vhost: "/"
+files:
+  - path: .keel/rabbitmq/rabbitmq.conf
+    content: |
+      # keel-generated: RabbitMQ 4.x node configuration.
+      #
+      # This is the modern sysctl-style rabbitmq.conf, not the old Erlang-term
+      # config. Settings that only exist in the Erlang format go in
+      # advanced.config; almost nothing needs to.
+      #
+      # Sized for a broker container with 1 GB of RAM.
+      #
+      # Sources, all fetched 2026-08-12:
+      #   [1] Memory alarms          https://www.rabbitmq.com/docs/memory
+      #   [2] Disk alarms            https://www.rabbitmq.com/docs/disk-alarms
+      #   [3] Production checklist   https://www.rabbitmq.com/docs/production-checklist
+      #   [4] Access control         https://www.rabbitmq.com/docs/access-control
+      #   [5] Monitoring and health checks  https://www.rabbitmq.com/docs/monitoring
+      #   [6] Quorum queues          https://www.rabbitmq.com/docs/quorum-queues
+
+      # ------------------------------------------------------------------ memory
+      # RabbitMQ blocks publishers when memory use crosses this line: "If the
+      # node's memory footprint goes above the value, a resource alarm will be
+      # triggered on this and eventually all other cluster nodes to block
+      # publishers." [1] That is back-pressure working as designed, not a fault.
+      #
+      # ABSOLUTE, not relative, and that is the container-specific decision:
+      # "When a RabbitMQ node is running in a container, its ability to detect the
+      # amount of available memory will depend on external factors: the version of
+      # the runtime used, the OS version and settings used by the image, the
+      # version of cgroups used, and ultimately the version of Kubernetes." and
+      # "Using an absolute memory threshold is highly recommended in
+      # containerized environments such as Kubernetes." [1]
+      # A relative watermark on a container that cannot see its own cgroup limit
+      # is computed from host memory, so a 1 GB container happily targets 60% of
+      # 32 GB and gets OOM-killed instead of blocking publishers.
+      #
+      # Arithmetic for a 1 GB container: 1024 MiB x 0.6 = 614 MiB. 0.6 is the
+      # 4.x default (it was 0.4 in 3.x, so an old config carried forward is
+      # needlessly conservative) and sits inside the documented band: "The
+      # recommended vm_memory_high_watermark.relative range is 0.4 to 0.7" and
+      # "Values above 0.7 should be used with care and with solid memory usage
+      # and infrastructure-level monitoring in place." [3]
+      vm_memory_high_watermark.absolute = 614MiB
+
+      # -------------------------------------------------------------------- disk
+      # "When free disk space drops below a configured limit (50 MB by default),
+      # an alarm will be triggered and all producers will be blocked." [2] 50 MB
+      # is far too little to be useful: by the time a broker notices, it has
+      # already had no room to page messages out, and "RabbitMQ will block
+      # producers and prevent memory-based messages from being paged to disk" [2].
+      #
+      # The documented rule: "The minimum recommended free disk space low
+      # watermark value is about the same as the high memory watermark. For
+      # example, on a node configured to have its memory watermark of 4GB,
+      # disk_free_limit.absolute = 4G would be a recommended minimum." [3]
+      # Memory watermark here is 614 MiB, so 1 GB clears it with margin.
+      #
+      # Absolute again, and for a second documented reason:
+      # "disk_free_limit.absolute is the recommended of the two options because
+      # it is easier to reason about." [2]
+      #
+      # Note the blast radius: "the disk alarm is cluster-wide; if one node goes
+      # under the limit then all nodes will block incoming messages." [2]
+      disk_free_limit.absolute = 1GB
+
+      # ------------------------------------------------------------------ access
+      # The default guest/guest account is restricted to loopback: "By default,
+      # the guest user is prohibited from connecting from remote hosts; it can
+      # only connect over a loopback interface (localhost)." [4] A remote attempt
+      # fails with "PLAIN login refused: user 'guest' can only connect via
+      # localhost", which reads like a broken password and is not.
+      #
+      # The fix is a real user (RABBITMQ_DEFAULT_USER / RABBITMQ_DEFAULT_PASS in
+      # the compose file), NOT `loopback_users = none`: "Allowing remote
+      # connections for the default user with well known default credentials is
+      # very strongly recommended against: doing so will dramatically reduce the
+      # security of the cluster." [4]
+      loopback_users.guest = true
+
+      # ------------------------------------------------------------------- ports
+      listeners.tcp.default = 5672
+      management.tcp.port = 15672
+
+      # -------------------------------------------------------------- queue type
+      # default_queue_type is deliberately NOT set. RabbitMQ 4.0 removed classic
+      # queue mirroring, so replicated queues now mean quorum queues, which are
+      # "a modern queue type which implements a durable, replicated queue based
+      # on the Raft consensus algorithm" and "should be considered the default
+      # choice when needing a replicated, highly available queue" [6].
+      #
+      # Setting `default_queue_type = quorum` node-wide looks like the obvious
+      # move and breaks clients: quorum queues cannot be exclusive or
+      # auto-delete, and libraries that declare temporary reply queues that way
+      # (Celery's, among others) fail at declaration time. Choose the type where
+      # the queue is declared, in the application, and set it per virtual host
+      # (`rabbitmqctl add_vhost app --default-queue-type quorum`) once you know
+      # every declaration is compatible.
+
+      # ----------------------------------------------------------- observability
+      log.console = true
+      log.console.level = info
+      log.file = false
+  - path: docker-compose.rabbitmq.yml
+    content: |
+      # keel-generated: RabbitMQ {{rabbitmq.version}}.
+      # Standalone: docker compose -f docker-compose.rabbitmq.yml up -d
+      # Or merged:  docker compose -f docker-compose.yml -f docker-compose.rabbitmq.yml up -d
+      services:
+        rabbitmq:
+          image: rabbitmq:{{rabbitmq.version}}
+          restart: unless-stopped
+          # A stable node name. RabbitMQ derives its data directory from the
+          # hostname, so a container that comes back with a new random hostname
+          # comes back with an empty broker and no explanation.
+          hostname: rabbitmq
+          environment:
+            # "If you wish to change the default username and password of guest /
+            # guest, you can do so with the RABBITMQ_DEFAULT_USER and
+            # RABBITMQ_DEFAULT_PASS environmental variables."
+            # https://hub.docker.com/_/rabbitmq
+            RABBITMQ_DEFAULT_USER: "{{rabbitmq.user}}"
+            RABBITMQ_DEFAULT_PASS: "{{rabbitmq.password}}"
+            RABBITMQ_DEFAULT_VHOST: "{{rabbitmq.vhost}}"
+          ulimits:
+            # "Make sure production environments allow for at least 50K open file
+            # descriptors for effective RabbitMQ user, including in development
+            # environments." and "Values as high as 500K are not inadequate and
+            # will not consume a lot of hardware resources, therefore, they are
+            # recommended for production setups."
+            # https://www.rabbitmq.com/docs/production-checklist
+            # Every connection and every queue index file costs descriptors.
+            nofile: {soft: 65536, hard: 65536}
+          volumes:
+            - rabbitmq-data:/var/lib/rabbitmq
+            - ./.keel/rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+          ports:
+            # AMQP and the management UI, both on loopback.
+            - "127.0.0.1:{{rabbitmq.port}}:5672"
+            - "127.0.0.1:{{rabbitmq.managementPort}}:15672"
+          healthcheck:
+            # Stage 1 of the documented health-check ladder: "The most basic
+            # check ensures that the runtime is running and (indirectly) that CLI
+            # tools can authenticate with it."
+            # https://www.rabbitmq.com/docs/monitoring
+            #
+            # Deliberately NOT the deeper stages. `check_local_alarms` fails
+            # while a memory or disk alarm is active, and an alarm on RabbitMQ is
+            # back-pressure, not death: the node is deliberately blocking
+            # publishers while consumers catch up. Wiring that to a container
+            # healthcheck means the orchestrator restarts a node that is busy
+            # recovering, which turns a slowdown into an outage.
+            #
+            # The vendor goes further: "RabbitMQ Kubernetes Operator configures a
+            # TCP port check on the AMQP port as the readinessProbe and defines
+            # no livenessProbe at all. This should be considered the best
+            # practice."
+            test: ["CMD-SHELL", "rabbitmq-diagnostics -q ping"]
+            interval: 15s
+            timeout: 10s
+            retries: 10
+            # The Erlang VM plus plugin startup is slow; the management plugin
+            # adds to it.
+            start_period: 60s
+      volumes:
+        rabbitmq-data:
+  - path: RABBITMQ.md
+    content: |
+      # RabbitMQ (scaffolded by keel)
+
+      AMQP `amqp://{{rabbitmq.user}}:{{rabbitmq.password}}@127.0.0.1:{{rabbitmq.port}}{{rabbitmq.vhost}}`
+      · management UI http://127.0.0.1:{{rabbitmq.managementPort}}
+      (`{{rabbitmq.user}}` / `{{rabbitmq.password}}`) · config
+      `.keel/rabbitmq/rabbitmq.conf`.
+
+      ## The two limits that decide how it behaves under load
+
+      - **Memory watermark** (`vm_memory_high_watermark.absolute`) - crossing it
+        blocks publishers cluster-wide until consumers catch up.
+      - **Disk watermark** (`disk_free_limit.absolute`) - crossing it blocks
+        publishers *and* stops messages being paged out of memory.
+
+      Both are set as absolute values rather than fractions, because a container
+      often cannot see its own memory limit and a fraction is then computed from
+      the host's RAM. Redo both if you change the container's memory limit.
+
+      ## Blocked publishers are not a bug
+
+      When an alarm is active, publishing connections stop making progress and
+      consumers keep running. That is the design. Do not "fix" it by restarting
+      the broker, and do not wire the deeper `rabbitmq-diagnostics` checks into a
+      container healthcheck, or the orchestrator will do exactly that for you.
+
+      ## Replication
+
+      Classic queue mirroring was removed in RabbitMQ 4.0. A replicated queue now
+      means a quorum queue, declared as such by the application (`x-queue-type:
+      quorum`) or defaulted per virtual host:
+
+          rabbitmqctl add_vhost app --default-queue-type quorum
+
+      Not node-wide: quorum queues cannot be exclusive or auto-delete, so a
+      node-wide default breaks client libraries that declare temporary reply
+      queues.
+provision:
+  ddev:
+    files:
+      - path: .ddev/docker-compose.rabbitmq.yaml
+        content: |
+          # keel-generated: RabbitMQ {{rabbitmq.version}} for DDEV.
+          # Rationale for every setting: .keel/rabbitmq/rabbitmq.conf.
+          services:
+            rabbitmq:
+              container_name: ddev-${DDEV_SITENAME}-rabbitmq
+              image: rabbitmq:{{rabbitmq.version}}
+              hostname: rabbitmq
+              restart: "no"
+              labels:
+                com.ddev.site-name: ${DDEV_SITENAME}
+                com.ddev.approot: ${DDEV_APPROOT}
+              environment:
+                - RABBITMQ_DEFAULT_USER={{rabbitmq.user}}
+                - RABBITMQ_DEFAULT_PASS={{rabbitmq.password}}
+                - RABBITMQ_DEFAULT_VHOST={{rabbitmq.vhost}}
+                - VIRTUAL_HOST=$DDEV_HOSTNAME
+                - HTTP_EXPOSE=15672:15672
+                - HTTPS_EXPOSE=15673:15672
+              ulimits:
+                nofile: {soft: 65536, hard: 65536}
+              expose:
+                - "5672"
+                - "15672"
+              volumes:
+                - rabbitmq:/var/lib/rabbitmq
+                # Relative to .ddev/, so this is the project-root copy.
+                - "../.keel/rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro"
+              healthcheck:
+                test: ["CMD-SHELL", "rabbitmq-diagnostics -q ping"]
+                interval: 15s
+                timeout: 10s
+                retries: 10
+                start_period: 60s
+            web:
+              depends_on:
+                - rabbitmq
+          volumes:
+            rabbitmq:
+    install:
+      - "{{restart}}"
+  compose: {}
+  sail: {}
+  local:
+    install:
+      - "docker compose -f docker-compose.rabbitmq.yml up -d"

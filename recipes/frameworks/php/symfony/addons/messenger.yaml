@@ -1,0 +1,9 @@
+id: symfony-messenger
+schema_version: 2
+kind: addon
+label: Messenger (queues and async message handling)
+appliesTo: [symfony]
+provides: [queue]
+updated: 2026-08-10
+install:
+  - "{{composer}} require symfony/messenger"

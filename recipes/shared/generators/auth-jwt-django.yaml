@@ -1,0 +1,11 @@
+# Auth as a level:stack generator (Django SimpleJWT). A second Django auth option
+# for API-only projects; points at the django-simplejwt addon that already exists.
+id: gen-auth-jwt-django
+kind: generator
+level: stack
+label: "Authentication (Django SimpleJWT - register/login/refresh API)"
+appliesTo: [django]
+provides: [auth-jwt]
+apply: [django-simplejwt]
+schema_version: 2
+updated: 2026-08-21

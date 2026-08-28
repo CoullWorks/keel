@@ -1,0 +1,200 @@
+id: apache-wordpress
+schema_version: 2
+kind: config
+label: WordPress and WooCommerce VirtualHost for Apache
+updated: 2026-08-12
+# Division of labour. The shared Apache service (recipes/infra/web/apache.yaml)
+# owns .keel/apache/keel-tuning.conf: MPM event tuning, the LoadModule lines for
+# mod_proxy, mod_proxy_fcgi, mod_rewrite, mod_headers and mod_expires, global
+# compression, ServerTokens Prod, the global security headers, and the
+# `IncludeOptional conf.d/app-*.conf` that pulls this file in. This recipe owns
+# one VirtualHost and the compose wiring.
+#
+# READ THIS BEFORE TRIMMING ANYTHING. The .htaccess WordPress generates contains
+# NO security rules at all: no deny on dotfiles, no deny on PHP inside uploads,
+# no protection for wp-config.php. The documented nginx recipe ships all three in
+# global/restrictions.conf. This is the single biggest parity gap between the two
+# servers in WordPress's own documentation, and copying only the generated
+# .htaccess leaves an Apache site materially less protected than the documented
+# nginx one. Everything below the rewrite block exists to close that gap,
+# assembled from the hardening guide. docs/infra/wordpress.md, sources 5, 6, 7.
+#
+# Sources: developer.wordpress.org/advanced-administration/server/web-server/httpd/
+# for the rewrite block, and .../security/hardening/ for the wp-config rule.
+#
+# WordPress has no public/ front controller directory: the document root is the
+# WordPress root, so wp-config.php, wp-admin/ and wp-includes/ are all inside the
+# served tree. Every deny here exists because of that.
+when:
+  # Both layouts: the docroot and content directory are variables the
+  # framework recipes set, so Bedrock reuses this tier rather than copying it.
+  frameworks: [woocommerce, woocommerce-bedrock]
+  uses: apache
+provision:
+  compose:
+    files:
+      - path: docker/apache/conf.d/app-wordpress.conf
+        # Not verbatim: the document root and content directory arrive as
+        # {{wp.docroot}} and {{wp.content_dir}}, which is what lets classic
+        # WordPress and Bedrock share this file instead of keeping two copies
+        # of the same security rules. Nothing else here uses braces.
+        content: |
+          # keel-generated. WordPress and WooCommerce VirtualHost. Included by the
+          # shared keel-tuning.conf.
+          <VirtualHost *:80>
+              ServerName localhost
+
+              DocumentRoot {{wp.docroot}}
+
+              # PHP goes to the FPM pool. Unlike Laravel and Symfony, WordPress
+              # has many legitimate PHP entry points (index.php, wp-login.php,
+              # wp-admin/*.php, wp-cron.php, admin-ajax.php), so this cannot be
+              # narrowed to a single front controller the way theirs are. The
+              # denies further down are what make that safe.
+              <FilesMatch "\.php$">
+                  SetHandler "proxy:fcgi://php:9000"
+              </FilesMatch>
+
+              <Directory {{wp.docroot}}>
+                  # The rewrite rules are inlined below, so Apache never looks for
+                  # a .htaccess. One consequence worth knowing: WordPress normally
+                  # expects to be able to rewrite the root .htaccess itself when
+                  # permalinks change. It does not need to. These are the same six
+                  # lines whatever permalink structure you choose, because the
+                  # structure is interpreted in PHP, not in Apache.
+                  AllowOverride None
+                  Require all granted
+                  Options -Indexes +FollowSymLinks
+                  DirectoryIndex index.php index.html
+
+                  # BEGIN WordPress, verbatim from the generated .htaccess.
+                  RewriteEngine On
+                  RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+                  RewriteBase /
+                  RewriteRule ^index\.php$ - [L]
+                  RewriteCond %{REQUEST_FILENAME} !-f
+                  RewriteCond %{REQUEST_FILENAME} !-d
+                  RewriteRule . /index.php [L]
+                  # END WordPress
+              </Directory>
+
+              # --- the rules the generated .htaccess does not have ---------------
+
+              # THE most important one. wp-content/uploads is writable by the web
+              # server by design, and WooCommerce writes more into it than
+              # WordPress does: order exports, logs under wc-logs, downloadable
+              # product files. If an upload filter is ever bypassed, this is what
+              # stops the uploaded file becoming remote code execution. The nginx
+              # recipe ships it as
+              # `location ~* /(?:uploads|files)/.*\.php$ { deny all; }`; the
+              # .htaccess has no equivalent at all.
+              #
+              # SetHandler None as well as the deny: the <FilesMatch \.php$> above
+              # already attached the FastCGI handler, and clearing it here means
+              # even a misordered merge cannot hand the file to PHP.
+              <DirectoryMatch "^{{wp.docroot}}/{{wp.content_dir}}/(uploads|upgrade)">
+                  <FilesMatch "\.php$">
+                      SetHandler None
+                      Require all denied
+                  </FilesMatch>
+              </DirectoryMatch>
+
+              # wp-config.php holds the database credentials and the
+              # authentication salts. From the hardening guide, verbatim.
+              <Files "wp-config.php">
+                  Require all denied
+              </Files>
+              <Files "wp-config-sample.php">
+                  Require all denied
+              </Files>
+              # Version disclosure.
+              <Files "readme.html">
+                  Require all denied
+              </Files>
+              <Files "license.txt">
+                  Require all denied
+              </Files>
+
+              # Dotfiles. The nginx recipe denies them
+              # (`location ~ /\. { deny all; }`) and the .htaccess does not, so a
+              # .git directory or a stray .env in the web root is served in full
+              # under a naive Apache config.
+              <FilesMatch "^\.(?!well-known)">
+                  Require all denied
+              </FilesMatch>
+              <DirectoryMatch "/\.(?!well-known)">
+                  Require all denied
+              </DirectoryMatch>
+
+              # xmlrpc.php is the classic brute-force and pingback-amplification
+              # target. keel's addition, not WordPress's. Remove it if you use
+              # Jetpack or the mobile app.
+              <Files "xmlrpc.php">
+                  Require all denied
+              </Files>
+
+              # FPM's status and ping pages, declared in the pool.
+              <LocationMatch "^/(fpm-status|fpm-ping)$">
+                  SetHandler "proxy:fcgi://php:9000"
+                  Require ip 127.0.0.1 172.16.0.0/12
+              </LocationMatch>
+
+              # No php_value or php_flag anywhere in this file. Those directives
+              # come from mod_php, which is not loaded in a PHP-FPM stack, so they
+              # are either a fatal "Invalid command" or, when wrapped in
+              # <IfModule mod_php.c>, silently skipped with nothing reporting it.
+              # That is the same trap that leaves a Magento store on Apache
+              # running with the default 128M limit. memory_limit,
+              # upload_max_filesize, post_max_size and max_input_vars are set in
+              # docker/php/conf.d/10-wordpress.ini and
+              # docker/php/php-fpm.d/zzz-wordpress-pool.conf, where both servers
+              # get the same values.
+              #
+              # The one web server limit that must be kept in step with PHP by
+              # hand is the request body size. nginx has client_max_body_size;
+              # Apache has LimitRequestBody, whose default of 0 means unlimited,
+              # so PHP's post_max_size is what applies. Uncomment to have Apache
+              # reject oversized uploads before they reach PHP:
+              #   LimitRequestBody 67108864
+
+              ErrorLog /proc/self/fd/2
+              CustomLog /proc/self/fd/1 combined
+          </VirtualHost>
+      - path: compose.override.yaml
+        verbatim: true
+        content: |
+          # keel-generated. Compose merges compose.override.yaml over compose.yaml
+          # with no extra flags.
+          services:
+            apache:
+              # Apache HTTPD 2.4, the line WordPress's hosting team handbook lists
+              # as recommended.
+              image: httpd:2.4
+              # The official image's httpd.conf has every optional include
+              # commented out and no conf.d glob, so a mounted config file would
+              # never be read. -c processes a directive after the config files are
+              # read, which is how the shared tuning gets in without rebuilding
+              # the image. It in turn includes this framework's VirtualHost.
+              command: ["httpd-foreground", "-c", "Include conf/keel-tuning.conf"]
+              restart: unless-stopped
+              depends_on:
+                php:
+                  condition: service_healthy
+              ports:
+                - "${HTTP_PORT:-8080}:80"
+              volumes:
+                - .:/var/www/html:ro
+                # Shared, owned by recipes/infra/web/apache.yaml. The official
+                # image's stock httpd.conf includes nothing from conf.d, so the
+                # command above pulls this file in with -c, which httpd processes
+                # after the config files are read.
+                - ./.keel/apache/keel-tuning.conf:/usr/local/apache2/conf/keel-tuning.conf:ro
+                # This framework's VirtualHost, owned by this recipe. The shared
+                # tuning file ends with `IncludeOptional conf.d/app-*.conf`, which
+                # is relative to ServerRoot, hence /usr/local/apache2/conf.d and
+                # the app- prefix on the filename.
+                - ./docker/apache/conf.d:/usr/local/apache2/conf.d:ro
+              # No healthcheck: the official httpd image ships no HTTP client, and
+              # WordPress ships no health endpoint to probe anyway.
+  # DDEV already runs apache-fpm when asked, with a WordPress-aware vhost.
+  ddev: {}

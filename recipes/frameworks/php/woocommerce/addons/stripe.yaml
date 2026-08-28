@@ -1,0 +1,7 @@
+id: woo-stripe
+kind: addon
+label: Stripe payments (WooCommerce gateway)
+appliesTo: [woocommerce]
+provides: [payments]
+install:
+  - "{{wp}} plugin install woocommerce-gateway-stripe --activate"

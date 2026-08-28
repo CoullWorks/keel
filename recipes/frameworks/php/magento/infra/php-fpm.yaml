@@ -1,0 +1,694 @@
+id: magento-php-fpm
+schema_version: 2
+kind: config
+label: Magento production PHP-FPM image, php.ini and pool
+# The INDIVIDUAL PHP half for Magento. The shared baseline
+# (recipes/frameworks/php/shared/php-production.yaml) supplies expose_php,
+# display_errors, the session hardening and the FPM [global] block, and is read
+# first; nothing from it is repeated here.
+#
+# Magento is the framework where these numbers matter most and where they are
+# least like anyone else's. Adobe publishes almost all of them, which is why this
+# file cites a source on nearly every line while the Laravel one has to say
+# "keel's choice". Compare pm.max_children here (10) with Laravel's (32): a
+# Magento worker is allowed 756 MB and a Laravel worker is assumed to peak at 64.
+#
+# Also owns compose.yaml: PHP, MariaDB, OpenSearch, Valkey/Redis and the
+# cron container are the same whichever web server you chose. The web server
+# arrives as a compose override from the env recipe.
+when:
+  frameworks: [magento, magento-mageos]
+  env: compose
+priority: -20
+updated: 2026-08-12
+# The PHP line chosen in the wizard, written where compose will read it.
+# It goes through .env rather than into the Dockerfile because the Dockerfile
+# is verbatim: it is full of ${...} that must reach Docker untouched.
+patch:
+  - file: .env
+    set:
+      PHP_VERSION: "{{pin.php_version}}"
+      # Your uid and gid, so the dev image can give its application user the
+      # same ones. Without this, FPM writes as uid 33 into a tree you own and
+      # neither side can write the other's files. Committed to .env rather than
+      # compose.yaml because they are specific to this machine.
+      APP_UID: "{{uid}}"
+      APP_GID: "{{gid}}"
+files:
+  - path: Dockerfile
+    verbatim: true
+    content: |
+      # syntax=docker/dockerfile:1
+      # keel-generated. Production Magento 2 image: PHP-FPM behind nginx or Apache.
+      #
+      # Build the deployable image with the Marketplace keys as a build secret,
+      # never as a COPY or an ARG (both persist in the image history):
+      #
+      #   DOCKER_BUILDKIT=1 docker build --target prod \
+      #     --secret id=composer_auth,src=./auth.json -t mystore:1.2.3 .
+
+      # Magento constrains PHP per minor series, not per major. composer.json on
+      # 2.4-develop is "~8.3.0||~8.4.0||~8.5.0", and Adobe's matrix is tighter
+      # again: 2.4.7-p10 takes 8.3 or 8.2, 2.4.8-p5 takes 8.4 or 8.3, 2.4.9 takes
+      # 8.5 only. Change this to match the Magento version you are installing.
+      # docs/infra/magento.md, sources 1 and 2.
+      ARG PHP_VERSION=8.3
+      ARG PHP_BASE=php:${PHP_VERSION}-fpm-bookworm
+
+      # ---------------------------------------------------------------- base ---
+      FROM ${PHP_BASE} AS base
+
+      # The extension list is Adobe's, from the system requirements page, not from
+      # what a PHP image happens to ship. soap, xsl, sodium, ftp, bcmath and intl
+      # are the six a stock distro build usually lacks, and Magento's installer
+      # refuses to proceed rather than failing later at the point of use. ext-ftp
+      # being a hard requirement of an ecommerce platform surprises people, but it
+      # is in the composer.json require block. docs/infra/magento.md, sources 1, 2.
+      # libfcgi-bin supplies cgi-fcgi for the healthcheck; cron drives the
+      # mandatory Magento crontab in the cron container.
+      RUN set -eux; \
+          apt-get update; \
+          apt-get install -y --no-install-recommends \
+            libicu-dev libxml2-dev libxslt1-dev libzip-dev libpng-dev \
+            libjpeg62-turbo-dev libfreetype6-dev libonig-dev libsodium-dev \
+            libfcgi-bin cron unzip git; \
+          docker-php-ext-configure gd --with-freetype --with-jpeg; \
+          docker-php-ext-install -j"$(nproc)" \
+            bcmath ftp gd intl pdo_mysql soap sockets sodium xsl zip; \
+          pecl install redis apcu; \
+          docker-php-ext-enable redis apcu; \
+          # purge WITHOUT --auto-remove. The -dev packages are safe to drop, but
+          # --auto-remove also takes the runtime libraries they pulled in - libzip4,
+          # libicu and friends - which the extensions compiled a line earlier are
+          # dynamically linked against. The image still builds; PHP then warns
+          # "Unable to load dynamic library" on every start and FPM exits 78.
+          apt-get purge -y libicu-dev libxml2-dev libxslt1-dev \
+            libzip-dev libpng-dev libjpeg62-turbo-dev libfreetype6-dev \
+            libonig-dev libsodium-dev; \
+          rm -rf /var/lib/apt/lists/* /tmp/pear
+
+      RUN docker-php-ext-enable opcache
+
+      # The stock pool is a 5-child development pool and sorts after ours
+      # (www.conf > zzz-magento-pool.conf is false, but www.conf > 10-... is true
+      # for the ini directory, and www.conf would in any case fight our file), so
+      # it goes. docker.conf and zz-docker.conf stay: they set listen = 9000,
+      # clear_env, catch_workers_output and daemonize = no.
+      RUN rm -f /usr/local/etc/php-fpm.d/www.conf /usr/local/etc/php-fpm.d/www.conf.default
+
+      # 00-php-production.ini (shared) then 10-magento.ini (Adobe's numbers).
+      COPY docker/php/conf.d/ /usr/local/etc/php/conf.d/
+      # zz-global.conf (shared [global]) then zzz-magento-pool.conf (our [www]).
+      COPY docker/php/php-fpm.d/ /usr/local/etc/php-fpm.d/
+
+      # Baked in, not bind-mounted: cron ignores anything in /etc/cron.d that root
+      # does not own, and a host bind mount carries your uid.
+      COPY docker/php/cron/magento.cron /etc/cron.d/magento
+      RUN chmod 0644 /etc/cron.d/magento
+
+      WORKDIR /var/www/html
+
+      # php-fpm.8: SIGQUIT is the graceful stop, SIGTERM and SIGINT terminate
+      # immediately. Docker sends SIGTERM, so without this a deploy cuts off
+      # in-flight checkout requests. Inherited from the official image; restated
+      # because this file is also the reference for a VM deploy.
+      STOPSIGNAL SIGQUIT
+
+      # start-period is generous on purpose: a cold Magento with an empty opcache
+      # and a full di compilation is not ready in ten seconds.
+      HEALTHCHECK --interval=15s --timeout=5s --start-period=120s --retries=5 \
+        CMD SCRIPT_NAME=/fpm-ping SCRIPT_FILENAME=/fpm-ping REQUEST_METHOD=GET \
+            cgi-fcgi -bind -connect 127.0.0.1:9000 || exit 1
+
+      EXPOSE 9000
+      CMD ["php-fpm"]
+
+      # -------------------------------------------------------------- vendor ---
+      FROM composer:2 AS vendor
+      WORKDIR /app
+      COPY composer.json composer.lock ./
+      # Adobe's documented deployment flow is: composer install --no-dev,
+      # setup:di:compile, composer dump-autoload -o --apcu,
+      # setup:static-content:deploy, deploy:mode:set production.
+      # docs/infra/magento.md, source 15.
+      #
+      # Note what is NOT here: --classmap-authoritative. Magento generates code
+      # into generated/ at runtime (factories, proxies, interceptors) and an
+      # authoritative classmap tells the autoloader to stop looking for anything
+      # the map does not already contain, so every generated class becomes a
+      # "class not found". Adobe asks for `-o --apcu` after compilation instead.
+      #
+      # The keys are a BuildKit secret, so they never reach a layer or the image
+      # history. repo.magento.com refuses anonymous requests, so this stage cannot
+      # work without them.
+      RUN --mount=type=secret,id=composer_auth,target=/app/auth.json \
+          composer install --no-dev --no-scripts --no-interaction \
+            --prefer-dist --no-progress
+      COPY . .
+
+      # ----------------------------------------------------------------- dev ---
+      # What compose.yaml builds. Runs as root deliberately: the project is
+      # bind-mounted from the host and Magento writes to var/, generated/,
+      # pub/static/, pub/media/ and app/etc/ constantly. The prod stage is the
+      # non-root one.
+      FROM base AS dev
+      # Development overrides, dev stage only: opcache timestamp validation back
+      # on, realpath cache short, errors on screen. Without the first of these,
+      # the bind-mounted code you are editing is not the code being run.
+      COPY docker/php/dev/95-dev.ini /usr/local/etc/php/conf.d/95-dev.ini
+      # The one thing the dev image must agree with the host about: who you are.
+      #
+      # The project is bind-mounted, so the tree inside the container is the tree
+      # in your editor, with your uid on every file. FPM's pool runs as www-data,
+      # which is uid 33 in this image, and uid 33 cannot write a file owned by
+      # uid 1000. The two then take turns losing: the application could not append
+      # to storage/logs/laravel.log, and once it had created that log itself,
+      # composer running as you could not append to it either. Both failures
+      # surface as something unrelated - a 500 with a tempnam() notice, or a
+      # composer post-install script exiting 1.
+      #
+      # So www-data adopts your uid here. This is what Laravel Sail does with
+      # WWWUSER, and it is confined to the dev stage: the prod image below has no
+      # bind mount and keeps the distribution's own uid 33.
+      #
+      # `|| true`: the numbers may already be taken in the base image, and on a
+      # rootless or Docker Desktop setup the host uid may already map to the
+      # container user, in which case there is nothing to change and nothing
+      # wrong. The chown afterwards catches the files the image itself created.
+      ARG APP_UID=1000
+      ARG APP_GID=1000
+      RUN if [ "$APP_UID" != "33" ]; then \
+            groupmod -o -g "$APP_GID" www-data || true; \
+            usermod -o -u "$APP_UID" -g "$APP_GID" www-data || true; \
+            chown -R "$APP_UID:$APP_GID" /var/www/html || true; \
+          fi
+      COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
+      ENV COMPOSER_ALLOW_SUPERUSER=1
+
+      # ---------------------------------------------------------------- prod ---
+      FROM base AS prod
+      COPY --from=vendor /app /var/www/html
+
+      # Compilation and static content. Both need app/etc/config.php, which is the
+      # module list and is expected to be in version control; a build context
+      # without it is a bare checkout, and running these would fail with a message
+      # that does not explain itself. Guarded so the failure is legible either way.
+      RUN set -eux; \
+          if [ -f app/etc/config.php ]; then \
+            bin/magento setup:di:compile; \
+            composer dump-autoload -o --apcu --no-dev; \
+            bin/magento setup:static-content:deploy -f --jobs="$(nproc)"; \
+          else \
+            echo "app/etc/config.php is absent, so setup:di:compile and"; \
+            echo "setup:static-content:deploy were skipped. Commit app/etc/config.php"; \
+            echo "(Adobe expects it in version control) and rebuild, or run both"; \
+            echo "inside the container before serving traffic."; \
+          fi
+
+      # Adobe's documented writable set: var, generated, vendor, pub/static,
+      # pub/media, app/etc. vendor being writable is unusual and is specific to
+      # Magento's code generation. Group-writable with the setgid bit on
+      # directories, which is what Adobe's own find/chmod pair produces.
+      # docs/infra/magento.md, source 16.
+      RUN set -eux; \
+          find var generated vendor pub/static pub/media app/etc -type f -exec chmod g+w {} + ; \
+          find var generated vendor pub/static pub/media app/etc -type d -exec chmod g+ws {} + ; \
+          chown -R www-data:www-data var generated vendor pub/static pub/media app/etc; \
+          chmod u+x bin/magento
+      USER www-data
+
+  - path: .dockerignore
+    verbatim: true
+    content: |
+      # keel-generated. Keeps credentials, host state and generated output out of
+      # the build context and the image.
+      .git
+      .gitignore
+      .github
+      .keel
+      .idea
+      .vscode
+      # NEVER in the context. auth.json holds real purchased-extension credentials
+      # for repo.magento.com and vendor repositories. It reaches the build as a
+      # BuildKit secret instead (see the Dockerfile's vendor stage).
+      auth.json
+      .env
+      docker-compose*.yml
+      Dockerfile
+      .dockerignore
+      # Rebuilt in the image. Copying a host vendor/ in is also how a developer's
+      # dev dependencies end up in production.
+      vendor
+      node_modules
+      # Runtime state and build output. generated/ in particular: a stale compiled
+      # DI configuration from a laptop is a genuinely painful class of bug.
+      var
+      generated
+      pub/static
+      pub/media
+      # setup/ and update/ are the web installer and updater. The nginx sample
+      # denies setup/index.php by default; not shipping them at all is better.
+      setup
+      update
+      dev/tests
+
+  - path: docker/php/dev/95-dev.ini
+    verbatim: true
+    content: |
+      ; keel-generated, and copied ONLY into the dev stage of the Dockerfile.
+      ;
+      ; The production baseline sets opcache.validate_timestamps = 0, which is
+      ; correct for an immutable image: the code cannot change under a running
+      ; container, so checking every file on every request is pure overhead.
+      ;
+      ; The dev stage bind-mounts your working tree, where the code changes
+      ; constantly, and there the same setting is a trap. PHP keeps serving the
+      ; version of every file it compiled when the container started: you edit a
+      ; controller, reload, and see the old page. Nothing errors and nothing in
+      ; the logs mentions it. It also hides new code entirely - a package
+      ; installed after boot stays invisible until the container is restarted,
+      ; which is how a freshly installed Telescope answered 404 on a route that
+      ; `artisan route:list` could see perfectly well.
+      ;
+      ; Read last (95- sorts after 00- and 10-), so it overrides the baseline.
+      opcache.validate_timestamps = 1
+      ; Check on every request. The stat() is cheap next to being served code
+      ; that is one edit out of date.
+      opcache.revalidate_freq = 0
+
+      ; The realpath cache has exactly the same problem: a stale entry means a
+      ; file you just created is reported as missing. 
+      realpath_cache_ttl = 10
+
+      ; Development display settings. The production baseline sends errors to the
+      ; log and shows the user nothing, which is right in production and useless
+      ; on your own machine.
+      display_errors = On
+      display_startup_errors = On
+      error_reporting = E_ALL
+  - path: docker/php/conf.d/10-magento.ini
+    verbatim: true
+    content: |
+      ; keel-generated. Magento's own PHP values.
+      ; Read after docker/php/conf.d/00-php-production.ini (shared baseline), so anything
+      ; here wins.
+      ;
+      ; Almost every number below is Adobe's, and the comment says which page it
+      ; came from. docs/infra/magento.md carries the full citations.
+      ;
+      ; Note the split of responsibility with the pool file beside this one:
+      ; values that must differ between the web request and the CLI are set HERE
+      ; for the CLI and overridden in docker/php/php-fpm.d/zzz-magento-pool.conf with
+      ; php_admin_value for FPM. memory_limit is the important one.
+
+      [PHP]
+      ; The CLI value. Adobe gives it per activity rather than as one number:
+      ; "Compiling code or deploying static assets, 1G; Debugging, 2G; Testing,
+      ; ~3-4G", with the example memory_limit=2G. The hardware page repeats it:
+      ; "we recommend configuring PHP memory for 2G" on a single-server setup.
+      ; The web request gets 756M instead, from the pool.
+      ; docs/infra/magento.md, sources 3 and 18.
+      memory_limit = 2G
+
+      ; The CLI SAPI ignores max_execution_time (it is hardcoded to 0), so this
+      ; only affects any non-FPM, non-CLI SAPI. The web value is 18000 and is set
+      ; in the pool, because that is where Magento's shipped configs put it and
+      ; where PHP-FPM will actually honour it.
+      max_execution_time = 0
+
+      ; Adobe documents these twice, with the same values both times, and gives
+      ; the reason verbatim: "If the Realpath cache configuration values are too
+      ; low or too high, it adds additional overhead during cache generation which
+      ; slows performance". PHP's defaults are 4096K and 120, which for a codebase
+      ; that opens tens of thousands of files is a measurable tax on every request.
+      ; This is one of Magento's real performance levers.
+      ; docs/infra/magento.md, sources 3 and 8.
+      realpath_cache_size = 10M
+      realpath_cache_ttl = 7200
+
+      ; Adobe's performance guide recommends APCu so the Composer autoloader can
+      ; use it, which is also what `composer dump-autoload -o --apcu` in the
+      ; deployment flow is for. docs/infra/magento.md, sources 4 and 15.
+      apc.enabled = 1
+      apc.enable_cli = 1
+
+      ; Magento's admin posts very large forms (a product with many attributes, a
+      ; full CMS page). PHP's default of 1000 truncates them silently: the form
+      ; saves, and the fields past the limit are simply gone. Adobe publishes no
+      ; value, so this one is keel's.
+      max_input_vars = 10000
+
+      [opcache]
+      ; Adobe's production set, verbatim from the performance guide's software
+      ; recommendations page. docs/infra/magento.md, source 4.
+      opcache.memory_consumption = 512
+      opcache.max_accelerated_files = 60000
+      opcache.consistency_checks = 0
+      opcache.validate_timestamps = 0
+      ; Overrides the shared baseline's 0. Adobe asks for it, and Magento's CLI is
+      ; anything but short-lived: di:compile, static-content:deploy and reindex all
+      ; run for minutes.
+      opcache.enable_cli = 1
+
+      ; For Adobe Commerce on cloud infrastructure the implementation playbook
+      ; raises memory_consumption further: "it is recommended to set
+      ; opcache.memory_consumption to at least 2 GB, to avoid performance
+      ; degradation", i.e. 2048. Uncomment on a large store; it needs the RAM.
+      ; docs/infra/magento.md, source 7.
+      ; opcache.memory_consumption = 2048
+
+      ; NOT OPTIONAL, and the one line in this file you must not "tidy up".
+      ; opcache.save_comments = 1 is a hard prerequisite on Adobe's php-settings
+      ; page: Magento's annotation-driven code generation reads doc comments at
+      ; runtime, so with save_comments = 0 the site fails in ways that look like
+      ; anything but an opcache setting. The PHP manual carries the same warning
+      ; in general terms. docs/infra/magento.md, source 3.
+      opcache.save_comments = 1
+
+      ; Consequence of validate_timestamps = 0, and Adobe states the setting
+      ; without documenting the reset procedure (docs/infra/magento.md, open
+      ; question 5): every deploy MUST restart PHP-FPM or call opcache_reset()
+      ; through the web SAPI. Replacing the container does this for you. Editing a
+      ; file inside a running container will appear to do nothing at all.
+      ;
+      ; No opcache.preload: Magento ships no preload script and Adobe documents
+      ; none. Preloading a codebase that generates classes at runtime is not a
+      ; safe default.
+
+      ; PHP's default is 8MB. Magento's fully-qualified class names, multiplied by
+      ; everything under generated/, are the exact workload interned strings exist
+      ; for; Symfony's performance page gives the reasoning for its own 32. Adobe
+      ; publishes no value, so 64 is keel's, sized against a class graph several
+      ; times Symfony's. Check it: opcache_get_status()['interned_strings_usage']
+      ; ['free_memory'] must not sit near zero.
+      opcache.interned_strings_buffer = 64
+
+  - path: docker/php/php-fpm.d/zzz-magento-pool.conf
+    verbatim: true
+    content: |
+      ; keel-generated. Magento's PHP-FPM pool.
+      ; Read after docker/php/php-fpm.d/zz-global.conf (shared [global]) and after the
+      ; official image's docker.conf and zz-docker.conf, so this file is the
+      ; authority on every [www] directive it sets.
+      ;
+      ; Adobe publishes NO pool settings: no pm mode, no pm.max_children, no
+      ; pm.max_requests, no request_terminate_timeout. docs/infra/magento.md, open
+      ; question 1. What Adobe does fix is the per-request PHP values, through
+      ; fastcgi_param PHP_VALUE in nginx.conf.sample and php_value in
+      ; pub/.htaccess. Both of those mechanisms are replaced here, deliberately:
+      ; see the php_admin_value block at the bottom.
+
+      [www]
+      ; See the note in Laravel's pool: the prod image runs as www-data, and FPM
+      ; ignores these with a NOTICE when it is not started by root.
+      user = www-data
+      group = www-data
+
+      listen = 9000
+      ; listen.allowed_clients is deliberately not set, and 127.0.0.1 is the
+      ; wrong value for it here.
+      ;
+      ; It filters on the peer address, and in compose the peer is the web
+      ; server in its own container, arriving from an address on the bridge
+      ; network that Docker assigns at run time. 127.0.0.1 is the loopback
+      ; inside THIS container, so nothing that is not this container can match
+      ; it: FPM accepted every connection from nginx and reset it immediately,
+      ; and the site answered 502 Bad Gateway on every request.
+      ;
+      ; Unset means any peer, and the isolation comes from the network instead:
+      ; port 9000 is published to no one, so the only things that can reach it
+      ; are the services on the same compose network. On a VM where FPM and the
+      ; web server share a host, use a unix socket with listen.owner and
+      ; listen.group, which is a stronger boundary than an address list.
+
+      pm = dynamic
+
+      ; pm.max_children = RAM available to PHP / peak RSS of one worker.
+      ;
+      ; For Magento the numerator and the denominator are both unusual. Adobe's
+      ; hardware page recommends "configuring PHP memory for 2G" per node, and the
+      ; shipped web configs cap a single request at 756M (see php_admin_value
+      ; below). Taking 756M as the worst case a worker can reach, and 8 GB as the
+      ; RAM dedicated to PHP on a modest store node:
+      ;
+      ;   8192 MB / 756 MB = 10
+      ;
+      ; So 10, not 32. This is the number people get most wrong: copying a Laravel
+      ; or WordPress pool onto a Magento node oversubscribes memory by a factor of
+      ; three or more, and the box swaps under exactly the load it was sized for.
+      ;
+      ; Cross-check it against Adobe's CPU formula rather than trusting one side:
+      ; "One CPU core can serve around two (sometimes up to four) Commerce requests
+      ; effectively", N[Cores] = (N[Expected Requests] / 2) + N[Expected Cron
+      ; Processes]. Ten concurrent requests wants roughly five cores plus cron.
+      ; docs/infra/magento.md, source 18.
+      pm.max_children = 10
+      pm.start_servers = 4
+      pm.min_spare_servers = 2
+      pm.max_spare_servers = 6
+
+      ; Lower than Laravel's 500 on purpose: each Magento worker holds far more
+      ; memory, so an unreturned allocation costs far more per request. 200 keeps
+      ; a leaking third-party module bounded without the respawn cost dominating.
+      ; The manual's default is 0, meaning workers never respawn. keel's number:
+      ; Adobe publishes none.
+      pm.max_requests = 200
+
+      ; Must exceed the fastcgi_read_timeout the nginx sample sets (600s), or FPM
+      ; kills the worker while nginx is still waiting and the client sees an
+      ; unexplained 502 instead of a timeout. Adobe never states this relationship;
+      ; docs/infra/magento.md records it as open question 1.
+      ;
+      ; Note this, not max_execution_time = 18000, is what actually bounds a
+      ; request. 18000 seconds is five hours: it exists so long admin operations
+      ; are not cut off, and it is the vendor's value, but nothing should hold an
+      ; FPM worker for five hours. This is the real limit.
+      request_terminate_timeout = 610s
+      request_terminate_timeout_track_finished = yes
+
+      request_slowlog_timeout = 30s
+      slowlog = /proc/self/fd/2
+
+      pm.status_path = /fpm-status
+      ping.path = /fpm-ping
+      ping.response = pong
+
+      security.limit_extensions = .php
+
+      ; --- the values Magento's own configs set, moved to where both servers see them
+      ;
+      ; nginx.conf.sample sets these with
+      ;   fastcgi_param PHP_VALUE "memory_limit=756M \n max_execution_time=18000"
+      ;   fastcgi_param PHP_FLAG  "session.auto_start=off \n suhosin.session.cryptua=off"
+      ; and pub/.htaccess sets the same values with php_value and php_flag.
+      ;
+      ; The .htaccess ones do not work under PHP-FPM. Magento wraps them in
+      ; <IfModule mod_php.c> and <IfModule mod_php7.c>, and with mod_proxy_fcgi
+      ; neither module is loaded, so memory_limit and max_execution_time silently
+      ; fall back to php.ini defaults and nothing reports it. An Apache Magento
+      ; deployment that trusts the shipped .htaccess is running on 128M.
+      ;
+      ; Setting them here fixes that and makes the two servers behave identically.
+      ; php_admin_value cannot be overridden by ini_set() from application code,
+      ; which is what you want for a memory ceiling.
+      ; docs/infra/magento.md, sources 5 and 6.
+      php_admin_value[memory_limit] = 756M
+      php_admin_value[max_execution_time] = 18000
+      php_admin_flag[session.auto_start] = off
+
+  - path: docker/php/cron/magento.cron
+    verbatim: true
+    content: |
+      # keel-generated. Magento's crontab. Cron is MANDATORY, not an optimisation:
+      # Adobe's wording is "Several Commerce features require at least one cron
+      # job" and failing to configure it "means that Commerce will not function as
+      # expected". Reindexing, the sitemap, currency rates, customer emails,
+      # scheduled prices and the message-queue consumer runner all hang off it.
+      # docs/infra/magento.md, source 13.
+      #
+      # This is the entry `bin/magento cron:install` writes, with the paths changed
+      # and the log sent to the container's stdout instead of a file. The grep
+      # -v is Adobe's: it drops the once-a-minute "Ran jobs by schedule" line that
+      # would otherwise fill the log.
+      #
+      # Cron must run as the file system owner. In the cron container that is
+      # www-data, which owns var/, generated/ and the rest of the writable set.
+      # On a multi-node deployment this crontab belongs on ONE node only.
+      * * * * * www-data /usr/local/bin/php /var/www/html/bin/magento cron:run 2>&1 | grep -v "Ran jobs by schedule" >> /proc/1/fd/1
+      # A crontab file must end with a newline or cron ignores the last line.
+
+  - path: compose.yaml
+    verbatim: true
+    content: |
+      # keel-generated. Magento 2 application stack: PHP-FPM, MariaDB, OpenSearch,
+      # Redis and the mandatory cron runner.
+      #
+      # No web server here on purpose: that is the choice you make by selecting
+      # the nginx or apache service, which writes compose.override.yaml with the
+      # container and Magento's own server block. Compose merges
+      # compose.override.yaml over compose.yaml with no extra flags.
+      #
+      # A local stack: bind-mounts your working tree and builds the Dockerfile's
+      # `dev` target. The deployable image is `--target prod`.
+      services:
+        php:
+          build:
+            context: .
+            target: dev
+            args:
+              # The PHP line chosen in the wizard, written to .env by this
+              # recipe. The Dockerfile carries the same default, so a checkout
+              # without a .env still builds.
+              PHP_VERSION: "${PHP_VERSION:-8.3}"
+              APP_UID: "${APP_UID:-1000}"
+              APP_GID: "${APP_GID:-1000}"
+          volumes: [".:/var/www/html"]
+          # expose, never ports. A PHP-FPM pool speaks FastCGI, not HTTP, and it
+          # will execute whatever script path it is handed with no authentication
+          # of any kind. Publishing 9000 to the host is remote code execution
+          # waiting for a port scan.
+          expose: ["9000"]
+          depends_on:
+            db: { condition: service_healthy }
+            opensearch: { condition: service_started }
+            redis: { condition: service_started }
+
+        cron:
+          build:
+            context: .
+            target: dev
+            args:
+              # Same three as the php service: without them this service builds a
+              # second, near-identical image, and one of them has the wrong uid.
+              PHP_VERSION: "${PHP_VERSION:-8.3}"
+              APP_UID: "${APP_UID:-1000}"
+              APP_GID: "${APP_GID:-1000}"
+          volumes: [".:/var/www/html"]
+          # Not started by `docker compose up`: keel starts it as the last step of
+          # the build, and `docker compose --profile cron up -d cron` starts it by
+          # hand afterwards.
+          #
+          # Magento's cron runs `bin/magento cron:run`, and booting bin/magento
+          # generates interceptors into generated/code. Run it during the build
+          # and it is a second process writing there while the build's own
+          # bin/magento is working: `deploy:mode:set developer` deletes
+          # generated/code recursively, cron recreates a directory underneath it
+          # mid-walk, and the command dies on `rmdir(...): Directory not empty`.
+          # The directory named in the failure moved between runs, which is what
+          # a race looks like rather than a permissions problem.
+          #
+          # This also matches Adobe's own order: cron is installed after the
+          # store exists (bin/magento cron:install), not before it.
+          profiles: ["cron"]
+          # /etc/cron.d/magento is baked into the image: cron ignores a crontab in
+          # that directory unless root owns it, and a bind mount carries your uid.
+          command: ["cron", "-f", "-L", "2"]
+          # The image's HEALTHCHECK probes PHP-FPM on port 9000, and this
+          # container runs cron. An inherited probe that can never pass makes a
+          # working container look permanently broken, and blocks anything
+          # waiting on `condition: service_healthy` for it.
+          healthcheck:
+            disable: true
+          depends_on:
+            db: { condition: service_healthy }
+          # Message-queue consumers run from this same cron by default: Adobe's
+          # cron_consumers_runner in app/etc/env.php restarts them, consuming
+          # max_messages (default 10000) before terminating. Set
+          # 'cron_run' => false there and run `bin/magento queue:consumers:start`
+          # under a process manager instead if you need dedicated consumers.
+          # docs/infra/magento.md, source 12.
+
+        db:
+          # Adobe's matrix by release: 2.4.9 takes MariaDB 12.3 or MySQL 8.4;
+          # 2.4.8-p5 takes MariaDB 11.4 or 11.8; 2.4.7-p10 takes 10.11 or 11.8.
+          # PostgreSQL is not supported at all. 11.4 is the LTS that spans the
+          # widest range of currently supported Magento releases.
+          # docs/infra/magento.md, source 1.
+          image: mariadb:11.8
+          environment:
+            MARIADB_DATABASE: db
+            MARIADB_USER: db
+            MARIADB_PASSWORD: db
+            MARIADB_ROOT_PASSWORD: root
+          # Adobe's published MySQL tuning: innodb_buffer_pool_instances defaults
+          # to 8 and each instance wants at least 1 GB, so a real store runs an
+          # 8 GB pool. 1 GB here because this is a laptop, not a store node; raise
+          # both together. docs/infra/magento.md, source 4.
+          command:
+            - "--innodb-buffer-pool-size=1G"
+            - "--innodb-buffer-pool-instances=1"
+            - "--max-connections=300"
+          # keel's shared MariaDB tuning, mounted because this compose file is
+          # verbatim and cannot substitute a var there. It supplies everything
+          # the command flags above do not; where they overlap the flags win,
+          # which is intended: those are the vendor's own numbers.
+          volumes:
+            - db:/var/lib/mysql
+            - ./.keel/mariadb/my.cnf:/etc/mysql/conf.d/keel-mariadb.cnf:ro
+          healthcheck:
+            test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+            interval: 5s
+            timeout: 5s
+            retries: 30
+
+        opensearch:
+          # Search is mandatory from 2.4: "all installations must be configured to
+          # use Elasticsearch or OpenSearch as the catalog search solution". There
+          # is no MySQL fallback. 2.4.9 takes OpenSearch 3 only and drops
+          # Elasticsearch entirely. docs/infra/magento.md, sources 1 and 10.
+          image: opensearchproject/opensearch:2.19.0
+          environment:
+            discovery.type: single-node
+            # DISABLE_SECURITY_PLUGIN, not plugins.security.disabled.
+            #
+            # They are not the same thing. plugins.security.disabled is an
+            # opensearch.yml setting, and the image happily accepts it as an
+            # environment variable - but the entrypoint installs the security
+            # demo configuration BEFORE any setting is read, and since 2.12 that
+            # step refuses to run without OPENSEARCH_INITIAL_ADMIN_PASSWORD. The
+            # container printed "No custom admin password found" and exited 1.
+            #
+            # Nothing said so. `docker compose ps` simply did not list
+            # opensearch, and the failure surfaced two minutes later, 672 modules
+            # into setup:install, as "Could not validate a connection to the
+            # OpenSearch. No alive nodes found in your cluster".
+            #
+            # DISABLE_SECURITY_PLUGIN is the variable the entrypoint itself
+            # checks, so it skips the demo config and starts on plain HTTP -
+            # which is what Magento is configured to talk to here.
+            # And ONLY this: do not also set plugins.security.disabled here.
+            # DISABLE_SECURITY_PLUGIN makes the entrypoint pass
+            # -Eplugins.security.disabled=true itself, so setting it a second
+            # time as an environment variable gives OpenSearch the same setting
+            # twice and it refuses to start:
+            #
+            #   ERROR: setting [plugins.security.disabled] already set,
+            #          saw [true] and [true]
+            #
+            # which is the same dead container and the same misleading
+            # "No alive nodes found in your cluster" two minutes later. Belt and
+            # braces was tried here and it is what broke it.
+            DISABLE_SECURITY_PLUGIN: "true"
+            # Heap. Adobe documents no value (docs/infra/magento.md, open question
+            # 2); OpenSearch's own guidance is half of available RAM, capped below
+            # the compressed-oops threshold. 1 GB suits a development catalogue.
+            OPENSEARCH_JAVA_OPTS: "-Xms1g -Xmx1g"
+          ulimits:
+            memlock: { soft: -1, hard: -1 }
+            nofile: { soft: 65536, hard: 65536 }
+          volumes: [opensearch:/usr/share/opensearch/data]
+
+        redis:
+          # Adobe's system requirements now list Valkey (9 for 2.4.9, 8.1 for the
+          # others) while the performance guide still says Redis. The two pages
+          # have not been reconciled (docs/infra/magento.md, open question 6).
+          # Redis 7.4 speaks the protocol both expect; swap in valkey/valkey:8.1
+          # if you want to match the requirements page exactly.
+          image: redis:7.4-alpine
+          command: ["redis-server", "--appendonly", "yes"]
+          volumes: [redis:/data]
+
+      volumes:
+        db:
+        opensearch:
+        redis:

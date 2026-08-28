@@ -1,0 +1,118 @@
+id: django-seed
+kind: addon
+label: Realistic seed data (factory_boy + Faker, `manage.py seed`)
+appliesTo: [django]
+provides: [seed]
+updated: 2026-08-21
+# `keel db seed` for Django used to run `manage.py loaddata seed`, which replays
+# a static fixture file that a fresh project does not have - so the command
+# failed on "No fixture named 'seed' found". Even with a fixture, loaddata is a
+# fixed dump, not realistic data.
+#
+# This add-on installs factory_boy (which wraps Faker) and ships a `seed`
+# management command that generates a realistic population with it. `keel db
+# seed` now runs `manage.py seed` (see internal/cli/db.go). It seeds the built-in
+# auth User by default; add your own models' factories and call them in the
+# command as the project grows.
+#
+# The command lives in a tiny `seed` app so Django discovers it: management
+# commands are only found inside an app that is in INSTALLED_APPS. The settings
+# fragment registers that app - installing the package alone would leave the
+# command undiscovered (the failure this catalogue's guard test exists for).
+install:
+  - "{{exec}} uv add --dev factory-boy"
+files:
+  - path: config/settings.d/60-seed.py
+    content: |
+      # Register the `seed` app so its management command is discoverable.
+      # Without this, `manage.py seed` reports "Unknown command: 'seed'".
+      #
+      # It carries no models of its own (the command uses existing models), so
+      # there is nothing to migrate.
+      INSTALLED_APPS += ["seed"]
+  - path: seed/__init__.py
+    content: ""
+  - path: seed/apps.py
+    content: |
+      from django.apps import AppConfig
+
+
+      class SeedConfig(AppConfig):
+          default_auto_field = "django.db.models.BigAutoField"
+          name = "seed"
+  - path: seed/management/__init__.py
+    content: ""
+  - path: seed/management/commands/__init__.py
+    content: ""
+  - path: seed/factories.py
+    content: |
+      # keel-generated. factory_boy factories back `manage.py seed`.
+      #
+      # factory_boy composes on top of Faker, so every generated row is
+      # plausible-but-random. Add a factory per model you want seeded and wire it
+      # into the command in management/commands/seed.py.
+      import factory
+      from django.contrib.auth import get_user_model
+
+      User = get_user_model()
+
+
+      class UserFactory(factory.django.DjangoModelFactory):
+          class Meta:
+              model = User
+              # Faker-generated usernames collide eventually; skip a row whose
+              # username already exists rather than fail the whole seed.
+              django_get_or_create = ("username",)
+
+          username = factory.Faker("user_name")
+          email = factory.Faker("email")
+          first_name = factory.Faker("first_name")
+          last_name = factory.Faker("last_name")
+          is_staff = False
+          is_active = True
+
+          # set_password hashes it; a raw assignment would store a login nobody
+          # can use. All seeded users share this development password.
+          password = factory.PostGenerationMethodCall("set_password", "password")
+  - path: seed/management/commands/seed.py
+    content: |
+      # keel-generated. `python manage.py seed` (via `keel db seed`).
+      #
+      # Idempotent-ish: it upserts a known admin and adds N random users each
+      # run. Pass --users to change the count.
+      from django.core.management.base import BaseCommand
+      from django.db import transaction
+
+      from seed.factories import UserFactory
+
+
+      class Command(BaseCommand):
+          help = "Populate the database with realistic development data."
+
+          def add_arguments(self, parser) -> None:
+              parser.add_argument(
+                  "--users",
+                  type=int,
+                  default=25,
+                  help="How many random users to create (default 25).",
+              )
+
+          @transaction.atomic
+          def handle(self, *args, **options) -> None:
+              count = options["users"]
+
+              # A known superuser you can always log into /admin with.
+              admin = UserFactory(
+                  username="admin",
+                  email="admin@example.com",
+                  is_staff=True,
+                  is_superuser=True,
+              )
+
+              users = UserFactory.create_batch(count)
+
+              self.stdout.write(
+                  self.style.SUCCESS(
+                      f"Seeded {len(users)} users + admin ({admin.email} / password: 'password')."
+                  )
+              )

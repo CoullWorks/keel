@@ -1,0 +1,53 @@
+id: dash-local
+schema_version: 2
+kind: env
+env_family: local
+label: Local (native, no Docker)
+appliesTo: [dash]
+provides: [env]
+default: true
+updated: 2026-08-12
+# Native Python via uv: no daemon, no containers. `keel run dev` starts
+# `python app.py`, which calls app.run(debug=True) and is development only.
+#
+# There is no Dockerfile here by definition, so the container requirements the
+# Docker env carries have no place to live. What still applies on a bare host:
+#
+#   - "`run` should not be used when deploying your application in production.
+#     Instead, the app should be run with `gunicorn` on the `server = app.server`
+#     instance."
+#   - Turn dev tools off. "Displaying serverside tracebacks is a security
+#     vulnerability", and the dev bundles carry a performance cost.
+#   - The command is `gunicorn app:app --workers 4` on Dash 3.1.0 and later, or
+#     `gunicorn app:server --workers 4` on 3.0.4 and earlier. Dash's own figure
+#     is "between 2 and 4 workers", lower than gunicorn's generic formula.
+#   - Move any cache out of process memory. With several workers "their memory
+#     is not shared", so functools.lru_cache caches nothing usefully; Dash points
+#     at Flask-Caching with Redis or filesystem caching instead.
+#   - Audit for mutable globals. With multiple workers a mutated global "would
+#     affect the next user's session".
+#   - If the app uses background callbacks, swap DiskcacheManager for
+#     CeleryManager and run
+#     `celery -A app:celery_app worker --loglevel=INFO --concurrency=2`.
+#
+# Selecting nginx or apache writes the matching server block or VirtualHost to
+# .keel/, pointed at 127.0.0.1:8000. See docs/infra/dash.md.
+commands:
+  start: ""
+  # How this environment tears itself down. Used when a build fails partway:
+  # keel removes the directory it created, and without this the containers,
+  # volumes and network it started stay behind holding a bind mount to a
+  # path that no longer exists. The next attempt then reuses that container
+  # and dies with "current working directory is outside of container mount
+  # namespace root".
+  # The only thing keel starts under a native env is the local database, which
+  # the database recipe brings up from docker-compose.db.yml. Nothing else here
+  # runs in a container, so this is the whole teardown - and without it nothing
+  # ever stopped that container: `keel delete` left it running and holding the
+  # fixed host port, so the next project that wanted a database could not start.
+  # Guarded on the file so an environment built with no database is a no-op.
+  down: "[ -f docker-compose.db.yml ] && docker compose -f docker-compose.db.yml down -v || true"
+  restart: ""
+  exec: ""
+smoke:
+  - "uv --version"

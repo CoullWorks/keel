@@ -1,0 +1,7 @@
+id: django-pillow
+kind: addon
+label: Pillow (ImageField support)
+appliesTo: [django]
+provides: [pillow]
+install:
+  - "{{exec}} uv add Pillow"

@@ -1,0 +1,10 @@
+id: symfony-api-platform
+schema_version: 2
+kind: addon
+label: API Platform (REST and GraphQL from your entities)
+appliesTo: [symfony]
+requires: [db]
+provides: [api]
+updated: 2026-08-10
+install:
+  - "{{composer}} require api"

@@ -1,0 +1,307 @@
+id: gradio-docker
+schema_version: 2
+kind: env
+env_family: compose
+label: Docker (compose)
+appliesTo: [gradio]
+provides: [env]
+priority: -10
+updated: 2026-08-12
+# One replica, because Gradio documents nothing else.
+#
+# No Gradio page mentions gunicorn, Uvicorn workers, load balancing or replicas.
+# Concurrency is entirely in-process: "every Gradio demo includes a built-in
+# queuing system that scales to thousands of requests", tuned with
+# concurrency_limit per event listener (default 1), default_concurrency_limit in
+# queue(), concurrency_id to share one limit across events contending for a
+# single GPU, max_size to cap the queue, and max_threads in launch() for the
+# threadpool that non-async functions run in (default 40).
+#
+# GRADIO_NUM_WORKERS looks like the answer and is not. It covers "file I/O and
+# static assets" only, and "Only works when SSR mode is set", which itself
+# defaults to off outside Hugging Face Spaces.
+#
+# Whether a Gradio app can be replicated behind a load balancer is not
+# documented at all: there is no vendor statement that it works, none that it
+# needs sticky sessions, and none that it fails. That is a gap, not a green
+# light, and given that the vendor's own nginx config upgrades the connection,
+# one replica is the honest default. The documented route to more processes is
+# gr.mount_gradio_app() inside a FastAPI app, which hands the problem to
+# FastAPI's --workers and keeps per-process state per process anyway.
+#
+# A web server in front is a separate choice: add `nginx` or `apache`.
+# See docs/infra/gradio.md.
+commands:
+  # --build so a changed Dockerfile actually rebuilds.
+  start: "docker compose up -d --build"
+  # Where the project can be opened once the build finishes.
+  site_url: "http://localhost:{{http_port}}"
+  # How this environment tears itself down. Used when a build fails partway:
+  # keel removes the directory it created, and without this the containers,
+  # volumes and network it started stay behind holding a bind mount to a
+  # path that no longer exists. The next attempt then reuses that container
+  # and dies with "current working directory is outside of container mount
+  # namespace root".
+  down: "docker compose down -v --remove-orphans"
+  restart: "docker compose restart"
+  create: "docker compose build"
+  # -T because these run from scripts and CI, where there is no TTY.
+  exec: "docker compose exec -T app"
+smoke:
+  - "docker compose ps"
+files:
+  - path: Dockerfile
+    content: |
+      # Two kinds of image, and the distinction is not cosmetic.
+      #
+      # `dev` is what compose builds. It carries no application code and no
+      # dependencies, because the project is bind-mounted from the host: `uv
+      # sync` run through keel writes .venv and uv.lock to your working tree
+      # where they belong, and an edit is live without a rebuild.
+      #
+      # The stages after it build the production image, which copies the source
+      # in and installs without dev dependencies. Build it explicitly with
+      # `docker build --target runtime .`.
+      #
+      # Pointing compose at the production stage instead would look like it
+      # works and would not: with no bind mount, everything uv writes lands in
+      # a layer that the next `--build` discards.
+      FROM python:{{pin.python_version}}-slim-bookworm AS dev
+      COPY --from=ghcr.io/astral-sh/uv:0.12.3 /uv /uvx /bin/
+      WORKDIR /app
+      # The venv lives in the bind-mounted tree, exactly as it would on the
+      # host, so an editor and a shell outside the container see the same
+      # interpreter and the same packages.
+      ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
+          PATH="/app/.venv/bin:$PATH" \
+          PYTHONUNBUFFERED=1
+      # uid 1000, matching the default first user on a Linux or WSL host, so
+      # files created in the bind mount are owned by you rather than by root.
+      # A separate stage does not inherit the runtime stage's ENV. Gradio's own
+      # note on GRADIO_SERVER_NAME is that it is "crucial for allowing
+      # connections from outside the container"; the default 127.0.0.1 means
+      # unreachable.
+      ENV GRADIO_SERVER_NAME=0.0.0.0 \
+          GRADIO_SERVER_PORT=7860
+      RUN useradd --create-home --uid 1000 dev
+      USER dev
+      EXPOSE 7860
+      # The same probe the production stage uses. Without it here, a web server
+      # depending on `condition: service_healthy` can never start: compose
+      # reports "container has no healthcheck configured" and gives up.
+      # start-period is longer than production's because the first run installs
+      # dependencies into the bind mount before the app can serve anything.
+      HEALTHCHECK --interval=10s --timeout=5s --start-period=180s --retries=10 \
+        CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:7860/', timeout=4).status == 200 else 1)"
+      # The bind mount has no .venv on a first run, and the framework itself
+      # lives in it, so `uv run` would fail and `restart: unless-stopped` would
+      # turn that into a restart loop that `docker compose exec` cannot attach
+      # to. Wait for the install keel is about to run, then exec the real
+      # server so it still receives SIGTERM as PID 1.
+      CMD ["sh", "-c", "until [ -d .venv ]; do echo 'waiting for dependencies'; sleep 2; done; exec uv run python app.py"]
+
+      # keel-generated.
+      #
+      # Gradio ships a Dockerfile in "Deploying a Gradio app with Docker". It is
+      # five lines and deliberately minimal: no non-root user, no healthcheck, no
+      # dependency file, no model cache volume. Everything this file adds beyond
+      # GRADIO_SERVER_NAME and EXPOSE is keel's, not Gradio's, and is marked
+      # where it matters.
+      #
+      # The base is pinned to a patch release. The vendor uses python:3.10-slim,
+      # which is Gradio's documented floor ("Gradio requires Python 3.10 or
+      # higher") rather than a current release; keel tracks a supported CPython
+      # instead, which is inside that floor.
+      FROM python:{{pin.python_version}}-slim-bookworm AS build
+
+      # uv pinned, per uv's own Docker guidance. :latest would mean a different
+      # installer on every build.
+      COPY --from=ghcr.io/astral-sh/uv:0.12.3 /uv /uvx /bin/
+
+      WORKDIR /app
+      ENV UV_COMPILE_BYTECODE=1 \
+          UV_LINK_MODE=copy \
+          UV_PROJECT_ENVIRONMENT=/app/.venv
+
+      # Dependencies before application code. The vendor Dockerfile does the
+      # opposite (COPY . . then pip install gradio), which reinstalls the whole
+      # dependency tree on every code edit.
+      COPY pyproject.toml uv.lock* ./
+      # --frozen fails when the lockfile is out of date instead of quietly
+      # resolving a different tree. That matters more here than almost anywhere:
+      # a Gradio image usually carries a model stack where a silently different
+      # torch or transformers is a different set of numerical results.
+      # A freshly scaffolded project has no uv.lock yet, so the first build
+      # creates one; commit it, and from then on --frozen is a real guarantee
+      # rather than a formality. The branch exists so that a lockfile which IS
+      # present is never silently regenerated.
+      RUN if [ -f uv.lock ]; then \
+            uv sync --frozen --no-dev --no-install-project; \
+          else \
+            uv lock && uv sync --frozen --no-dev --no-install-project; \
+          fi
+      COPY . .
+      RUN uv sync --frozen --no-dev
+
+      FROM python:{{pin.python_version}}-slim-bookworm AS runtime
+      # Non-root. Gradio's own Dockerfile runs as root; that is keel departing
+      # from the vendor on purpose.
+      RUN useradd --create-home --uid 10001 app
+      # uv in the runtime stage too: keel's task vocabulary runs `uv run` inside
+      # this container. One pinned static binary; the dev dependency tree is
+      # still absent from the image.
+      COPY --from=ghcr.io/astral-sh/uv:0.12.3 /uv /uvx /bin/
+      WORKDIR /app
+      COPY --from=build --chown=app:app /app /app
+      ENV PATH="/app/.venv/bin:$PATH" \
+          PYTHONUNBUFFERED=1 \
+          PYTHONDONTWRITEBYTECODE=1 \
+          UV_PROJECT_ENVIRONMENT=/app/.venv
+
+      # GRADIO_SERVER_NAME="0.0.0.0" is the vendor's own line and it is not
+      # optional: it is "crucial for allowing connections from outside the
+      # container", because it makes Gradio "listen on all network interfaces".
+      # The default is 127.0.0.1, which in a container means unreachable.
+      # GRADIO_SERVER_PORT restates the documented default of 7860 so it matches
+      # EXPOSE and the healthcheck below.
+      ENV GRADIO_SERVER_NAME=0.0.0.0 \
+          GRADIO_SERVER_PORT=7860
+
+      # GRADIO_ANALYTICS_ENABLED defaults to "True". A production deployment
+      # should not phone home and an air-gapped one cannot. keel's decision, not
+      # a vendor recommendation.
+      ENV GRADIO_ANALYTICS_ENABLED=False
+
+      # GRADIO_TEMP_DIR defaults to the system temporary directory, so uploads
+      # and cached examples land in the container's ephemeral filesystem. Pointed
+      # at the volume declared in compose.yaml instead.
+      ENV GRADIO_TEMP_DIR=/app/tmp
+
+      # FORWARDED_ALLOW_IPS defaults to 127.0.0.1, which is never the proxy's
+      # address from inside a container, so without this the app records the
+      # proxy as the client. Gradio: it "defines trusted IP addresses for reverse
+      # proxy configurations, enabling proper client IP detection via the
+      # X-Forwarded-For header". "*" is only defensible because this port is
+      # never published, so the proxy is the sole peer.
+      ENV FORWARDED_ALLOW_IPS=*
+
+      USER app
+      # Created before the volumes are mounted over them. A named volume takes
+      # its ownership from the image path it covers, so a directory that does not
+      # exist here would be created by the daemon as root and the app user could
+      # not write to it.
+      RUN mkdir -p /app/tmp /home/app/.cache/huggingface
+      EXPOSE 7860
+
+      # Gradio publishes no health endpoint on any page, so this probes the root
+      # document. A 200 proves the Uvicorn server inside Gradio is serving the
+      # app shell, not merely that the socket is open. It does not prove the
+      # model loaded or that the queue is draining; nothing documented does.
+      # keel's inference.
+      #
+      # start-period is generous because a Gradio image usually loads model
+      # weights at import time, and a probe that fails during that is a restart
+      # loop.
+      HEALTHCHECK --interval=20s --timeout=5s --start-period=120s --retries=5 \
+        CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:7860/', timeout=4).status == 200 else 1)"
+
+      # The vendor CMD. There is deliberately no worker flag, because Gradio
+      # documents no multi-process mode for a demo.
+      #
+      # Do not add share=True to launch(): those links "are publicly accessible,
+      # meaning that anyone can use your model for prediction", and expire after
+      # a week. They are a demo convenience, not a deployment.
+      CMD ["python", "app.py"]
+
+      # If the app is proxied to a subpath, set GRADIO_ROOT_PATH to exactly the
+      # location prefix, e.g. GRADIO_ROOT_PATH=/gradio-demo. Gradio: "you'll
+      # need to set the root_path to be the same as the subpath that you
+      # specified in your nginx configuration. This is necessary for Gradio to
+      # run on any subpath besides the root of the domain."
+  - path: compose.yaml
+    content: |
+      # keel-generated.
+      services:
+        app:
+          build:
+            context: .
+            # dev, not a production stage. See the note at the top of the
+            # Dockerfile: without the bind mount below, anything installed into
+            # this container is discarded by the next build.
+            target: dev
+          restart: unless-stopped
+          env_file:
+            # required: false so a checkout without a .env still comes up.
+            # Listing a missing env_file the short way is a hard compose error.
+            - path: .env
+              required: false
+          # expose, not ports: the web server is the only ingress, which is what
+          # makes FORWARDED_ALLOW_IPS=* defensible.
+          expose: ["7860"]
+          # See the note at the top of this recipe. Raising this is undocumented
+          # by the vendor in both directions: the queue is in-process and
+          # in-memory, model weights are per process, and files written by one
+          # replica are invisible to another.
+          deploy:
+            replicas: 1
+          volumes:
+            # The project itself, so uv writes .venv and uv.lock to the host
+            # and an edit takes effect without a rebuild.
+            - .:/app
+            # GRADIO_TEMP_DIR and the examples cache are local paths. Without a
+            # volume, uploads and cached examples vanish on every restart.
+            - gradio-tmp:/app/tmp
+            # Model weights downloaded at first run, kept out of the image and
+            # out of the restart path. keel's addition: Gradio documents no
+            # model cache strategy.
+            - hf-cache:/home/app/.cache/huggingface
+          # Nothing documents how Gradio handles SIGTERM or what happens to an
+          # in-flight queue entry, and the queue is not durable across a restart
+          # in any case. 30s is keel's allowance for an inference to finish
+          # rather than be cut; raise it if the model is slow. Not a vendor
+          # number.
+          stop_grace_period: 30s
+
+        # The database, when one is selected. Every field that differs between
+        # Postgres, MySQL and MariaDB comes from the chosen db recipe as a var,
+        # so this one definition serves all three.
+        db:
+          image: {{db.type}}:{{db.version}}
+          restart: unless-stopped
+          environment: {{db.compose_env}}
+          volumes:
+            - dbdata:{{db.data_dir}}
+            - {{db.config_mount}}
+          {{db.command}}
+          healthcheck:
+            test: {{db.healthcheck}}
+            interval: 10s
+            timeout: 5s
+            retries: 12
+            start_period: 30s
+
+      volumes:
+        dbdata:
+        gradio-tmp:
+        hf-cache:
+  - path: .dockerignore
+    content: |
+      .git
+      .github
+      .venv
+      .keel
+      # The web server's own config and the compose files: mounted by the proxy
+      # container, never needed inside the application image.
+      docker/
+      compose.yaml
+      compose.override.yaml
+      Dockerfile
+      __pycache__
+      *.pyc
+      .env
+      .gradio/
+      flagged/
+      tmp/
+      .pytest_cache
+      .ruff_cache
+      .mypy_cache

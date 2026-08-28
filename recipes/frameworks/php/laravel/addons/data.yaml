@@ -1,0 +1,7 @@
+id: laravel-data
+kind: addon
+label: Spatie Laravel Data (typed DTOs + TS)
+appliesTo: [laravel]
+provides: [laravel-data]
+install:
+  - "{{composer}} require spatie/laravel-data"

@@ -1,0 +1,178 @@
+id: nuxt-docker
+schema_version: 2
+kind: env
+env_family: compose
+label: Docker (compose)
+appliesTo: [nuxt]
+provides: [env, docker]
+priority: -10
+# Written from docs/infra/nuxt.md.
+#
+# The preset is pinned explicitly. Nitro picks one by sniffing the environment,
+# which is convenient locally and wrong in a container: a build that guesses a
+# platform preset emits an artefact that will not run under plain node.
+#
+# .output/ is fully self-contained. It carries no package.json and needs no
+# node_modules, so the runtime stage copies one directory and nothing else.
+#
+# Nuxt has the best runtime-environment story of the meta-frameworks:
+# runtimeConfig with NUXT_* is genuinely read at runtime, so one image promotes
+# from staging to production cleanly. Two caveats that are easy to miss: a key
+# must exist in nuxt.config at build time for the NUXT_* override to bind to it,
+# and the built server does not read .env, so the values come from the
+# environment.
+#
+# Nuxt publishes no Docker guidance and no current nginx config. Everything here
+# is keel's inference from the nitro preset documentation, which
+# docs/infra/nuxt.md marks as such rather than dressing up as vendor guidance.
+# The same caveat applies to the web server recipes in infra/: the only proxy
+# block Nuxt has ever published is a Nuxt 2 legacy one, written for a pre-Nitro
+# server, and there has never been a Nuxt Apache configuration at all.
+#
+# The app service is on `expose` only, not `ports`, so nothing reaches it until
+# a web server is chosen. The nginx and Apache service recipes publish port 80
+# and become the single route in. Add a `ports` mapping here only if you
+# genuinely want the app internet-facing.
+commands:
+  start: "docker compose up -d --build"
+  # Where the project can be opened once the build finishes.
+  site_url: "http://localhost:{{http_port}}"
+  # How this environment tears itself down. Used when a build fails partway:
+  # keel removes the directory it created, and without this the containers,
+  # volumes and network it started stay behind holding a bind mount to a
+  # path that no longer exists. The next attempt then reuses that container
+  # and dies with "current working directory is outside of container mount
+  # namespace root".
+  down: "docker compose down -v --remove-orphans"
+  restart: "docker compose restart"
+  exec: "docker compose exec -T app"
+  create: "docker compose build"
+smoke:
+  - "docker compose ps"
+files:
+  - path: Dockerfile
+    content: |
+      # Two kinds of image, and the distinction is not cosmetic.
+      #
+      # `dev` is what compose builds. It carries no application code and no
+      # dependencies, because the project is bind-mounted from the host: `npm
+      # install` run through keel writes node_modules and package-lock.json to
+      # your working tree where they belong, and an edit is live without a
+      # rebuild.
+      #
+      # The stages after it build the production image, which copies the source
+      # in and installs without dev dependencies. Build it explicitly with
+      # `docker build --target runtime .`.
+      #
+      # Pointing compose at the production stage instead would look like it
+      # works and would not: with no bind mount, every file npm writes lands in
+      # a layer that the next `--build` discards.
+      FROM node:{{pin.node_version}}-slim AS dev
+      WORKDIR /app
+      # uid 1000 in the node image, which matches the default first user on a
+      # Linux or WSL host, so files created in the bind mount are owned by you
+      # rather than by root.
+      USER node
+      EXPOSE 3000
+      # -- --host 0.0.0.0: this framework's dev server binds to localhost by
+      # default, which inside a container means only the container itself can
+      # reach it. The proxy connects over the compose network, so it must
+      # listen on all interfaces.
+      # As above: wait for the dependencies keel installs into the bind mount.
+      # --host because this framework's dev server binds to localhost by
+      # default, which inside a container only the container itself can reach.
+      CMD ["sh", "-c", "until [ -f node_modules/.package-lock.json ]; do echo \"waiting for dependencies\"; sleep 2; done; exec npm run dev -- --host 0.0.0.0"]
+
+      FROM node:{{pin.node_version}}-slim AS deps
+      WORKDIR /app
+      # package-lock.json* (glob) so a freshly scaffolded project, which has no
+      # lockfile yet, still builds. Commit the lock and npm ci becomes a real
+      # guarantee rather than a formality.
+      COPY package.json package-lock.json* ./
+      RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
+
+      FROM node:{{pin.node_version}}-slim AS build
+      WORKDIR /app
+      COPY --from=deps /app/node_modules ./node_modules
+      COPY . .
+      # Explicit, not sniffed. See the note at the top of this recipe.
+      ENV NITRO_PRESET=node-server
+      RUN npm run build
+
+      FROM node:{{pin.node_version}}-slim AS runtime
+      ENV NODE_ENV=production
+      WORKDIR /app
+      COPY --from=build --chown=node:node /app/.output ./.output
+      USER node
+      EXPOSE 3000
+      CMD ["node", ".output/server/index.mjs"]
+  - path: compose.yaml
+    content: |
+      services:
+        app:
+          build:
+            context: .
+            # dev, not a production stage. See the note at the top of the
+            # Dockerfile: without the bind mount below, anything installed into
+            # this container is discarded by the next build.
+            target: dev
+          volumes:
+            # The project itself, so npm writes node_modules and the lockfile to
+            # the host and an edit takes effect without a rebuild.
+            - .:/app
+          restart: unless-stopped
+          env_file:
+            # required: false so a fresh scaffold comes up before anyone has written
+            # a .env. The short form (env_file: [.env]) is a hard compose error when
+            # the file is absent, and these recipes ship .env.example, not .env.
+            - path: .env
+              required: false
+          environment:
+            NITRO_HOST: "0.0.0.0"
+            NITRO_PORT: "3000"
+          expose: ["3000"]
+          healthcheck:
+            test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+            interval: 15s
+            timeout: 5s
+            retries: 5
+            start_period: 20s
+          stop_grace_period: 30s
+
+        # The database, when one is selected.
+        #
+        # Every field that differs between Postgres, MySQL and MariaDB comes from
+        # the chosen db recipe as a var, so this one definition serves all three.
+        # Writing it per engine is what left the Node frameworks with no database
+        # service at all: the compose file only ever had `app`, the db recipe's
+        # overlay had no image, and compose does not auto-merge that overlay, so
+        # picking a database silently produced nothing.
+        db:
+          image: {{db.type}}:{{db.version}}
+          restart: unless-stopped
+          environment: {{db.compose_env}}
+          volumes:
+            - dbdata:{{db.data_dir}}
+            # The tuned configuration the db recipe wrote. Mounted here rather
+            # than left in an overlay file compose never reads.
+            - {{db.config_mount}}
+          {{db.command}}
+          healthcheck:
+            # The app waits on this, so it must answer only once the server
+            # really accepts connections rather than when the port opens.
+            test: {{db.healthcheck}}
+            interval: 10s
+            timeout: 5s
+            retries: 12
+            start_period: 30s
+
+      volumes:
+        dbdata:
+  - path: .dockerignore
+    content: |
+      node_modules
+      .output
+      .nuxt
+      .git
+      .env*
+      npm-debug.log

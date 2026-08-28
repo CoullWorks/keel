@@ -1,0 +1,397 @@
+id: mysql
+schema_version: 2
+kind: db
+label: MySQL 8.4 LTS (tuned)
+aliases: [django-mysql]
+# woocommerce and woocommerce-bedrock are here as alternatives to MariaDB (which
+# is their default): WordPress supports both, and a project whose production
+# database is MySQL should develop against MySQL.
+appliesTo: [django, laravel, symfony, woocommerce, woocommerce-bedrock, express, fastify, hono, nestjs, adonisjs, nuxt, astro, sveltekit, flask, dash, streamlit, gradio]
+provides: [db, mysql, db-mysql]
+conflicts: [db-postgres, db-mariadb, db-mongo]
+priority: -5
+updated: 2026-08-12
+# The engine version is a choice. keel recommends one and the var below
+# reads the answer, so the compose image tag, the DDEV database type and
+# the tuning file all follow a single decision.
+versions:
+  mysql_version:
+    label: mysql version
+    recommended: "8.4"
+    options:
+      - value: "8.4"
+        label: "MySQL 8.4 LTS"
+        note: "current LTS, supported to Apr 2032"
+      - value: "9.4"
+        label: "MySQL 9.4"
+        note: "innovation release: newest features, short support window"
+vars:
+  db.type: mysql
+  # 8.4, not 8.0. MySQL 8.0 reached end of life in April 2026 (final release
+  # 8.0.46), so a project scaffolded on it starts with no security updates.
+  # 8.4 is the current LTS with the longest overlap: DDEV supports it, Adobe
+  # lists MySQL 8.4 for Magento 2.4.8-p5 and 2.4.9, and the next LTS (9.7) is
+  # the documented upgrade target.
+  # https://dev.mysql.com/doc/refman/8.4/en/mysql-releases.html
+  # Note MySQL has since moved to calendar versioning (26.7 = July 2026), so a
+  # "mysql:9"-style tag no longer means what it used to.
+  # See mariadb.yaml for why this is a whole flag and why it references the
+  # pin rather than db.version.
+  db.ddev_flag: "--database=mysql:{{pin.mysql_version}}"
+  db.version: "{{pin.mysql_version}}"
+  db.host: db
+  db.port: "3306"
+  db.name: db
+  db.user: db
+  db.password: db
+  db.localPort: "33306" # host port the native env publishes on (loopback only)
+  db.sail: mysql # the service name Sail uses for this database
+  # The three vars below let ONE compose service definition serve any engine.
+  # Without them every framework has to hand-write a postgres service, a mysql
+  # service and a mariadb service, which is how nine Node frameworks ended up
+  # with no database service at all: nobody wrote the third copy.
+  #
+  # compose_env and healthcheck are YAML FLOW form (on one line) on purpose, so
+  # they can be substituted into a compose file without the caller having to
+  # know how deeply the block is indented.
+  #
+  # The credentials are written out rather than referencing db.name/db.user:
+  # a recipe's vars are rendered in sorted key order, so db.compose_env is
+  # resolved before db.name exists and the reference would survive as a
+  # literal token in the compose file.
+  db.compose_env: "{MYSQL_DATABASE: db, MYSQL_USER: db, MYSQL_PASSWORD: db, MYSQL_ROOT_PASSWORD: db}"
+  db.data_dir: /var/lib/mysql
+  db.healthcheck: "[\"CMD-SHELL\", \"mysqladmin ping -h 127.0.0.1 -udb -pdb --silent\"]"
+  # The tuned configuration this recipe writes, and how the server is told to
+  # read it. Published as vars so the framework's own compose service mounts
+  # them directly.
+  #
+  # They used to live in a separate docker-compose.<engine>.yml, which compose
+  # never merged (only compose.override.yaml is automatic). Every stack was
+  # therefore running on the image defaults while carrying a tuning file that
+  # nothing read.
+  db.config_mount: ./.keel/mysql/my.cnf:/etc/mysql/conf.d/keel-mysql.cnf:ro
+  # db.command carries the WHOLE line, key included, because only Postgres
+  # needs one and a recipe has no way to omit a line conditionally. Where it
+  # is empty the template renders a blank line, which YAML ignores.
+  db.command: ""
+  db.prisma: mysql
+  db.drizzle: mysql
+  db.drizzle_driver: mysql2
+  db.url: "mysql://db:db@db:3306/db"
+files:
+  - path: .keel/mysql/my.cnf
+    content: |
+      # keel-generated: MySQL 8.4 LTS server configuration.
+      #
+      # Sized for a database container with 2 GB of RAM. Every derived value shows
+      # its arithmetic so the numbers can be redone for a real node rather than
+      # scaled by feel.
+      #
+      # Sources, all fetched 2026-08-12, all from the MySQL 8.4 manual:
+      #   [1] The InnoDB Buffer Pool
+      #       https://dev.mysql.com/doc/refman/8.4/en/innodb-buffer-pool.html
+      #   [2] Configuring Multiple Buffer Pool Instances
+      #       https://dev.mysql.com/doc/refman/8.4/en/innodb-multiple-buffer-pools.html
+      #   [3] Configuring InnoDB Buffer Pool Size
+      #       https://dev.mysql.com/doc/refman/8.4/en/innodb-buffer-pool-resize.html
+      #   [4] Optimizing InnoDB Redo Logging
+      #       https://dev.mysql.com/doc/refman/8.4/en/optimizing-innodb-logging.html
+      #   [5] Optimizing InnoDB Transaction Management
+      #       https://dev.mysql.com/doc/refman/8.4/en/optimizing-innodb-transaction-management.html
+      #   [6] Optimizing InnoDB Disk I/O
+      #       https://dev.mysql.com/doc/refman/8.4/en/optimizing-innodb-diskio.html
+      #   [7] What Is New in MySQL 8.4 since 8.0 (changed defaults)
+      #       https://dev.mysql.com/doc/refman/8.4/en/mysql-nutshell.html
+      #   [8] Server Character Set and Collation
+      #       https://dev.mysql.com/doc/refman/8.4/en/charset-server.html
+      #   [9] The utf8mb3 Character Set
+      #       https://dev.mysql.com/doc/refman/8.4/en/charset-unicode-utf8mb3.html
+      #  [10] DNS Lookups and the Host Cache
+      #       https://dev.mysql.com/doc/refman/8.4/en/host-cache.html
+      #  [11] InnoDB Startup Options and System Variables
+      #       https://dev.mysql.com/doc/refman/8.4/en/innodb-parameters.html
+
+      [mysqld]
+
+      # ------------------------------------------------------------- character set
+      # "The recommended character set for MySQL is utf8mb4. All new applications
+      # should use utf8mb4." [9] utf8mb4 is the one that stores the whole of
+      # Unicode; the alternative, utf8mb3, is three bytes per character, so emoji
+      # and anything outside the Basic Multilingual Plane cannot be stored.
+      #
+      # And the name is a trap: the MySQL manual's own section heading is "The
+      # utf8 Character Set (Deprecated alias for utf8mb3)" [9]. Writing utf8 in a
+      # config, a CREATE TABLE or a DSN does not give you UTF-8.
+      #
+      # SERVER level, not per database. A database-level CHARACTER SET only
+      # applies to tables created without one, and it says nothing about the
+      # connection, which is how a project ends up with utf8mb4 storage and a
+      # latin1 session mangling everything on the way in.
+      character-set-server = utf8mb4
+
+      # "By default, these are utf8mb4 and utf8mb4_0900_ai_ci" [8]. Stated rather
+      # than assumed, because a schema restored from a MySQL 5.7 dump arrives with
+      # utf8mb4_general_ci and the mismatch only shows up later as
+      # "Illegal mix of collations" on a join.
+      #
+      # ai_ci = accent-insensitive, case-insensitive: 'cafe' matches 'café' and
+      # 'CAFE'. Use utf8mb4_0900_as_cs where that is wrong (product SKUs,
+      # case-sensitive tokens).
+      #
+      # NOT portable to MariaDB. MariaDB accepts the name but maps it to
+      # utf8mb4_uca1400_nopad_ai_ci, a different Unicode version with different
+      # trailing-space semantics. See db/mariadb.yaml.
+      collation-server = utf8mb4_0900_ai_ci
+
+      # "To disable DNS host name lookups, start the server with the
+      # skip_name_resolve system variable enabled. In this case, the server uses
+      # only IP addresses and not host names to match connecting hosts to rows in
+      # the MySQL grant tables." [10] In a container every connection would
+      # otherwise wait on a reverse lookup of an ephemeral container IP. Grants
+      # must use IP addresses or localhost, which is what the image's own grants
+      # already do.
+      skip_name_resolve = ON
+
+      # ------------------------------------------------------------------- InnoDB
+      # "On dedicated servers, up to 80% of physical memory is often assigned to
+      # the buffer pool." [1] The default is 128 MB, which is why an untuned
+      # container reads almost every page from disk.
+      #
+      # Arithmetic, 2 GB container:
+      #   2048 MB total
+      #   - per-connection buffers: max_connections 200 x ~1 MB peak     = 200 MB
+      #   - redo log buffer (64 MB default in 8.4 [7])                   =  64 MB
+      #   - server, temp tables, connection threads, headroom            = ~750 MB
+      #   => 1024 MB (50%). The 80% figure is for a machine that runs nothing
+      #      else; a container that also has to hold its own overhead does not
+      #      get there.
+      # A dedicated 16 GB node: 16384 x 0.75 = 12288 -> 12G.
+      #
+      # And it must land on a legal boundary: "Buffer pool size must always be
+      # equal to or a multiple of innodb_buffer_pool_chunk_size *
+      # innodb_buffer_pool_instances" [3]. With the default 128M chunk and 1
+      # instance, 1024M = 8 x 128M, so this value is exact. Get it wrong and
+      # "buffer pool size is automatically adjusted" upward [3]: the manual's own
+      # example turns a requested 9G into 10G, which is 1 GB of RAM you did not
+      # agree to spend.
+      innodb_buffer_pool_size = 1G
+
+      # "This option takes effect only when you set innodb_buffer_pool_size to a
+      # size of 1GB or more" and "For best efficiency, specify a combination of
+      # innodb_buffer_pool_instances and innodb_buffer_pool_size so that each
+      # buffer pool instance is at least 1GB." [2]
+      #
+      # 1 GB of pool therefore buys exactly one instance. Splitting it further
+      # would give sub-gigabyte instances, which the manual advises against, and
+      # each instance keeps its own free list, flush list and LRU, so small
+      # instances waste memory rather than reduce contention.
+      # 12G pool on an 8-core node: instances = 12G / 1G ceiling vs the CPU hint
+      # of 1/4 of logical processors [11] = 2, so 2 instances of 6G each.
+      innodb_buffer_pool_instances = 1
+
+      # Redo log. Since 8.0.30 the size is set as one capacity figure, not as a
+      # file size: innodb_log_file_size and innodb_log_files_in_group are
+      # deprecated in favour of innodb_redo_log_capacity [11]. "InnoDB tries to
+      # maintain 32 redo log files of the same size, with each file equal to 1/32
+      # * innodb_redo_log_capacity" [4], so 512M here means 32 files of 16 MB.
+      #
+      # Why raise it from the documented 100M default [11]: "When InnoDB has
+      # written redo log files full, it must write the modified contents of the
+      # buffer pool to disk in a checkpoint. Small redo log files cause many
+      # unnecessary disk writes." [4]
+      # The cost is crash recovery: everything since the last checkpoint has to
+      # be replayed at start-up, so a bigger redo log means a slower restart
+      # after an unclean shutdown.
+      innodb_redo_log_capacity = 512M
+
+      # DURABILITY. 1 is the default and the only value that survives any crash
+      # with every committed transaction intact: the log is written and flushed
+      # to disk at each commit.
+      #
+      # The other two trade committed data for throughput. The manual is direct
+      # about 0: "If you can afford the loss of some of the latest committed
+      # transactions if an unexpected exit occurs, you can set the
+      # innodb_flush_log_at_trx_commit parameter to 0. InnoDB tries to flush the
+      # log once per second anyway, although the flush is not guaranteed." [5]
+      # Value 2 writes to the operating system at every commit but flushes once a
+      # second, so a mysqld crash loses nothing while an OS crash or power cut
+      # can erase the last second of transactions [11].
+      #
+      # Said plainly: on a store, value 2 means a power cut can lose an order the
+      # customer has already paid for. Reasonable for a CI database or a
+      # rebuildable replica. Not for a primary.
+      innodb_flush_log_at_trx_commit = 1
+
+      # innodb_flush_method is deliberately NOT set. MySQL 8.4 changed the Linux
+      # default from fsync to "O_DIRECT if supported, otherwise fsync" [7], so
+      # setting it changes nothing on this version. O_DIRECT is what stops the
+      # filesystem cache holding a second copy of pages the buffer pool already
+      # has: "O_DIRECT can help to avoid double buffering between the InnoDB
+      # buffer pool and the operating system file system cache" [11], and it is
+      # also what the doublewrite buffer wants: "To take full advantage of this
+      # feature, an innodb_flush_method setting of O_DIRECT is recommended." [6]
+
+      # innodb_io_capacity is deliberately NOT set either, and this is the line
+      # most copied-from-the-internet configs get backwards. 8.4 raised the
+      # default from 200 to 10000 [7] and states "The default setting of 10000 is
+      # generally sufficient" [6]. A my.cnf carried over from an 8.0 template
+      # that sets innodb_io_capacity = 200 now throttles background flushing to a
+      # fiftieth of the server's own default.
+      #
+      # Two more 8.4 default flips worth knowing before copying an old file:
+      # innodb_adaptive_hash_index is now OFF and innodb_change_buffering is now
+      # none [7]. Both were on in 8.0.
+
+      # innodb_dedicated_server is an alternative to the buffer-pool arithmetic
+      # above: it auto-sizes innodb_buffer_pool_size and innodb_redo_log_capacity
+      # from detected memory (0.75 x memory above 4 GB), and the manual scopes it
+      # to a dedicated server, VM or container. It is left off here because
+      # "detected memory" is the memory the process can see, and a container
+      # without an explicit memory limit sees the whole host: on a 32 GB laptop
+      # that is a 24 GB buffer pool for a development database.
+      # Turn it on only where the container HAS a memory limit and nothing else
+      # shares it, and drop the two explicit settings above if you do.
+      # https://dev.mysql.com/doc/refman/8.4/en/innodb-dedicated-server.html
+
+      # -------------------------------------------------------------- connections
+      # Each connection is a thread plus its per-connection buffers, so this is a
+      # memory decision. Arithmetic for a PHP-FPM application:
+      #   2 web nodes x 40 FPM children       =  80
+      #   queue workers and cron              =  20
+      #   migrations, admin, monitoring       =  20
+      #   headroom                            =  80
+      #   => 200
+      # MySQL "actually permits max_connections + 1 client connections. The extra
+      # connection is reserved for use by accounts that have the CONNECTION_ADMIN
+      # privilege", which is what lets an administrator get in with SHOW
+      # PROCESSLIST when the pool is exhausted.
+      # https://dev.mysql.com/doc/refman/8.4/en/connection-interfaces.html
+      # Raising this without redoing the buffer-pool arithmetic above is how a
+      # container starts getting OOM-killed under load rather than queueing.
+      max_connections = 200
+
+      # Sized for a mysqldump restore of a wide row (product descriptions,
+      # serialised payloads, small BLOBs). A restore that dies partway with
+      # "packet too large" is almost always this.
+      max_allowed_packet = 64M
+
+      # ------------------------------------------------------------ observability
+      # The slow query log is off by default and the threshold is 10 seconds,
+      # which is long past the point where a page is broken for the user. One
+      # second surfaces the queries worth reading without logging everything.
+      slow_query_log = ON
+      long_query_time = 1
+
+      [client]
+      default-character-set = utf8mb4
+provision:
+  ddev:
+    files:
+      - path: .ddev/config.db.yaml
+        content: |
+          # keel-generated: MySQL. Frameworks read KEEL_DB and the DB_* vars.
+          database:
+            type: mysql
+            version: "{{db.version}}"
+          web_environment:
+            - KEEL_DB=mysql
+            - DB_HOST={{db.host}}
+            - DB_PORT={{db.port}}
+            - DB_NAME={{db.name}}
+            - DB_USER={{db.user}}
+            - DB_PASSWORD={{db.password}}
+    install:
+      # "You can provide additional MySQL/MariaDB configuration for a project by
+      # creating a directory called .ddev/mysql/ and adding any number of *.cnf
+      # MySQL configuration files. These files will be automatically included
+      # when MySQL is started."
+      # https://docs.ddev.com/en/stable/users/extend/customization-extendibility/
+      #
+      # Copied rather than written twice: .keel/mysql/my.cnf stays the single
+      # source of truth (and the copy you deploy with), and DDEV gets the same
+      # bytes at the path it reads.
+      - "mkdir -p .ddev/mysql && cp .keel/mysql/my.cnf .ddev/mysql/keel-mysql.cnf"
+      - "{{restart}}"
+  # The environment's stack already declares the db service; this merges the
+  # tuning and the healthcheck into it rather than starting a second server:
+  #   docker compose -f docker-compose.yml -f docker-compose.mysql.yml up -d
+  compose:
+    files:
+      - path: docker-compose.mysql.yml
+        content: |
+          # keel-generated: tuning overlay for the db service in docker-compose.yml.
+          services:
+            db:
+              volumes:
+                # The image documents mounting a DIRECTORY at /etc/mysql/conf.d;
+                # a single file is mounted here instead so the image's own
+                # docker.cnf survives. Files there are read after the built-in
+                # defaults, so these values win.
+                # https://hub.docker.com/_/mysql
+                - ./.keel/mysql/my.cnf:/etc/mysql/conf.d/keel-mysql.cnf:ro
+              healthcheck:
+                # Runs a real authenticated query as the application user.
+                #
+                # NOT mysqladmin ping, and the manual says why: "The return
+                # status from mysqladmin is 0 if the server is running, 1 if it
+                # is not. This is 0 even in case of an error such as Access
+                # denied, because this means that the server is running but
+                # refused the connection, which is different from the server not
+                # running."
+                # https://dev.mysql.com/doc/refman/8.4/en/mysqladmin.html
+                # So a mysqladmin ping healthcheck goes green on a database whose
+                # user does not exist, whose password is wrong, or whose schema
+                # was never created, and the application starts anyway and fails
+                # at its first query.
+                test: ["CMD-SHELL", "mysql -h 127.0.0.1 -u\"$$MYSQL_USER\" -p\"$$MYSQL_PASSWORD\" -e 'SELECT 1' \"$$MYSQL_DATABASE\" >/dev/null 2>&1 || exit 1"]
+                interval: 10s
+                timeout: 5s
+                retries: 12
+                # First start initialises the data directory and "it will not
+                # accept incoming connections until such initialization
+                # completes" (image docs). Without a start_period the container
+                # is unhealthy before it has ever had a chance.
+                start_period: 60s
+  sail: {}
+  local:
+    install:
+      - "docker compose -f docker-compose.db.yml up -d"
+    files:
+      - path: docker-compose.db.yml
+        content: |
+          # keel-generated: a local MySQL for development, tuned by
+          # .keel/mysql/my.cnf (edit that file, then bring the service up again).
+          services:
+            db:
+              image: mysql:{{db.version}}
+              restart: unless-stopped
+              environment:
+                MYSQL_DATABASE: {{db.name}}
+                MYSQL_USER: {{db.user}}
+                MYSQL_PASSWORD: {{db.password}}
+                MYSQL_ROOT_PASSWORD: {{db.password}}
+              volumes:
+                - dbdata:/var/lib/mysql
+                - ./.keel/mysql/my.cnf:/etc/mysql/conf.d/keel-mysql.cnf:ro
+              healthcheck:
+                # A real query as the application user; see the compose overlay
+                # for why mysqladmin ping is not good enough.
+                test: ["CMD-SHELL", "mysql -h 127.0.0.1 -u\"$$MYSQL_USER\" -p\"$$MYSQL_PASSWORD\" -e 'SELECT 1' \"$$MYSQL_DATABASE\" >/dev/null 2>&1 || exit 1"]
+                interval: 10s
+                timeout: 5s
+                retries: 12
+                start_period: 60s
+              # Loopback only, on a non-default host port: see postgres.yaml.
+              ports: ["127.0.0.1:{{db.localPort}}:3306"]
+          volumes:
+            dbdata:
+      - path: .env
+        content: |
+          # keel: connection for the local mysql container.
+          KEEL_DB=mysql
+          DB_HOST=127.0.0.1
+          DB_PORT={{db.localPort}}
+          DB_NAME={{db.name}}
+          DB_USER={{db.user}}
+          DB_PASSWORD={{db.password}}

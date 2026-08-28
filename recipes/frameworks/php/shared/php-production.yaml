@@ -1,0 +1,165 @@
+id: php-production-baseline
+schema_version: 2
+kind: config
+label: Shared PHP production baseline (php.ini + FPM global)
+# The SHARED half of the PHP split. Everything in here is identical for every PHP
+# framework keel ships, so it is written once and every compose stack picks it up.
+# What is NOT here: opcache sizing, memory_limit, max_execution_time, the realpath
+# cache and the FPM pool. Those genuinely differ per framework (Magento's numbers
+# are nothing like Laravel's) and live in each framework's own infra/php-fpm.yaml.
+#
+# Load order is what makes the split work. PHP reads $PHP_INI_DIR/conf.d/*.ini in
+# filename order, so 00-php-production.ini here is read before a framework's
+# 10-<framework>.ini and any value below can be overridden by the framework
+# without editing this file. Same trick for the pool: php-fpm.conf includes
+# php-fpm.d/*.conf in filename order, zz-global.conf here then
+# zzz-<framework>-pool.conf from the framework.
+#
+# Injected, never chosen: it applies to any compose-family env of the five PHP
+# frameworks. priority -20 puts it ahead of the env recipe (-10) so the files
+# exist before anything runs `docker compose up --build`.
+when:
+  frameworks: [laravel, magento, symfony, woocommerce]
+  env: compose
+priority: -20
+updated: 2026-08-12
+files:
+  - path: docker/php/conf.d/00-php-production.ini
+    verbatim: true
+    content: |
+      ; keel-generated. Shared PHP production baseline for every PHP framework.
+      ;
+      ; Read BEFORE docker/php/conf.d/10-<framework>.ini, so anything here can be
+      ; overridden by the framework that needs to. Do not put opcache sizing,
+      ; memory_limit, max_execution_time or realpath cache values in this file:
+      ; they differ per framework and belong in the framework's own ini.
+      ;
+      ; Every value below is either a php.ini-production value from the PHP source
+      ; tarball or a documented directive default from php.net. The comment says
+      ; which, so a reviewer can check it.
+
+      [PHP]
+
+      ; --- disclosure ------------------------------------------------------------
+      ; php.ini-production ships expose_php = Off. It removes the X-Powered-By
+      ; response header and the ?=PHPB8B5F2A0-3C92-11d3-A3A9-4C7B08C10000 easter-egg
+      ; URLs, both of which hand out the exact PHP build. php.net/manual/en/ini.core.php
+      expose_php = Off
+
+      ; php.ini-production: errors are logged, never rendered. display_errors On in
+      ; production is how database credentials end up in a browser window.
+      display_errors = Off
+      display_startup_errors = Off
+      log_errors = On
+
+      ; Containers log to stderr, which the runtime collects. /proc/self/fd/2 is the
+      ; same target the official php:*-fpm image uses for the FPM error log
+      ; (docker-library/php, php-fpm.d/docker.conf).
+      error_log = /proc/self/fd/2
+
+      ; php.ini-production's error_reporting line, verbatim.
+      error_reporting = E_ALL & ~E_DEPRECATED & ~E_STRICT
+
+      ; php.ini-production sets both. Stack traces stop carrying argument values, so
+      ; a logged exception cannot leak a password that was passed to a function.
+      zend.exception_ignore_args = On
+      zend.exception_string_param_max_len = 0
+
+      ; --- request handling ------------------------------------------------------
+      ; Magento's prerequisites page requires date.timezone to be set (it does not
+      ; say to what). UTC everywhere, and let the application convert for display.
+      ; docs/infra/magento.md, source 3.
+      date.timezone = UTC
+
+      default_charset = "UTF-8"
+
+      ; PHP's own default is 60. Kept, because max_execution_time (per framework)
+      ; is the limit that matters and FPM's request_terminate_timeout is the backstop.
+      max_input_time = 60
+
+      ; WordPress's published nginx recipe carries the note: 'NOTE: You should have
+      ; "cgi.fix_pathinfo = 0;" in php.ini'. It costs nothing on the other four and
+      ; removes the classic /uploads/evil.jpg/x.php path-info execution trick for
+      ; any server config that is less careful than the ones keel ships.
+      ; docs/infra/wordpress.md, source 5.
+      cgi.fix_pathinfo = 0
+
+      ; A conservative shared ceiling. Frameworks that need more raise it in their
+      ; own ini (WordPress and WooCommerce do, for media uploads). post_max_size must
+      ; stay >= upload_max_filesize or the upload is rejected before PHP sees it.
+      upload_max_filesize = 16M
+      post_max_size = 16M
+      max_file_uploads = 20
+
+      ; --- sessions --------------------------------------------------------------
+      ; Magento's shipped nginx.conf.sample and pub/.htaccess both disable session
+      ; autostart "before autoload was initialized". Harmless on the other four.
+      ; docs/infra/magento.md, sources 5 and 6.
+      session.auto_start = Off
+
+      ; Session cookie hardening. use_strict_mode rejects a session id the server
+      ; never issued, which is the fix for session fixation.
+      ; php.net/manual/en/session.security.ini.php
+      session.use_strict_mode = 1
+      session.use_only_cookies = 1
+      session.cookie_httponly = 1
+      session.cookie_samesite = "Lax"
+      ; Set this to 1 once the site is served over TLS only. It is 0 here because a
+      ; local compose stack answers on plain HTTP and a secure-only cookie would
+      ; never be sent, which looks like a broken login rather than a config choice.
+      session.cookie_secure = 0
+
+      [opcache]
+      ; Only the on/off switches are shared. Sizing (memory_consumption,
+      ; interned_strings_buffer, max_accelerated_files), validate_timestamps,
+      ; save_comments and preload are per framework: see docker/php/conf.d/10-*.ini.
+      ; PHP's default for opcache.enable is already 1; stated so the file shows
+      ; the opcode cache is deliberately on rather than left to the distro.
+      opcache.enable = 1
+
+      ; PHP's default is 0. CLI processes are short-lived, so caching opcodes for
+      ; them usually costs more than it saves. Magento overrides this to 1 because
+      ; Adobe's performance guide asks for it (its CLI runs are anything but short).
+      opcache.enable_cli = 0
+
+      ; The maximum wasted memory before OPcache schedules a restart, as a
+      ; percentage. PHP's default is 5; the manual caps it at 50.
+      ; php.net/manual/en/opcache.configuration.php
+      opcache.max_wasted_percentage = 10
+
+  - path: docker/php/php-fpm.d/zz-global.conf
+    verbatim: true
+    content: |
+      ; keel-generated. Shared PHP-FPM [global] settings for every PHP framework.
+      ;
+      ; php-fpm.conf includes php-fpm.d/*.conf in filename order. This file is
+      ; read after the official image's docker.conf and zz-docker.conf and before
+      ; the framework's zzz-<framework>-pool.conf, which owns the [www] pool.
+      ;
+      ; Nothing framework-specific belongs here. pm, pm.max_children,
+      ; pm.max_requests and request_terminate_timeout are pool directives and they
+      ; differ per framework.
+
+      [global]
+      ; Same target the official php:*-fpm image uses. Restated because this file
+      ; is also what you copy onto a VM that is not running the official image.
+      error_log = /proc/self/fd/2
+
+      ; docker-library/php sets this (PR 725): the default 1024-byte log line
+      ; truncates PHP fatal errors and warnings mid-message.
+      log_limit = 8192
+
+      ; The master must stay in the foreground or the container exits immediately.
+      daemonize = no
+
+      ; If 10 children die unexpectedly inside one minute, restart the whole pool
+      ; rather than bleed workers until the pool is empty. Both directives are off
+      ; by default (php.net/manual/en/install.fpm.configuration.php), which means a
+      ; segfaulting extension degrades silently instead of announcing itself.
+      emergency_restart_threshold = 10
+      emergency_restart_interval = 1m
+
+      ; How long the master waits for a worker to react to a signal before killing
+      ; it. The manual's default is 0, meaning the master gives up immediately, so a
+      ; graceful reload is not actually graceful. 10s covers a normal request.
+      process_control_timeout = 10s

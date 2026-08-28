@@ -1,0 +1,178 @@
+id: express-docker
+schema_version: 2
+kind: env
+env_family: compose
+label: Docker (compose)
+appliesTo: [express]
+provides: [env, docker]
+priority: -10
+# Written from docs/infra/express.md.
+#
+# Express is the plainest of these and needs no build step, so npm ci --omit=dev
+# is safe here. It is not safe for NestJS, AdonisJS or Hono's Node template,
+# where the compiler is a devDependency.
+#
+# Express documents graceful shutdown but ships nothing for it: the page shows a
+# bare process.on('SIGTERM') calling server.close() and names no package. It
+# says nothing about idle keep-alive connections, which is what actually keeps
+# server.close() from returning. The framework recipe supplies the handler.
+#
+# trust proxy defaults to false. Express's own warning is that setting it to
+# true requires the last trusted proxy to be removing or overwriting
+# X-Forwarded-For, -Host and -Proto, "otherwise it may be possible for the
+# client to provide any value". So this sets loopback rather than true.
+commands:
+  start: "docker compose up -d --build"
+  # Where the project can be opened once the build finishes.
+  site_url: "http://localhost:{{http_port}}"
+  # How this environment tears itself down. Used when a build fails partway:
+  # keel removes the directory it created, and without this the containers,
+  # volumes and network it started stay behind holding a bind mount to a
+  # path that no longer exists. The next attempt then reuses that container
+  # and dies with "current working directory is outside of container mount
+  # namespace root".
+  down: "docker compose down -v --remove-orphans"
+  restart: "docker compose restart"
+  exec: "docker compose exec -T app"
+  create: "docker compose build"
+smoke:
+  - "docker compose ps"
+files:
+  - path: Dockerfile
+    content: |
+      # Two targets, and the distinction matters more than it looks.
+      #
+      # `dev` is what compose builds. It carries no application code and no
+      # dependencies: the project is bind-mounted from the host, so `npm install`
+      # run through `keel` writes node_modules and package-lock.json to your
+      # working tree where they belong, and an edit is live without a rebuild.
+      #
+      # `runtime` is the production image. It copies the source in, installs
+      # without dev dependencies and runs as a non-root user. Build it with
+      # `docker build --target runtime .`.
+      #
+      # Building `runtime` for local development instead would look like it
+      # works and would not: the container has no bind mount, so every file
+      # npm writes lands in a layer that the next `--build` discards.
+      FROM node:{{pin.node_version}}-slim AS dev
+      WORKDIR /app
+      # uid 1000 in the node image, which matches the default first user on a
+      # Linux or WSL host, so files created in the bind mount are owned by you
+      # rather than by root.
+      USER node
+      EXPOSE 3000
+      # The bind mount is empty of dependencies on a first run, and most dev
+      # servers are themselves a dependency: `nest start` or `vite` simply is
+      # not there yet, the process exits, and `restart: unless-stopped` turns
+      # that into a restart loop that `docker compose exec` cannot attach to.
+      # So wait for the install keel is about to run, then exec into the real
+      # server so it still receives SIGTERM as PID 1.
+      #
+      # The marker is node_modules/.package-lock.json, not the node_modules
+      # directory: npm creates the directory at the START of an install, so
+      # testing for it starts the dev server mid-install and the binary it
+      # needs is not there yet. npm writes the hidden lockfile only once the
+      # tree is fully reified.
+      CMD ["sh", "-c", "until [ -f node_modules/.package-lock.json ]; do echo \"waiting for dependencies\"; sleep 2; done; exec npm run dev"]
+
+      FROM node:{{pin.node_version}}-slim AS runtime
+      ENV NODE_ENV=production
+      WORKDIR /app
+      # package-lock.json* (glob) so a freshly scaffolded project, which has no
+      # lockfile yet, still builds. Commit the lock and npm ci becomes a real
+      # guarantee rather than a formality.
+      COPY package.json package-lock.json* ./
+      # Full install here (not --omit=dev): a TypeScript variant needs its compiler
+      # to build. devDependencies are pruned again once the build has run, so the
+      # JavaScript variant (no build script) ends up with the same lean tree.
+      RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
+      COPY --chown=node:node . .
+      # --if-present so the JavaScript variant, which has no build script, skips
+      # this while the TypeScript variant compiles src/ to dist/.
+      RUN npm run build --if-present && npm prune --omit=dev && npm cache clean --force
+      USER node
+      EXPOSE 3000
+      # npm start, so each language variant runs its own start script: the
+      # JavaScript source directly, or the compiled output a TypeScript build wrote.
+      CMD ["npm", "start"]
+  - path: compose.yaml
+    content: |
+      services:
+        app:
+          build:
+            context: .
+            # dev, not the production stage. See the note at the top of the
+            # Dockerfile: without the bind mount below, anything installed into
+            # this container is discarded by the next build.
+            target: dev
+          volumes:
+            # The project itself, so npm writes node_modules and the lockfile to
+            # the host and an edit takes effect without a rebuild.
+            - .:/app
+          restart: unless-stopped
+          env_file:
+            # required: false so a fresh scaffold comes up before anyone has written
+            # a .env. The short form (env_file: [.env]) is a hard compose error when
+            # the file is absent, and these recipes ship .env.example, not .env.
+            - path: .env
+              required: false
+          environment:
+            HOST: "0.0.0.0"
+            PORT: "3000"
+            # Read from .env rather than pinned here, because the correct value
+            # depends on what is in front of the app and this file cannot know.
+            # The default is the no-proxy value: `loopback` means nothing
+            # forwarded is trusted from a sibling container. The nginx and
+            # Apache service recipes in infra/ raise it to
+            # "loopback, uniquelocal" when they add a proxy on the compose
+            # bridge network, whose address is RFC1918 rather than 127.0.0.1.
+            # Never `true`: Express warns that with true "it may be possible for
+            # the client to provide any value" unless the last proxy overwrites
+            # the forwarded headers.
+            TRUST_PROXY: "${TRUST_PROXY:-loopback}"
+          expose: ["3000"]
+          healthcheck:
+            test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+            interval: 15s
+            timeout: 5s
+            retries: 5
+            start_period: 15s
+          stop_grace_period: 30s
+
+        # The database, when one is selected.
+        #
+        # Every field that differs between Postgres, MySQL and MariaDB comes from
+        # the chosen db recipe as a var, so this one definition serves all three.
+        # Writing it per engine is what left the Node frameworks with no database
+        # service at all: the compose file only ever had `app`, the db recipe's
+        # overlay had no image, and compose does not auto-merge that overlay, so
+        # picking a database silently produced nothing.
+        db:
+          image: {{db.type}}:{{db.version}}
+          restart: unless-stopped
+          environment: {{db.compose_env}}
+          volumes:
+            - dbdata:{{db.data_dir}}
+            # The tuned configuration the db recipe wrote. Mounted here rather
+            # than left in an overlay file compose never reads.
+            - {{db.config_mount}}
+          {{db.command}}
+          healthcheck:
+            # The app waits on this, so it must answer only once the server
+            # really accepts connections rather than when the port opens.
+            test: {{db.healthcheck}}
+            interval: 10s
+            timeout: 5s
+            retries: 12
+            start_period: 30s
+
+      volumes:
+        dbdata:
+  - path: .dockerignore
+    content: |
+      node_modules
+      .git
+      .env
+      npm-debug.log
+      coverage
+      test

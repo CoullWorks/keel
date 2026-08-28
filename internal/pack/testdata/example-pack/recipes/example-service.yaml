@@ -1,0 +1,68 @@
+id: example-adminer
+schema_version: 2
+kind: service
+label: Adminer (a one-file database UI, added by the example pack)
+category: Database
+# A real, useful service — not a toy — so forking this teaches the actual shape.
+# Adminer is a single-file DB admin UI (the lighter alternative to phpMyAdmin),
+# added as a compose sidecar next to whatever database the project already runs.
+#
+# `appliesTo: ["*"]` because any stack can benefit from a DB UI; a real pack
+# narrows this to the frameworks it supports. `default: false` because a pack
+# recipe is opt-in: it appears in `keel new`'s Services step for you to tick, it
+# is never forced into a build.
+appliesTo: ["*"]
+provides: [adminer, db-ui]
+default: false
+updated: 2026-08-22
+vars:
+  adminer.version: "5"
+provision:
+  # How the service comes up under a Docker Compose env. keel merges this
+  # fragment into the plan for a compose-family environment; a pack that also
+  # supports ddev/sail/local adds those keys too. A missing key for the chosen
+  # env is an error the user can read, not a silent no-op.
+  compose:
+    files:
+      - path: compose.override.yaml
+        content: |
+          # Compose merges compose.override.yaml over compose.yaml, so the app
+          # and database services the env recipe wrote are left untouched — this
+          # only adds the Adminer sidecar.
+          services:
+            adminer:
+              image: adminer:5
+              restart: unless-stopped
+              ports:
+                # Bound to 127.0.0.1 so the UI is reachable on the host but never
+                # exposed to the LAN.
+                - "127.0.0.1:${ADMINER_PORT:-8081}:8080"
+  # No container under a native env; a pack could instead print how to run
+  # `php -S localhost:8081 adminer.php`. Left empty here to keep the example
+  # focused on the compose path most people use.
+  local: {}
+files:
+  - path: ADMINER.md
+    content: |
+      # Adminer (added by the example pack)
+
+      <!-- keel-generated -->
+
+      A single-file database UI, run as a compose sidecar. Open it at
+      http://127.0.0.1:8081 once the stack is up, and connect with the database
+      credentials from your `.env` (host = the db service name on the compose
+      network, e.g. `db` or `postgres`).
+
+      Remove this pack with `keel recipes remove example-pack`; this file, having
+      the `keel-generated` marker, is what a future `keel update` uses to refresh
+      or clean it safely.
+# A post_create hook, wired to the hooks/post_create.sh script. NOTE: post_create
+# fires ONLY for a framework recipe — the engine reads a recipe's post_create
+# block only when its kind is `framework`. This service is not a framework, so
+# this hook will NOT fire in a build of this pack; it is here purely to show the
+# wiring (a `script:` referencing hooks/post_create.sh) for a pack that ships its
+# own framework recipe. The addon recipe demonstrates the four stages that DO fire
+# from a non-framework pack recipe (pre_build/post_recipe/post_build/post_open).
+hooks:
+  post_create:
+    - script: hooks/post_create.sh

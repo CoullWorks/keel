@@ -1,0 +1,11 @@
+id: symfony-security
+schema_version: 2
+kind: addon
+label: Security (authentication, authorisation, password hashing)
+appliesTo: [symfony]
+requires: [db]
+provides: [auth]
+updated: 2026-08-10
+# Needs a database: the user provider reads from Doctrine.
+install:
+  - "{{composer}} require symfony/security-bundle"

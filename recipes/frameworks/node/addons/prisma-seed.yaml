@@ -1,0 +1,97 @@
+id: node-prisma-seed
+kind: addon
+label: Realistic seed data (Prisma + @faker-js/faker)
+appliesTo: [express, fastify, hono, nestjs, nuxt, astro, sveltekit]
+provides: [seed]
+# db as well as prisma: the ORM needs a database, and naming db here keeps this
+# add-on resolvable on its own (the resolver does not chase a sibling's
+# transitive requires).
+requires: [prisma, db]
+conflicts: [drizzle]
+# Runs after node-prisma so its files land on top of `prisma init`'s output.
+priority: 1
+updated: 2026-08-21
+# `keel db seed` for a Prisma project runs `prisma db seed` (see
+# internal/cli/db.go), which does nothing until package.json says what the seed
+# command is and there is a model to seed. A fresh `prisma init` gives neither: a
+# schema with a datasource and no models, and no seed configuration.
+#
+# This add-on ships three things:
+#   - a starter User model in schema.prisma, so the first migration has
+#     something to create and the seed has somewhere to write (the same reason
+#     the Drizzle add-on ships a starter users table);
+#   - a Faker-backed prisma/seed.ts that generates a realistic population;
+#   - the prisma.seed config + tsx runner that `prisma db seed` invokes.
+#
+# schema.prisma is written in full (not appended) because keel cannot merge into
+# the file `prisma init` generated. It reuses the same {{db.prisma}} provider and
+# {{db.url}} the node-prisma add-on used, so it stays correct for whichever
+# database is in the plan.
+install:
+  # tsx runs the TypeScript seed without a build step; @faker-js/faker generates
+  # the data. Both dev-only: they are not needed at runtime.
+  - "{{exec}} npm install -D tsx @faker-js/faker"
+  # prisma.seed tells `prisma db seed` (and `migrate reset`) how to run it.
+  - "{{exec}} npm pkg set prisma.seed=\"tsx prisma/seed.ts\""
+files:
+  - path: prisma/schema.prisma
+    content: |
+      // keel-generated. Starter schema with a User model so the first
+      // `prisma migrate` has a table to create and `prisma db seed` has
+      // somewhere to write. Replace User with your own models.
+      generator client {
+        provider = "prisma-client-js"
+      }
+
+      datasource db {
+        // Provider and url come from the database recipe in the plan, exactly as
+        // `prisma init` set them - kept here so this file stays self-consistent.
+        provider = "{{db.prisma}}"
+        url      = env("DATABASE_URL")
+      }
+
+      model User {
+        id        Int      @id @default(autoincrement())
+        email     String   @unique
+        name      String
+        createdAt DateTime @default(now())
+      }
+  - path: prisma/seed.ts
+    content: |
+      // keel-generated. Realistic seed data via @faker-js/faker.
+      //
+      // Run with `keel db seed` (prisma db seed) or `keel db reset`
+      // (prisma migrate reset --force, which re-runs this). Extend the loop, or
+      // add more createMany calls, as you add models.
+      import { PrismaClient } from "@prisma/client";
+      import { faker } from "@faker-js/faker";
+
+      const prisma = new PrismaClient();
+
+      async function main() {
+        // A known account you can always sign in with in development.
+        await prisma.user.upsert({
+          where: { email: "test@example.com" },
+          update: {},
+          create: { email: "test@example.com", name: "Test User" },
+        });
+
+        // A realistic population. faker gives plausible-but-random names and
+        // emails; skipDuplicates guards the rare email collision.
+        const users = Array.from({ length: 25 }, () => ({
+          email: faker.internet.email(),
+          name: faker.person.fullName(),
+        }));
+        await prisma.user.createMany({ data: users, skipDuplicates: true });
+
+        console.log(`Seeded ${users.length} users + test@example.com.`);
+      }
+
+      main()
+        .catch((e) => {
+          console.error(e);
+          process.exit(1);
+        })
+        .finally(async () => {
+          await prisma.$disconnect();
+        });

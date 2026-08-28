@@ -1,0 +1,8 @@
+id: woo-yoast
+kind: addon
+label: Yoast SEO
+appliesTo: [woocommerce]
+provides: [seo]
+default: true
+install:
+  - "{{wp}} plugin install wordpress-seo --activate"

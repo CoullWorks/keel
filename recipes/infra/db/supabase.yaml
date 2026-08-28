@@ -1,0 +1,125 @@
+id: supabase
+schema_version: 2
+kind: db
+label: Supabase (local stack - Postgres, Auth, Storage, Studio in Docker)
+aliases: [django-supabase]
+appliesTo: [django]
+provides: [db, postgres, db-postgres, supabase]
+conflicts: [db-mysql, db-mariadb, db-mongo]
+priority: -5 # bring the Supabase stack up before the app migrates
+updated: 2026-08-12
+# Runs the Supabase local stack via the Supabase CLI. Needs the `supabase` CLI
+# plus Docker - run `keel doctor` to check. The CLI owns the containers and
+# their configuration, so unlike postgres.yaml this recipe does not ship a
+# postgresql.conf: overriding the CLI's own would be overwritten on the next
+# `supabase start`. What it does instead is pin down the connection, the ports
+# and the version rule that decide whether local and production behave the same.
+vars:
+  db.type: postgres
+  # Empty: this recipe has no DDEV provision at all - Supabase brings its own
+  # Postgres, so DDEV is never told to configure one.
+  db.ddev_flag: ""
+  db.host: 127.0.0.1
+  # 54322 is the local database port. Note it is NOT 5432: the whole local stack
+  # sits in the 5432x range so it can run beside a normal Postgres.
+  # https://supabase.com/docs/reference/cli/supabase-status
+  db.port: "54322"
+  db.name: postgres
+  db.user: postgres
+  db.password: postgres
+  # Supabase is PostgreSQL, and these point at the local stack the CLI runs.
+  db.prisma: postgresql
+  db.drizzle: postgresql
+  db.drizzle_driver: postgres
+  db.url: "postgresql://postgres:postgres@127.0.0.1:54322/postgres"
+  supabase.apiPort: "54321"
+  supabase.studioPort: "54323"
+  supabase.mailPort: "54324"
+provision:
+  local:
+    install:
+      - "supabase init 2>/dev/null || true" # idempotent - skips if already initialised
+      - "supabase start"
+    files:
+      - path: .env
+        content: |
+          # keel: point the app at the Supabase local Postgres (reads KEEL_DB + PG*).
+          KEEL_DB=postgres
+          PGHOST={{db.host}}
+          PGPORT={{db.port}}
+          PGUSER={{db.user}}
+          PGPASSWORD={{db.password}}
+          PGDATABASE={{db.name}}
+          # The API gateway, which is what supabase-js and PostgREST talk to.
+          SUPABASE_URL=http://{{db.host}}:{{supabase.apiPort}}
+          # The anon and service_role keys are printed by `supabase status`.
+          # They are NOT secrets on a local stack: every local stack is signed
+          # with the same published demo JWT secret. Never reuse them anywhere.
+      - path: SUPABASE.md
+        content: |
+          # Supabase local stack (scaffolded by keel)
+
+          `supabase start` brings up Postgres, Auth (GoTrue), PostgREST, Storage,
+          Realtime, Edge Functions, Studio and a mail catcher. Ports, from
+          `supabase status`:
+
+          | Service | URL |
+          |---|---|
+          | API gateway | http://127.0.0.1:{{supabase.apiPort}} |
+          | GraphQL | http://127.0.0.1:{{supabase.apiPort}}/graphql/v1 |
+          | Database | postgresql://{{db.user}}:{{db.password}}@{{db.host}}:{{db.port}}/{{db.name}} |
+          | Studio | http://127.0.0.1:{{supabase.studioPort}} |
+          | Mail catcher | http://127.0.0.1:{{supabase.mailPort}} |
+
+          Source: https://supabase.com/docs/reference/cli/supabase-status
+
+          ## The setting that decides whether local matches production
+
+          In `supabase/config.toml`:
+
+              [db]
+              major_version = 17
+
+          The documentation is explicit that this "has to be the same as your
+          remote database's". Check the remote with `SHOW server_version;` and
+          set this to match before writing a single migration. A local Postgres
+          on a different major happily accepts syntax and extensions the real one
+          will reject, and you find out at deploy time.
+
+          Do not take the default on trust: run `supabase init` and read the
+          `major_version` the CLI actually wrote.
+          Reference: https://supabase.com/docs/guides/local-development/cli/config
+
+          ## Connection pooling
+
+          The local pooler is off by default. Turn it on when the application
+          uses a serverless or per-request connection model, because that is the
+          shape that exhausts Postgres connections in production and never
+          locally:
+
+              [db.pooler]
+              enabled = true
+              port = 54329
+              pool_mode = "transaction"
+              default_pool_size = 20
+              max_client_conn = 100
+
+          `pool_mode = "transaction"` is the one that matters: a transaction-mode
+          pooler does not support session-level features (prepared statements,
+          `LISTEN`, advisory locks held across statements), so an application that
+          works against port 54322 can fail against 54329. Test against the
+          pooler if that is what production uses.
+
+          ## This stack is development only
+
+          It ships fixed credentials - the database is `postgres:postgres` and
+          every local stack signs its JWTs with the same published demo secret
+          printed by `supabase status`. Anything that reaches it can mint a
+          service-role token. Keep it on loopback, and never copy the anon or
+          service_role key out of a local stack into anything real.
+
+          ## Everyday commands
+
+              supabase status      # ports, keys, connection strings
+              supabase stop        # stop the stack (add --no-backup to discard data)
+              supabase db reset    # drop and re-apply every migration + seed

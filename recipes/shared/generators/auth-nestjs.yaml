@@ -1,0 +1,11 @@
+# Auth as a level:stack generator (canonical NestJS JWT via Passport). Points at
+# the nestjs-jwt addon that installs the packages and writes the auth feature.
+id: gen-auth-nestjs
+kind: generator
+level: stack
+label: "Authentication (JWT via Passport - login + protected routes, bcrypt)"
+appliesTo: [nestjs]
+provides: [auth]
+apply: [nestjs-jwt]
+schema_version: 2
+updated: 2026-08-24

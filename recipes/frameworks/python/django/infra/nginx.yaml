@@ -1,0 +1,192 @@
+id: nginx-django
+schema_version: 2
+kind: config
+label: Django server block for NGINX
+updated: 2026-08-12
+# Written from docs/infra/django.md. Django ships no nginx configuration of its
+# own; the authoritative blocks come from gunicorn (plain HTTP reverse proxy)
+# and from Channels (the websocket variant), and both are quoted below where
+# they are used.
+#
+# Two things here are Django-specific and appear in none of the other six Python
+# blocks: static files are served by nginx from the collectstatic output rather
+# than by the application, and the websocket block exists but is commented out,
+# because a plain Django project has no websocket route and gunicorn's WSGI
+# workers could not serve one if it did.
+#
+# Division of labour. The shared NGINX service (recipes/infra/web/nginx.yaml)
+# owns .keel/nginx/nginx.conf: worker and http-level tuning, the log format,
+# gzip and its type list, server_tokens off, the default security headers,
+# real_ip from the trusted proxy, and the default client_max_body_size and proxy
+# timeouts. This recipe owns one server block and the compose wiring.
+when:
+  framework: django
+  uses: nginx
+files:
+  - path: docker/nginx/conf.d/app.conf
+    content: |
+      # Django behind gunicorn, proxied. Included by the shared nginx.conf from
+      # /etc/nginx/conf.d/*.conf; http-level config lives there.
+
+      upstream django_app {
+        # The compose service name. Under the native env there is no `app` host:
+        # change this to 127.0.0.1:8000, which is also where gunicorn should be
+        # bound on a host so the proxy cannot be bypassed.
+        #
+        # fail_timeout=0 is gunicorn's own documented value: it stops nginx
+        # taking the app out of rotation while it is merely restarting.
+        server app:8000 fail_timeout=0;
+      }
+
+      server {
+        listen 80;
+        server_name _;
+
+        # Overrides the shared default. gunicorn's documented block uses
+        # client_max_body_size 4G; nginx's own default is 1m, which rejects an
+        # upload before Django ever sees it. This is a denial-of-service ceiling,
+        # not a target: lower it to whatever the application actually accepts.
+        client_max_body_size 25m;
+
+        # Static files served by nginx, not by WhiteNoise. Django's static-files
+        # how-to serves the collected STATIC_ROOT from the web server or a CDN in
+        # every option it documents, and a request for a stylesheet should not
+        # occupy a gunicorn worker.
+        #
+        # If you would rather WhiteNoise served them (it is already in the
+        # generated settings, immediately after SecurityMiddleware as its own
+        # docs require), delete this block and every request goes to the app.
+        # Both work; only one can be true at a time.
+        location /static/ {
+          alias /var/www/static/;
+          access_log off;
+          # ManifestStaticFilesStorage hashes the filename, so a hashed asset can
+          # never change under a given URL. Note that add_header here stops the
+          # shared http-level add_header security headers being inherited into
+          # this location, which is nginx's documented behaviour and is
+          # acceptable for immutable static assets.
+          expires 30d;
+          add_header Cache-Control "public, immutable";
+        }
+
+        # Uncomment together with a MEDIA_ROOT in settings.py and a media volume
+        # in compose.yaml. Django's deployment checklist: "Media files are
+        # uploaded by your users. They're untrusted! Make sure your web server
+        # never attempts to interpret them." Serving them with no handler and
+        # forcing a download type is how nginx honours that.
+        # location /media/ {
+        #   alias /var/www/media/;
+        #   default_type application/octet-stream;
+        #   add_header Content-Disposition "attachment";
+        #   add_header X-Content-Type-Options nosniff;
+        # }
+
+        location / {
+          proxy_pass http://django_app;
+          proxy_redirect off;
+
+          # gunicorn's documented block sets the first three. Host is passed
+          # through so ALLOWED_HOSTS and CSRF_TRUSTED_ORIGINS see the real
+          # hostname rather than the upstream name. X-Real-IP is Channels'
+          # addition, and Django reads X-Forwarded-Proto for
+          # SECURE_PROXY_SSL_HEADER.
+          proxy_set_header Host              $http_host;
+          proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header X-Real-IP         $remote_addr;
+
+          # Buffering is left at nginx's default of on, and that is the whole
+          # reason gunicorn insists on a proxy: its sync worker "Requires a
+          # buffering proxy (nginx, HAProxy) for production", because otherwise
+          # one slow client occupies one worker for the length of its
+          # connection.
+          proxy_connect_timeout 5s;
+          proxy_send_timeout    60s;
+          # 60s is nginx's own default, restated so the number sits next to the
+          # gunicorn --timeout of 60 it has to agree with. If gunicorn kills a
+          # worker at 60s and nginx waits 300s, a slow request becomes a 502 five
+          # minutes later instead of promptly.
+          proxy_read_timeout    60s;
+        }
+
+        # Django Channels only. The three load-bearing directives are Channels'
+        # own: without proxy_http_version 1.1, Upgrade and Connection "upgrade"
+        # the handshake never completes. proxy_http_version is stated explicitly
+        # because nginx only made 1.1 the default in 1.29.7.
+        #
+        # proxy_read_timeout is raised because nginx documents that "the
+        # connection will be closed if the proxied server does not transmit any
+        # data within 60 seconds", and an idle websocket transmits nothing.
+        # Channels publishes no number; 3600s is keel's.
+        #
+        # Uncomment together with the ASGI CMD in the Dockerfile.
+        # location /ws/ {
+        #   proxy_pass http://django_app;
+        #   proxy_http_version 1.1;
+        #   proxy_set_header Upgrade    $http_upgrade;
+        #   proxy_set_header Connection "upgrade";
+        #   proxy_set_header Host              $host;
+        #   proxy_set_header X-Real-IP         $remote_addr;
+        #   proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        #   proxy_set_header X-Forwarded-Host  $server_name;
+        #   proxy_redirect off;
+        #   proxy_buffering off;      # a socket is a stream, not a response to hold
+        #   proxy_read_timeout 3600s; # keel's number, not Channels'
+        # }
+
+        # Answered by nginx, so the web tier's liveness does not depend on
+        # Django rendering anything. add_header at this level stops the shared
+        # http-level add_header directives being inherited into it, which is
+        # nginx's documented behaviour and is harmless for a health endpoint.
+        location = /healthz {
+          access_log off;
+          add_header Content-Type text/plain;
+          return 200 "ok\n";
+        }
+      }
+provision:
+  compose:
+    files:
+      - path: compose.override.yaml
+        content: |
+          # Compose merges compose.override.yaml over compose.yaml with no extra
+          # flags, so the app service written by the env recipe is untouched.
+          services:
+            nginx:
+              image: nginx:1.27-alpine
+              restart: unless-stopped
+              depends_on:
+                app:
+                  condition: service_healthy
+              ports:
+                - "${HTTP_PORT:-8080}:80"
+              volumes:
+                # Shared, owned by recipes/infra/web/nginx.yaml.
+                - ./.keel/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+                # This framework's server block, owned by this recipe.
+                - ./docker/nginx/conf.d:/etc/nginx/conf.d:ro
+                # The collectstatic output, published by the Docker env as a
+                # named volume. Read-only here: nginx serves these, it does not
+                # write them.
+                - static:/var/www/static:ro
+              healthcheck:
+                test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+                interval: 15s
+                timeout: 5s
+                retries: 5
+                start_period: 10s
+              # Matches the app's stop_grace_period, so the proxy is not killed
+              # while gunicorn is still draining requests it forwarded.
+              stop_grace_period: 45s
+
+          volumes:
+            static:
+  # DDEV runs this project with --webserver-type=generic, so Traefik forwards
+  # straight to the runserver daemon on :8000 and no nginx is in the local path.
+  # The server block above is still written, so the deployment shape is
+  # version-controlled next to the code that assumes it.
+  ddev: {}
+  # Native env: no container to add. The server block above still applies, but
+  # change the upstream to 127.0.0.1:8000 and point the /static/ alias at the
+  # real STATIC_ROOT on the host.
+  local: {}

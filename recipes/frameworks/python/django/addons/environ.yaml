@@ -1,0 +1,8 @@
+id: django-environ
+kind: addon
+label: django-environ (12-factor .env config)
+appliesTo: [django]
+provides: [environ]
+default: true
+install:
+  - "{{exec}} uv add django-environ"

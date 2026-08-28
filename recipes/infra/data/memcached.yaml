@@ -1,0 +1,180 @@
+id: memcached
+schema_version: 2
+kind: service
+label: Memcached 1.6 (volatile cache, tuned)
+category: Cache
+appliesTo: [laravel, magento, magento-mageos]
+provides: [memcached]
+updated: 2026-08-12
+vars:
+  memcached.version: "1.6"
+  memcached.host: memcached
+  memcached.port: "11211"
+  # Item storage, in megabytes. See the compose file for the arithmetic and for
+  # why the container needs more memory than this number.
+  memcached.memoryMB: "256"
+files:
+  - path: docker-compose.memcached.yml
+    content: |
+      # keel-generated: Memcached {{memcached.version}}.
+      #
+      # Memcached has no configuration file. Every setting is a command-line
+      # flag, so the command below IS the configuration, and each flag carries
+      # the documented default it is overriding.
+      #
+      # Sources, all fetched 2026-08-12:
+      #   [1] memcached(1) man page
+      #       https://github.com/memcached/memcached/blob/master/doc/memcached.1
+      #   [2] Configuring memcached
+      #       https://docs.memcached.org/serverguide/configuring/
+      #   [3] Performance and efficiency
+      #       https://docs.memcached.org/serverguide/performance/
+      #   [4] UDP DDoS advisory
+      #       https://docs.memcached.org/advisories/ddos/
+      #
+      # Standalone: docker compose -f docker-compose.memcached.yml up -d
+      # Or merged:  docker compose -f docker-compose.yml -f docker-compose.memcached.yml up -d
+      services:
+        memcached:
+          image: memcached:{{memcached.version}}
+          restart: unless-stopped
+          command:
+            # -m: item storage in MB. "Use <num> MB memory max to use for object
+            # storage; the default is 64 megabytes." [1] 64 MB is small enough
+            # that a real page cache starts evicting almost immediately.
+            #
+            # This is NOT the process's memory ceiling: "this isn't a global
+            # memory limit, so memcached will use a little more memory than you
+            # tell it to" [2], because the hash table and per-connection buffers
+            # are on top of it [3]. Give the container roughly 25% more than -m:
+            # 256 MB of storage wants a ~320 MB container limit.
+            - "-m {{memcached.memoryMB}}"
+            # -c: maximum simultaneous connections. "Use <num> max simultaneous
+            # connections; the default is 1024." [1] Raised because every PHP-FPM
+            # worker on every web node holds one, and the failure mode is silent:
+            # memcached stops accepting connections and increments the
+            # listen_disabled_num statistic rather than logging anything.
+            # "Always leave a few extra slots open if you can, for administrative
+            # tasks, adding more webservers, crons/scripts/etc." [2]
+            - "-c 4096"
+            # -t: worker threads. "The default is 4." and "It is typically not
+            # useful to set this higher than the number of CPU cores on the
+            # memcached server. Setting a high number (64 or more) of worker
+            # threads is not recommended." [1] The docs are blunter still:
+            # "Setting it to very large values (80+) will make it run
+            # considerably slower." [2] The default is right for a container with
+            # a handful of cores.
+            - "-t 4"
+            # -I: maximum item size. "The default value for this parameter is 1m,
+            # minimum is 1k, max is 1G." [1] Left at the default deliberately:
+            # 1 MB is also the page size memcached carves into slabs [3], so
+            # raising it changes the slab layout rather than simply allowing
+            # bigger values. If the application needs to cache something larger
+            # than 1 MB, the answer is almost always to stop doing that.
+            - "-I 1m"
+            # -U 0: disable the UDP listener. It has been off by default since
+            # 1.5.6, and this states it, because UDP is what made memcached the
+            # vehicle for record-breaking amplification attacks: an attacker
+            # "SETs a large item into an exposed memcached server", then "spoofs a
+            # GET request with the IP address of the targeted victim", and the
+            # server sends "a large response to the target" [4].
+            - "-U 0"
+            # -v: log start-up and errors. Silent by default, which makes an
+            # eviction storm or a failed bind invisible.
+            - "-v"
+          ports:
+            # Loopback only, and this is not optional hardening. Memcached has no
+            # authentication in this configuration and its own documentation is
+            # unambiguous: "Memcached does not spend much, if any, effort in
+            # ensuring its defensibility from random internet connections. So you
+            # _must not_ expose memcached directly to the internet, or otherwise
+            # any untrusted users." [2]
+            # SASL exists (-S) but forces the binary protocol only, and "SASL is
+            # not implemented as end-to-end encryption ... it does not hide
+            # communications and isn't suitable for using over the internet."
+            - "127.0.0.1:{{memcached.port}}:11211"
+          healthcheck:
+            # Speaks the text protocol and checks the reply, which proves the
+            # daemon is answering rather than that the port is open. `version`
+            # returns a single line, "VERSION <version>", so there is no END
+            # terminator to parse.
+            # https://github.com/memcached/memcached/blob/master/doc/protocol.txt
+            test: ["CMD-SHELL", "printf 'version\\r\\n' | timeout 2 nc -w 2 127.0.0.1 11211 | grep -q VERSION"]
+            interval: 15s
+            timeout: 5s
+            retries: 6
+            start_period: 5s
+  - path: MEMCACHED.md
+    content: |
+      # Memcached (scaffolded by keel)
+
+      `127.0.0.1:{{memcached.port}}` · {{memcached.memoryMB}} MB of item storage
+      · configuration is the flag list in `docker-compose.memcached.yml`.
+
+      ## What it is not
+
+      Memcached has no persistence of any kind. A restart is an empty cache, and
+      there is no snapshot, no log and no replication. Anything whose loss is a
+      visible bug rather than a slower page belongs in the durable Redis instance
+      (`redis-persistent`), not here. That includes sessions: a memcached restart
+      logs out every user, and a full slab class can evict a live session while
+      the server still reports free memory overall.
+
+      ## Eviction is per slab class, not global
+
+      Memory is "broken up (by default) into 1 megabyte pages", each page is
+      assigned to a slab class of one chunk size, and "Once a page is assigned to
+      a class, it is _never_ moved". So a workload whose item sizes shift over
+      time strands memory in the wrong class, and you can see evictions while
+      `stats` shows free memory. Watch `stats slabs` and per-class evictions;
+      a restart is the blunt fix.
+      https://docs.memcached.org/serverguide/performance/
+
+      ## Statistics worth an alert
+
+      - `listen_disabled_num` - you have hit the `-c` connection limit.
+      - `evictions` climbing with a low `get_hits` ratio - `-m` is too small.
+      - `curr_connections` near `-c` - raise it before it bites.
+
+            printf 'stats\r\n' | nc 127.0.0.1 {{memcached.port}}
+
+      ## No authentication
+
+      The port is bound to 127.0.0.1 for that reason. Keep it there, or put it on
+      a private network with a firewall. UDP is disabled (`-U 0`), which is the
+      setting that mattered in the 2018 amplification attacks.
+provision:
+  ddev:
+    files:
+      - path: .ddev/docker-compose.memcached.yaml
+        content: |
+          # keel-generated: Memcached {{memcached.version}} for DDEV.
+          # Rationale for every flag: docker-compose.memcached.yml.
+          services:
+            memcached:
+              container_name: ddev-${DDEV_SITENAME}-memcached
+              image: memcached:{{memcached.version}}
+              hostname: memcached
+              restart: "no"
+              command: ["-m {{memcached.memoryMB}}", "-c 4096", "-t 4", "-I 1m", "-U 0", "-v"]
+              labels:
+                com.ddev.site-name: ${DDEV_SITENAME}
+                com.ddev.approot: ${DDEV_APPROOT}
+              expose:
+                - "11211"
+              healthcheck:
+                test: ["CMD-SHELL", "printf 'version\\r\\n' | timeout 2 nc -w 2 127.0.0.1 11211 | grep -q VERSION"]
+                interval: 15s
+                timeout: 5s
+                retries: 6
+                start_period: 5s
+            web:
+              depends_on:
+                - memcached
+    install:
+      - "{{restart}}"
+  compose: {}
+  sail: {}
+  local:
+    install:
+      - "docker compose -f docker-compose.memcached.yml up -d"

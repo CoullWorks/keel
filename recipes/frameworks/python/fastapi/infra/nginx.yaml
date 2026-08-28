@@ -1,0 +1,165 @@
+id: nginx-fastapi
+schema_version: 2
+kind: config
+label: FastAPI server block for NGINX
+updated: 2026-08-12
+# Written from docs/infra/fastapi.md. FastAPI publishes no nginx configuration:
+# the only complete proxy config in its docs is a Traefik one, and it is
+# HTTP-only. What FastAPI does document is the application side of the contract,
+# which is what this block is built to satisfy: the forwarded headers it reads
+# (X-Forwarded-For, X-Forwarded-Proto, X-Forwarded-Host), that TLS is terminated
+# by "a component external to your application server", and that a stripped path
+# prefix needs --root-path.
+#
+# One thing here is FastAPI-specific and appears in none of the other six Python
+# blocks: upstream keepalive. uvicorn is an async server, so unlike gunicorn's
+# sync workers it holds idle connections cheaply and reusing them is free.
+#
+# Division of labour. The shared NGINX service (recipes/infra/web/nginx.yaml)
+# owns .keel/nginx/nginx.conf: worker and http-level tuning, the log format,
+# gzip and its type list, server_tokens off, the default security headers,
+# real_ip from the trusted proxy, and the default client_max_body_size and proxy
+# timeouts. This recipe owns one server block and the compose wiring.
+when:
+  framework: fastapi
+  uses: nginx
+files:
+  - path: docker/nginx/conf.d/app.conf
+    content: |
+      # FastAPI behind uvicorn, proxied. Included by the shared nginx.conf from
+      # /etc/nginx/conf.d/*.conf; http-level config lives there.
+
+      upstream fastapi_app {
+        # The compose service name. Under the native env there is no `app` host:
+        # change this to 127.0.0.1:8000, which is also where uvicorn should be
+        # bound on a host so the proxy cannot be bypassed.
+        server app:8000;
+        # Reuses upstream sockets instead of opening one per request. Safe here
+        # because uvicorn is async: an idle connection costs a coroutine, not a
+        # worker process. It would be the wrong choice in front of gunicorn's
+        # sync workers, which is why none of the other blocks has it.
+        keepalive 32;
+      }
+
+      server {
+        listen 80;
+        server_name _;
+
+        # Overrides the shared default. nginx's own default is 1m, which rejects
+        # a file upload before FastAPI sees it. This is a denial-of-service
+        # ceiling, not a target: lower it to whatever the API actually accepts.
+        client_max_body_size 25m;
+
+        location / {
+          proxy_pass http://fastapi_app;
+          proxy_redirect off;
+
+          # Explicit, because the upstream keepalive above only works over
+          # HTTP/1.1 with the hop-by-hop Connection header cleared. nginx only
+          # made proxy_http_version 1.1 the default in 1.29.7; before that it was
+          # 1.0 and the keepalive silently did nothing.
+          proxy_http_version 1.1;
+          proxy_set_header Connection "";
+
+          # The three headers FastAPI documents reading, plus Host. They are only
+          # honoured because the app runs with --proxy-headers and
+          # --forwarded-allow-ips.
+          proxy_set_header Host              $http_host;
+          proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header X-Forwarded-Host  $host;
+          proxy_set_header X-Real-IP         $remote_addr;
+
+          # Buffering left at nginx's default of on. FastAPI publishes no
+          # guidance either way, and buffering is what protects the app from slow
+          # clients. Turn it off per-location for a streaming endpoint
+          # (Server-Sent Events, a chunked model response), never globally, or
+          # every response is held until it completes.
+          proxy_connect_timeout 5s;
+          proxy_send_timeout    60s;
+          # 60s is nginx's own default, restated so it is visible. Raise it for
+          # long-running endpoints, and remember uvicorn has no matching timeout
+          # of its own: it will keep working on a request nginx has already given
+          # up on.
+          proxy_read_timeout    60s;
+        }
+
+        # Websocket routes. FastAPI supports websockets, but no FastAPI
+        # deployment page documents the nginx directives for them, so this block
+        # is keel's inference from nginx's own websocket-proxying page rather
+        # than vendor guidance. Uncomment and match the prefix to the app's
+        # WebSocket routes.
+        #
+        # proxy_read_timeout is raised because nginx documents that "the
+        # connection will be closed if the proxied server does not transmit any
+        # data within 60 seconds", and an idle socket transmits nothing. 3600s is
+        # keel's number.
+        # location /ws/ {
+        #   proxy_pass http://fastapi_app;
+        #   proxy_http_version 1.1;
+        #   proxy_set_header Upgrade    $http_upgrade;
+        #   proxy_set_header Connection "upgrade";
+        #   proxy_set_header Host              $http_host;
+        #   proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        #   proxy_set_header X-Forwarded-Proto $scheme;
+        #   proxy_buffering off;
+        #   proxy_read_timeout 3600s;
+        # }
+
+        # Serving the API under a prefix. If this proxy strips the prefix, the
+        # app must be told with --root-path /api/v1 or
+        # FastAPI(root_path="/api/v1"), or every generated URL and the OpenAPI
+        # schema point at the wrong place.
+        # location /api/v1/ {
+        #   proxy_pass http://fastapi_app/;
+        #   ... same header block as above ...
+        # }
+
+        # Answered by nginx, so the web tier's liveness does not depend on the
+        # app. add_header at this level stops the shared http-level add_header
+        # directives being inherited into it, which is nginx's documented
+        # behaviour and is harmless for a health endpoint.
+        location = /healthz {
+          access_log off;
+          add_header Content-Type text/plain;
+          return 200 "ok\n";
+        }
+      }
+provision:
+  compose:
+    files:
+      - path: compose.override.yaml
+        content: |
+          # Compose merges compose.override.yaml over compose.yaml with no extra
+          # flags, so the app service written by the env recipe is untouched.
+          services:
+            nginx:
+              image: nginx:1.27-alpine
+              restart: unless-stopped
+              depends_on:
+                app:
+                  condition: service_healthy
+              ports:
+                - "${HTTP_PORT:-8080}:80"
+              volumes:
+                # Shared, owned by recipes/infra/web/nginx.yaml.
+                - ./.keel/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+                # This framework's server block, owned by this recipe.
+                - ./docker/nginx/conf.d:/etc/nginx/conf.d:ro
+              healthcheck:
+                test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+                interval: 15s
+                timeout: 5s
+                retries: 5
+                start_period: 10s
+              # Matches the app's stop_grace_period, so the proxy is not killed
+              # while uvicorn is still draining requests it forwarded.
+              stop_grace_period: 45s
+  # DDEV runs this project with --webserver-type=generic, so Traefik forwards
+  # straight to the uvicorn daemon on :8000 and no nginx is in the local path.
+  # The server block above is still written, so the deployment shape is
+  # version-controlled next to the code that assumes it.
+  ddev: {}
+  # Native env: no container to add. The server block above still applies, but
+  # change the upstream to 127.0.0.1:8000.
+  local: {}

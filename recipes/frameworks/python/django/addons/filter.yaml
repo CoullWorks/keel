@@ -1,0 +1,16 @@
+id: django-filter
+kind: addon
+label: django-filter (queryset filtering)
+appliesTo: [django]
+provides: [filter]
+install:
+  - "{{exec}} uv add django-filter"
+files:
+  - path: config/settings.d/80-django-filter.py
+    content: |
+      # django-filter has to be registered before DRF will use it, and named as
+      # a default filter backend before a ViewSet gets filtering for free.
+      INSTALLED_APPS += ["django_filters"]
+      REST_FRAMEWORK["DEFAULT_FILTER_BACKENDS"] = [
+          "django_filters.rest_framework.DjangoFilterBackend",
+      ]

@@ -1,0 +1,54 @@
+id: example-editorconfig
+schema_version: 2
+kind: addon
+# An addon recipe is an ADDITIVE extra layered onto a build: an .editorconfig, a
+# linter config, a CI workflow — a thing that is neither the framework, the
+# environment, the database nor a service, just a useful file (and maybe an
+# install step + a hook). Addons run in the normal recipe loop, so they are also
+# the natural place a pack demonstrates the LIFECYCLE HOOKS a pack can fire.
+label: "EditorConfig + hook demo (added by the example pack)"
+appliesTo: ["*"]
+provides: [editorconfig]
+default: false
+updated: 2026-08-22
+files:
+  - path: ".editorconfig"
+    verbatim: true # a literal config file: turn templating OFF so its own braces survive
+    content: |
+      root = true
+
+      [*]
+      indent_style = space
+      indent_size = 2
+      end_of_line = lf
+      charset = utf-8
+      trim_trailing_whitespace = true
+      insert_final_newline = true
+# hooks: is a recipe's declarative lifecycle escape-hatch. A stage maps to ordered
+# actions; each action sets EXACTLY ONE of message:, run: or script:. Prefer
+# message:/run: (inline, no extra file); use script: (a path relative to the
+# recipe, run as `sh <path>`) for anything longer. Run/script strings are
+# templated with the same {{tokens}} as the rest of the recipe.
+#
+# THE FULL PACK HOOK SET is demonstrated across this pack:
+#   pre_build   — once, before the recipe loop           (here, message + script)
+#   post_recipe — after THIS recipe's files+install      (here, message)
+#   post_build  — once, after the whole recipe loop       (here, script)
+#   post_open   — in the CLI, after `keel open` succeeds  (here, message)
+#   post_create — after the FRAMEWORK recipe only         (see note below + service recipe)
+#
+# post_create fires ONLY for a framework recipe (the engine reads its post_create
+# block and no other kind's). This pack ships no framework, so a post_create hook
+# on a pack recipe would never fire — the example-service recipe carries one, and
+# hooks/post_create.sh exists, purely to document the wiring for a pack that DOES
+# ship a framework. The other four stages below fire from this addon for real.
+hooks:
+  pre_build:
+    - message: "example-pack: about to build {{project}} (pre_build fires once, before any recipe)"
+    - script: hooks/pre_build.sh
+  post_recipe:
+    - message: "example-pack: editorconfig addon installed (post_recipe fires after each recipe)"
+  post_build:
+    - script: hooks/post_build.sh
+  post_open:
+    - message: "example-pack: welcome back to {{project}} (post_open fires on keel open)"

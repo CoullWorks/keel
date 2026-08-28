@@ -1,0 +1,9 @@
+id: magento-magefan-blog
+kind: addon
+label: Magefan Blog (free on Open Source)
+appliesTo: [magento, magento-mageos]
+provides: [blog]
+install:
+  # Free for Magento Open Source; commercial on Adobe Commerce/Cloud/B2B.
+  - "{{composer}} require magefan/module-blog"
+  - "{{magento}} setup:upgrade"

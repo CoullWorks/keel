@@ -1,0 +1,238 @@
+id: solr
+schema_version: 2
+kind: service
+label: Apache Solr 10 (search engine, tuned)
+category: Search
+# Deliberately NOT magento. Adobe: "As of Adobe Commerce 2.4, all installations
+# must be configured to use Elasticsearch or OpenSearch as the catalog search
+# solution."
+# https://experienceleague.adobe.com/en/docs/commerce-operations/installation-guide/prerequisites/search-engine/overview
+# A Magento project that picks Solr has an unusable search engine and a broken
+# install step, so the recipe does not offer itself there. Use opensearch.yaml.
+appliesTo: [laravel, symfony, django, fastapi, flask, express, fastify, hono, nestjs, adonisjs, nextjs]
+provides: [solr, search]
+updated: 2026-08-12
+vars:
+  # 10.0 is the current stable line; 9.10.x is maintenance ("may sometimes
+  # receive critical bugfix releases") and everything below 9.10 is end of life.
+  # https://solr.apache.org/downloads.html
+  # Solr 10 needs a JRE 21 or higher, which the official image provides; Solr
+  # 9.10 needs 11 or higher and is the fallback if a client library has not
+  # caught up with 10 yet.
+  solr.version: "10.0"
+  solr.host: solr
+  solr.port: "8983"
+  solr.core: app
+  # Heap. The bin/solr default is 512m, which the docs call "fine for getting
+  # started". This is a development-sized value; see .keel/solr/solr.in.sh for
+  # the arithmetic and the production range.
+  solr.heap: 1g
+files:
+  # The documented override mechanism: "In Solr it is common to configure
+  # settings in solr.in.sh" and "The solr.in.sh file can be found in
+  # /etc/default", where the official image points SOLR_INCLUDE.
+  # https://solr.apache.org/guide/solr/latest/deployment-guide/solr-in-docker.html
+  - path: .keel/solr/solr.in.sh
+    content: |
+      # keel-generated: Solr environment overrides (mounted at /etc/default/solr.in.sh).
+      #
+      # Sources, fetched 2026-08-12:
+      #   [1] Taking Solr to Production
+      #       https://solr.apache.org/guide/solr/latest/deployment-guide/taking-solr-to-production.html
+      #   [2] JVM Settings
+      #       https://solr.apache.org/guide/solr/latest/deployment-guide/jvm-settings.html
+      #   [3] Solr in Docker / Docker FAQ
+      #       https://solr.apache.org/guide/solr/latest/deployment-guide/solr-in-docker.html
+      #       https://solr.apache.org/guide/solr/latest/deployment-guide/docker-faq.html
+      #   [4] Securing Solr
+      #       https://solr.apache.org/guide/solr/latest/deployment-guide/securing-solr.html
+
+      # HEAP. "By default, the bin/solr script sets the maximum Java heap size to
+      # 512M (-Xmx512m), which is fine for getting started with Solr" and "For
+      # production, you'll want to increase the maximum heap size based on the
+      # memory requirements of your search application; values between 8 and 16
+      # gigabytes are not uncommon for production servers" [1].
+      #
+      # The warning that matters is the other direction: "Do not allocate a very
+      # large Java Heap unless you know you need it" [1]. Two reasons [2]:
+      #   - "All current (Java 11) garbage collectors can hit 'stop the world'
+      #     collections, which suspend the JVM until completed", and a bigger heap
+      #     means a longer pause.
+      #   - "Solr makes extensive use of MMapDirectory, which uses RAM *not*
+      #     reserved for the JVM for most of the Lucene index. Therefore, as much
+      #     memory as possible should be left for the operating system to use for
+      #     this purpose."
+      #
+      # Arithmetic: this file is sized for a 2 GB container.
+      #   2048 MB total, half to the JVM heap, half left for the OS page cache
+      #   that MMapDirectory reads index segments through => 1g.
+      # A real search node with 16 GB and a 20 GB index: 8g heap, 8 GB page cache,
+      # which is inside the "8 to 16 gigabytes" range the docs describe [1].
+      SOLR_HEAP="1g"
+
+      # The image's GC_TUNE sets -XX:+UseLargePages, and on a host without huge
+      # pages configured Solr logs a warning on every start. The documented way to
+      # turn it off is to append the negative form, because "the overriding
+      # -XX:-UseLargePages argument" wins [3].
+      SOLR_OPTS="$SOLR_OPTS -XX:-UseLargePages"
+
+      # G1 is the collector Solr expects: "The G1GC garbage collector is currently
+      # preferred when using a JVM that supports it (Java 9 and later)" [2]. It is
+      # the JVM default on Solr 10's Java 21, so this file does not override
+      # GC_TUNE. The docs deliberately publish no flag list ("consult your JVM
+      # vendor's documentation for specifics in your particular case") [2], so a
+      # copied list of GC flags from a blog post is a guess, not tuning.
+
+      # BIND ADDRESS. "To prevent administrators from unintentionally exposing
+      # Solr more broadly, Solr only listens on the loopback interface
+      # ('127.0.0.1') by default" [4]. Inside a container that means no other
+      # container can reach it, so it has to be widened to the container network.
+      # The port is published to the host on 127.0.0.1 only (see the compose
+      # file), which puts the loopback restriction back where it belongs.
+      SOLR_HOST_BIND="0.0.0.0"
+
+      # AUTHENTICATION is not configured here, and Solr ships with none. The
+      # vendor's position is blunt: "No Solr API, including the Admin UI, is
+      # designed to be exposed to non-trusted parties. Tune your firewall so that
+      # only trusted computers and people are allowed access." and "Solr is not
+      # designed to be exposed on the open internet" [4].
+      #
+      # Before this leaves a development machine, enable basic auth (which writes
+      # security.json for you):
+      #   docker compose exec solr solr auth enable -type basicAuth \
+      #     -credentials solr:'<a-real-password>' -blockUnknown true
+      # and keep the firewall anyway.
+  - path: docker-compose.solr.yml
+    content: |
+      # keel-generated: Apache Solr {{solr.version}}.
+      # Standalone: docker compose -f docker-compose.solr.yml up -d
+      # Or merged:  docker compose -f docker-compose.yml -f docker-compose.solr.yml up -d
+      services:
+        solr:
+          image: solr:{{solr.version}}
+          restart: unless-stopped
+          # "solr-precreate" creates the core if it does not exist and then starts
+          # Solr in the foreground; it must be the first argument for the
+          # entrypoint to dispatch it.
+          # https://solr.apache.org/guide/solr/latest/deployment-guide/solr-in-docker.html
+          command: ["solr-precreate", "{{solr.core}}"]
+          ulimits:
+            # "These four settings in particular are important to have set very
+            # high, unlimited if possible ... max processes (ulimit -u): 65,000 is
+            # the recommended minimum ... file handles (ulimit -n): 65,000 is the
+            # recommended minimum. All the files used by all replicas have their
+            # file handles open at once so this can grow quite large."
+            # https://solr.apache.org/guide/solr/latest/deployment-guide/taking-solr-to-production.html
+            # Below these, the documented symptoms are "too many open files",
+            # "connection error" and "max processes exceeded".
+            nofile: {soft: 65000, hard: 65000}
+            nproc: {soft: 65000, hard: 65000}
+            # "virtual memory (ulimit -v): Set to unlimited. This is used by
+            # MMapping the indexes." -1 is unlimited.
+            memlock: {soft: -1, hard: -1}
+          volumes:
+            # "If you want to persist the data, mount a volume or directory on
+            # /var/solr". A named volume rather than a bind mount because the
+            # image runs as uid:gid 8983:8983 (apache/solr-docker Dockerfile), and
+            # a host directory owned by anyone else fails at start-up.
+            - solr-data:/var/solr
+            - ./.keel/solr/solr.in.sh:/etc/default/solr.in.sh:ro
+          ports:
+            # Loopback only. Solr has no authentication configured, and its own
+            # documentation says it "is not designed to be exposed on the open
+            # internet".
+            - "127.0.0.1:8983:8983"
+          healthcheck:
+            # Asks the core admin API for the status of the cores, so a pass means
+            # Solr has started, loaded its cores and answered a request. A TCP
+            # check on 8983 passes while Jetty is up and Solr is still loading.
+            test: ["CMD-SHELL", "curl -fsS 'http://localhost:8983/solr/admin/cores?action=STATUS' >/dev/null || exit 1"]
+            interval: 10s
+            timeout: 5s
+            retries: 12
+            start_period: 60s
+      volumes:
+        solr-data:
+  - path: SOLR.md
+    content: |
+      # Apache Solr (scaffolded by keel)
+
+      Admin UI `http://127.0.0.1:8983/solr/` · core `{{solr.core}}` · config
+      `.keel/solr/solr.in.sh` · service `docker-compose.solr.yml` (DDEV:
+      `.ddev/docker-compose.solr.yaml`).
+
+      ## Before it is reachable by anyone else
+
+      Solr ships with no authentication and its documentation is explicit: "No
+      Solr API, including the Admin UI, is designed to be exposed to non-trusted
+      parties" and "Solr is not designed to be exposed on the open internet".
+      keel binds the published port to 127.0.0.1 for that reason.
+
+      Turn on basic auth before that changes:
+
+          docker compose exec solr solr auth enable -type basicAuth \
+            -credentials solr:'<a-real-password>' -blockUnknown true
+
+      That writes `security.json` into the Solr home on the volume. Keep the
+      firewall rule as well; authentication is not a substitute for it.
+
+      ## Cores
+
+      The container creates the `{{solr.core}}` core at first start
+      (`solr-precreate`). To add another:
+
+          docker compose exec solr solr create -c <name>
+
+      A core with your own schema needs its configset mounted; see
+      https://solr.apache.org/guide/solr/latest/deployment-guide/solr-in-docker.html
+
+      ## Not for Magento
+
+      Magento 2.4 requires Elasticsearch or OpenSearch and has no Solr adapter.
+      Use the opensearch recipe there.
+provision:
+  ddev:
+    files:
+      - path: .ddev/docker-compose.solr.yaml
+        content: |
+          # keel-generated: Apache Solr {{solr.version}} for DDEV.
+          # Rationale for every setting: .keel/solr/solr.in.sh.
+          services:
+            solr:
+              container_name: ddev-${DDEV_SITENAME}-solr
+              image: solr:{{solr.version}}
+              hostname: solr
+              restart: "no"
+              command: ["solr-precreate", "{{solr.core}}"]
+              labels:
+                com.ddev.site-name: ${DDEV_SITENAME}
+                com.ddev.approot: ${DDEV_APPROOT}
+              environment:
+                - VIRTUAL_HOST=$DDEV_HOSTNAME
+                - HTTP_EXPOSE=8983:8983
+                - HTTPS_EXPOSE=8984:8983
+              ulimits:
+                nofile: {soft: 65000, hard: 65000}
+                nproc: {soft: 65000, hard: 65000}
+                memlock: {soft: -1, hard: -1}
+              expose:
+                - "8983"
+              volumes:
+                - solr:/var/solr
+                # Relative to .ddev/, so this is the project-root copy.
+                - "../.keel/solr/solr.in.sh:/etc/default/solr.in.sh:ro"
+              healthcheck:
+                test: ["CMD-SHELL", "curl -fsS 'http://localhost:8983/solr/admin/cores?action=STATUS' >/dev/null || exit 1"]
+                interval: 10s
+                timeout: 5s
+                retries: 12
+                start_period: 60s
+          volumes:
+            solr:
+    install:
+      - "{{restart}}"
+  compose: {}
+  sail: {}
+  local:
+    install:
+      - "docker compose -f docker-compose.solr.yml up -d"

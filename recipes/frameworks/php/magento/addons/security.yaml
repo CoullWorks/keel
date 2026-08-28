@@ -1,0 +1,36 @@
+id: magento-security
+kind: addon
+label: Security hardening (admin lockdown, 2FA, secure URLs)
+appliesTo: [magento, magento-mageos]
+provides: [security-hardening]
+default: true
+# Magecart / CosmicSting / SessionReaper-aware defaults. Adobe ships ReCaptcha +
+# 2FA in core — this switches the safe options on and tightens the admin.
+install:
+  - "{{magento}} config:set admin/security/session_lifetime 900"
+  - "{{magento}} config:set admin/security/password_lifetime 90"
+  - "{{magento}} config:set admin/security/lockout_failures 5"
+  - "{{magento}} config:set admin/security/lockout_threshold 30"
+  - "{{magento}} config:set admin/captcha/enable 1"
+  - "{{magento}} config:set web/secure/use_in_frontend 1"
+  - "{{magento}} config:set web/secure/use_in_adminhtml 1"
+  - "{{magento}} config:set web/cookie/cookie_httponly 1"
+files:
+  - path: SECURITY.md
+    content: |
+      # Security baseline (Adobe Commerce / Magento)
+
+      keel enabled: short admin sessions + lockout, admin CAPTCHA, HTTPS for
+      front + admin, HTTP-only cookies. Do the rest before go-live:
+
+      - [ ] **Custom admin path**: `bin/magento config:set admin/url/use_custom_path 1`
+            and set a non-guessable `admin/url/custom_path` (never `/admin`).
+      - [ ] **2FA**: Magento_TwoFactorAuth ships in core; enforce it for all admins.
+      - [ ] **Patch baseline**: apply security patches immediately (CosmicSting
+            CVE-2024-34102 hit ~5% of stores; SessionReaper CVE-2025-54236 saw
+            250+ exploit attempts in 24h). Track adobe-commerce security bulletins.
+      - [ ] **PCI DSS 4.0.1 (mandatory since Mar 2025)**: inventory + integrity-check
+            every checkout script (reqs 6.4.3 / 11.6.1). A CSP on checkout blocks
+            Magecart skimmers.
+      - [ ] **Least privilege**: scoped admin roles; no shared admin accounts.
+      - [ ] **Disable dev tools in prod**: no Xdebug, no exposed `setup/`.

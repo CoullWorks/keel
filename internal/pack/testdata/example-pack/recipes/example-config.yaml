@@ -1,0 +1,42 @@
+id: example-sqlite-wiring
+schema_version: 2
+kind: config
+# A config recipe is the JOIN keel owns: it is NEVER chosen by the user. The
+# resolver INJECTS it automatically whenever the resolved plan matches its
+# `when:` condition. That is how a framework contributes its own wiring for a
+# shared database without either side knowing about the other — the db recipe
+# provides `sqlite`, this config recipe attaches itself to any plan that uses
+# `sqlite`, and the framework just reads the resulting .env.
+#
+# A config recipe MUST carry a `when:` block (validation refuses one without it),
+# and `when:` must constrain at least one of framework / frameworks / uses / env.
+label: "Wire the app to SQLite (auto-injected config, example pack)"
+appliesTo: ["*"]
+updated: 2026-08-22
+when:
+  # Match on the CAPABILITY, not a recipe id: this fires for any plan that uses a
+  # sqlite database, so it keeps working if the sqlite db comes from a different
+  # recipe. `framework:`/`frameworks:` would narrow it to named stacks; `env:` to
+  # an env id or family. Here `uses:` is enough.
+  uses: sqlite
+patch:
+  # patch: is the edit keel owns — a key/value set into an existing file (usually
+  # .env), applied AFTER the recipe that created the file. The db recipe published
+  # db.* vars; this reads them, so the wiring works for whatever database filled
+  # the sqlite contract.
+  - file: .env
+    set:
+      DB_CONNECTION: "{{db.type}}"
+      DB_DATABASE: "{{db.name}}"
+files:
+  - path: "EXAMPLE-CONFIG.md"
+    content: |
+      # SQLite wiring (auto-injected by the example pack)
+
+      <!-- keel-generated -->
+
+      You did not pick this recipe — keel injected it because the plan uses
+      SQLite. It set `DB_CONNECTION` and `DB_DATABASE` in `.env` from the
+      database's `db.*` contract. This is the "config recipe" pattern: shared
+      wiring that attaches itself by capability, so the database and the framework
+      never have to know each other's names.

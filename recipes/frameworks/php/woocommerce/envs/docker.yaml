@@ -1,0 +1,79 @@
+id: woocommerce-docker
+schema_version: 2
+kind: env
+env_family: compose
+label: Docker (compose, PHP-FPM)
+# Both WordPress layouts. The stack is identical - PHP-FPM, MariaDB, real cron -
+# and the only difference is where the document root sits, which the framework
+# recipes carry as {{wp.docroot}} and the web tier reads. Bedrock had DDEV and
+# nothing else, so `keel new woocommerce --type bedrock --env docker` had no
+# environment to offer at all.
+appliesTo: [woocommerce, woocommerce-bedrock]
+provides: [env, docker, db-mariadb] # this stack brings up MariaDB itself
+priority: -10 # bring the stack up before WordPress is downloaded
+updated: 2026-08-12
+# This env owns the command vocabulary. The stack it talks to is written by
+# recipes/frameworks/php/woocommerce/infra/php-fpm.yaml (the Dockerfile,
+# compose.yaml, the php.ini fragment, the FPM pool and the real cron that
+# replaces WP-Cron) and by the shared PHP baseline in
+# recipes/frameworks/php/shared/php-production.yaml.
+#
+# There is no web server in the stack until you pick one, which is how keel
+# models the choice: the nginx and Apache service recipes in recipes/infra/web/
+# are single-select and mutually exclusive, and picking one injects WordPress's
+# own server block or VirtualHost from woocommerce/infra/nginx.yaml or
+# woocommerce/infra/apache.yaml, along with a compose.override.yaml that adds the
+# container and publishes port 80.
+#
+#   keel new woocommerce --env woocommerce-docker --with nginx
+#   keel new woocommerce --env woocommerce-docker --with apache
+#
+# The two are not equivalent out of the box and the difference is security, not
+# taste: WordPress's published nginx recipe carries a restrictions file (dotfile
+# deny, PHP-in-uploads deny) that the .htaccess it generates does not have at
+# all. Both configs keel writes close that gap; read the header of whichever one
+# you get.
+commands:
+  start: "docker compose up -d --build"
+  # How this environment tears itself down. Used when a build fails partway:
+  # keel removes the directory it created, and without this the containers,
+  # volumes and network it started stay behind holding a bind mount to a
+  # path that no longer exists. The next attempt then reuses that container
+  # and dies with "current working directory is outside of container mount
+  # namespace root".
+  down: "docker compose down -v --remove-orphans"
+  restart: "docker compose restart"
+  # --user: the dev stage runs as root so it can write to the bind-mounted host
+  # tree, which means composer and artisan would create root-owned files in your
+  # working directory. keel then cannot patch its own .env ("permission denied")
+  # and you cannot edit the project without sudo. Running exec as the invoking
+  # user keeps everything written here owned by you.
+  exec: 'docker compose exec -T --user "$(id -u):$(id -g)" -e COMPOSER_HOME=/tmp -e HOME=/tmp php'
+  # WP-CLI runs inside the project's own image, so it sees the same PHP version,
+  # the same extensions and the same bind-mounted tree the site runs on. `run
+  # --rm` starts the container on demand, which is what makes this work before
+  # anything has been brought up.
+  #
+  # As the invoking user, not root, and therefore without --allow-root.
+  #
+  # WP-CLI does more than talk to the database: `wp plugin install` and
+  # `wp theme install` write whole directories into wp-content, and the sample
+  # data importer writes uploads. Running that as root put root-owned plugin
+  # files in the user's own project, where WordPress itself - which does not run
+  # as root - then could not update or delete them.
+  #
+  # --allow-root exists to override WP-CLI's refusal to run as root at all; once
+  # it is not running as root the flag is not just unnecessary, keeping it would
+  # hide a regression back to root.
+  wp: 'docker compose run --rm -T --user "$(id -u):$(id -g)" -e HOME=/tmp php wp'
+  # Composer, for the Bedrock layout. Classic WordPress is installed by WP-CLI
+  # and never needs it, but Bedrock IS Composer-managed - core, plugins and
+  # themes are all dependencies - so without this every `{{composer}}` step
+  # rendered empty and the install ran `create-project roots/bedrock .` as a
+  # bare command, which exits 127.
+  #
+  # Same --user and HOME as exec: composer writes vendor/ into the bind mount.
+  composer: 'docker compose exec -T --user "$(id -u):$(id -g)" -e COMPOSER_HOME=/tmp -e HOME=/tmp php composer'
+  site_url: "http://localhost:{{http_port}}"
+smoke:
+  - "docker compose ps"

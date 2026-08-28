@@ -1,0 +1,161 @@
+id: apache-flask
+schema_version: 2
+kind: config
+label: Flask VirtualHost for Apache
+updated: 2026-08-12
+# Written from docs/infra/flask.md plus the Apache 2.4 module reference. Flask
+# publishes an nginx config and no Apache one, so this is keel's translation of
+# it.
+#
+# The application server does not change between the nginx and the Apache
+# choice: gunicorn still runs `app:app` on 8000. Flask does document a second
+# route, mod_wsgi, where Apache runs the WSGI application itself ("Does not
+# require a reverse proxy setup", `mod_wsgi-express start-server wsgi.py
+# --processes 4`); it is deliberately not used here, because it would swap out
+# the application server as well as the proxy and the two choices would stop
+# being comparable.
+#
+# Division of labour. The shared Apache service (recipes/infra/web/apache.yaml)
+# owns .keel/apache/keel-tuning.conf: MPM event tuning, the LoadModule lines for the
+# proxy modules, global compression, mod_expires, ServerTokens Prod,
+# ServerSignature Off, TraceEnable Off, the global security headers, and the
+# `IncludeOptional conf.d/app-*.conf` that pulls this file in.
+when:
+  framework: flask
+  uses: apache
+files:
+  - path: docker/apache/conf.d/app-flask.conf
+    content: |
+      # Flask behind gunicorn, proxied. Included by the shared keel-tuning.conf.
+      <VirtualHost *:80>
+          ServerName localhost
+
+          # Stated rather than assumed. Apache: "Do not enable proxying with
+          # ProxyRequests until you have secured your server. Open proxy servers
+          # are dangerous both to your network and to the Internet at large."
+          ProxyRequests Off
+
+          # On, so Flask sees the browser's Host. Apache defaults it Off, which
+          # would send the upstream name and break url_for's absolute URLs and
+          # any host-based routing.
+          ProxyPreserveHost On
+
+          # mod_proxy_http adds X-Forwarded-For, X-Forwarded-Host and
+          # X-Forwarded-Server itself, and warns they "will contain more than one
+          # (comma-separated) value if the original request already contained one
+          # of these headers". That matters more for Flask than for most, because
+          # ProxyFix counts hops: an unexpected extra value shifts which entry it
+          # trusts. Clearing the client's copy first makes Apache's the only one.
+          RequestHeader unset X-Forwarded-For
+          RequestHeader unset X-Forwarded-Host
+          RequestHeader unset X-Forwarded-Server
+          # mod_proxy_http adds neither X-Forwarded-Proto nor X-Forwarded-Prefix,
+          # and Flask's own nginx config sets both. This is the practical
+          # difference between the two web servers for Flask: nginx writes all
+          # four headers by hand, Apache supplies two and needs the other two
+          # adding. Change -Proto to "https" when TLS terminates here.
+          RequestHeader set X-Forwarded-Proto "http"
+          RequestHeader set X-Forwarded-Prefix "/"
+
+          # keel's convention, not Flask's: Flask serves /static itself and
+          # documents no offload. The `ProxyPass ... !` exclusion is mandatory
+          # and is the Apache trap, because rules are "checked in the order of
+          # configuration, the first rule that matches wins" and the catch-all
+          # below would otherwise swallow /static/ before the Alias could fire.
+          # nginx needs no equivalent, because a longer location prefix wins.
+          ProxyPass /static/ !
+          Alias /static/ /var/www/static/
+          <Directory "/var/www/static">
+              Require all granted
+              Options -Indexes -ExecCGI
+              AllowOverride None
+              <IfModule mod_expires.c>
+                  ExpiresActive On
+                  ExpiresDefault "access plus 7 days"
+              </IfModule>
+          </Directory>
+
+          # Everything else to gunicorn. Under the native env there is no `app`
+          # host: change these to http://127.0.0.1:8000/, which is also where
+          # gunicorn should be bound, because binding it externally behind a
+          # proxy makes it "possible to bypass the proxy".
+          #
+          # connectiontimeout is the wait for the TCP connect, timeout the wait
+          # for data. 60 matches gunicorn's --timeout so both give up together;
+          # left unset, timeout falls back to ProxyTimeout and then to Apache's
+          # Timeout of 300, and a hung request holds a connection for five
+          # minutes. retry=5 shortens Apache's 60s default, so a worker just
+          # recycled by --max-requests is retried in seconds.
+          ProxyPass        / http://app:8000/ connectiontimeout=5 timeout=60 retry=5
+          ProxyPassReverse / http://app:8000/
+
+          # LimitRequestBody alone does NOT cap a proxied request: the directive
+          # is enforced when Apache itself serves the request, not when
+          # mod_proxy_http streams the body through to a backend. The rewrite
+          # below is what actually rejects it. [R=413] aborts with that status
+          # rather than redirecting, because mod_rewrite treats any code outside
+          # 300-399 as an abort.
+          #
+          # Caveat: this reads the declared Content-Length, so a chunked upload
+          # that sends none is not caught. nginx's client_max_body_size covers
+          # both cases. Keep Flask's own MAX_CONTENT_LENGTH as the backstop.
+          RewriteEngine On
+          RewriteCond expr "%{HTTP:Content-Length} -gt 26214400"
+          RewriteRule ^ - [R=413,L]
+          # Apache's LimitRequestBody default is 0, meaning unlimited, which is a
+          # denial-of-service surface rather than a feature. 25 MiB, matching the
+          # nginx block.
+          LimitRequestBody 26214400
+      </VirtualHost>
+
+      # None of the above is enough on its own. Flask's ProxyFix has to be
+      # applied in the application, sized to the real chain:
+      #
+      #   from werkzeug.middleware.proxy_fix import ProxyFix
+      #   app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+      #
+      # Flask: "It can be a security issue if you get this configuration wrong."
+      # One Apache in front means 1; a CDN plus Apache means 2.
+      #
+      # Apache has no one-line equivalent of nginx's `return 200`, so there is no
+      # proxy-local health endpoint. The container health check probes the app's
+      # /health through this vhost, which proves the whole proxy path.
+provision:
+  compose:
+    files:
+      - path: compose.override.yaml
+        content: |
+          # Compose merges compose.override.yaml over compose.yaml with no extra
+          # flags, so the app service written by the env recipe is untouched.
+          services:
+            apache:
+              image: httpd:2.4-alpine
+              # The stock httpd.conf is left in place: it loads mpm_event and the base
+              # module set. -c appends this directive after it is read, pulling in the
+              # shared tuning and this framework's VirtualHost. Without it the image
+              # starts on stock config and serves its default page - it does not fail.
+              command: ["httpd-foreground", "-c", "Include conf/keel-tuning.conf"]
+              restart: unless-stopped
+              depends_on:
+                app:
+                  condition: service_healthy
+              ports:
+                - "${HTTP_PORT:-8080}:80"
+              volumes:
+                # Shared, owned by recipes/infra/web/apache.yaml.
+                - ./.keel/apache/keel-tuning.conf:/usr/local/apache2/conf/keel-tuning.conf:ro
+                # This framework's VirtualHost, owned by this recipe.
+                - ./docker/apache/conf.d:/usr/local/apache2/conf.d:ro
+              healthcheck:
+                test: ["CMD", "wget", "-qO-", "http://127.0.0.1/health"]
+                interval: 15s
+                timeout: 5s
+                retries: 5
+                start_period: 10s
+              # Matches the app's stop_grace_period, so the proxy is not killed
+              # while gunicorn is still draining requests it forwarded.
+              stop_grace_period: 45s
+  # Native env: no container to add. The VirtualHost above still applies, but
+  # change the ProxyPass target to http://127.0.0.1:8000/ and point the Alias at
+  # the real static directory on the host.
+  local: {}

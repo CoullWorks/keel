@@ -1,0 +1,83 @@
+id: sqlite
+schema_version: 2
+kind: db
+label: SQLite (embedded, file-based - no server)
+# SQLite is a library, not a server: the whole database is one file the
+# application opens directly, so there is no container, no port and no
+# credentials. That is exactly why it was missing and exactly why it belongs -
+# keel's own Express scaffold already falls back to "sqlite" when no KEEL_DB is
+# set, and the Node ORMs both support it (Prisma's `sqlite` provider, Drizzle's
+# `better-sqlite3` driver), yet a project could not actually choose it.
+#
+# Offered to the Node frameworks and to the Python frameworks whose stacks read
+# a file DSN happily. Django and FastAPI both ship on SQLite by default; Flask
+# does too. It is not offered where a server database is effectively mandatory
+# (Magento, WooCommerce, the Mongo-shaped Django backend) - those have no SQLite
+# story at all.
+appliesTo: [nextjs, express, fastify, hono, nestjs, adonisjs, nuxt, astro, sveltekit, django, fastapi, flask]
+provides: [db, sqlite, db-sqlite]
+# A file database and a server database are mutually exclusive primaries: picking
+# SQLite alongside an environment that also brings up Postgres/MySQL/MariaDB
+# would build two databases and wire the app to the wrong one. It does NOT
+# conflict with the standalone vector stores (Qdrant, Chroma) or with a search
+# engine: those sit beside the primary, whatever it is.
+conflicts: [db-postgres, db-mysql, db-mariadb, db-mongo]
+priority: -5 # settle the database choice before the app migrates
+updated: 2026-08-22
+vars:
+  db.type: sqlite
+  # Not a DDEV database type. DDEV runs a relational server (MariaDB by default)
+  # and there is no --database=sqlite to pass; the app simply reads its file DSN
+  # from the environment instead. Empty, like Mongo's, so the ddev env's config
+  # step passes no flag.
+  db.ddev_flag: ""
+  db.host: ""
+  db.port: ""
+  db.name: dev
+  # Prisma's provider name and the DSN everything reads. Prisma spells a SQLite
+  # source `file:<path>`; keel writes it into DATABASE_URL so the ORM add-ons,
+  # the framework and `keel run migrate` all open the same file.
+  db.prisma: sqlite
+  db.url: "file:./dev.db"
+  # Drizzle's dialect is `sqlite`; its driver package for a local file is
+  # better-sqlite3 (the synchronous, embedded one drizzle-kit documents first).
+  # Defined so the Drizzle add-on installs the right client and writes a config
+  # that parses, rather than leaving {{db.drizzle_driver}} literal in its steps.
+  db.drizzle: sqlite
+  db.drizzle_driver: better-sqlite3
+provision:
+  # Every family provisions SQLite identically, because there is nothing to
+  # provision: no server starts, no container comes up, no port is published.
+  # Each family only writes the connection so the framework reads a file DSN
+  # instead of its own hardcoded default. That is also why SQLite is safe to pick
+  # under a native/local env with no Docker at all.
+  local:
+    files:
+      - path: .env
+        content: |
+          # keel: SQLite - the database is a single file, no server to start.
+          # Node ORMs read DATABASE_URL; Python frameworks read KEEL_DB and open
+          # the file directly. `keel run migrate` creates dev.db on first run.
+          KEEL_DB=sqlite
+          DATABASE_URL={{db.url}}
+  compose:
+    files:
+      - path: .env
+        content: |
+          # keel: SQLite inside the app container. The file lives on the bind
+          # mount / named volume with the code, so it survives a container
+          # restart the same way the source does.
+          KEEL_DB=sqlite
+          DATABASE_URL={{db.url}}
+  ddev:
+    files:
+      - path: .ddev/config.db.yaml
+        content: |
+          # keel-generated: SQLite. DDEV still runs its own (unused) relational
+          # database; the app is pointed at the SQLite file through the
+          # environment instead, so nothing here sets a `database:` type.
+          web_environment:
+            - KEEL_DB=sqlite
+            - DATABASE_URL={{db.url}}
+    install:
+      - "{{restart}}"

@@ -1,0 +1,144 @@
+id: apache-symfony
+schema_version: 2
+kind: config
+label: Symfony VirtualHost for Apache
+updated: 2026-08-12
+# Division of labour. The shared Apache service (recipes/infra/web/apache.yaml)
+# owns .keel/apache/keel-tuning.conf: MPM event tuning, the LoadModule lines for
+# mod_proxy, mod_proxy_fcgi, mod_rewrite and mod_headers, global compression,
+# mod_expires, ServerTokens Prod, the global security headers, and the
+# `IncludeOptional conf.d/app-*.conf` that pulls this file in. This recipe owns
+# one VirtualHost and the compose wiring.
+#
+# Source: symfony.com/doc/current/setup/web_server_configuration.html, which
+# publishes this VirtualHost for "PHP-FPM with Apache" and prefers it to the
+# symfony/apache-pack .htaccess. Symfony's own words: "For production, move these
+# rules to the main Apache configuration file (as shown above) to improve
+# performance."
+#
+# One deliberate tightening. Symfony's published block puts SetHandler in
+# <FilesMatch \.php$>, which hands ANY .php file under public/ to FPM. A stock
+# Symfony public/ contains only index.php so it is usually harmless, but it is a
+# weaker posture than the nginx config beside it, which has an explicit
+# `location ~ \.php$ { return 404; }`. docs/infra/symfony.md records the gap;
+# this file closes it by handing over index.php alone and refusing the rest.
+when:
+  framework: symfony
+  uses: apache
+provision:
+  compose:
+    files:
+      - path: docker/apache/conf.d/app-symfony.conf
+        verbatim: true
+        content: |
+          # keel-generated. Symfony VirtualHost. Included by the shared keel-tuning.conf.
+          <VirtualHost *:80>
+              ServerName localhost
+
+              # public/ "is the document root for your web server and contains
+              # static files and the front controller (index.php)".
+              DocumentRoot /var/www/html/public
+
+              # Only the front controller reaches PHP-FPM.
+              <FilesMatch "^index\.php$">
+                  # when using PHP-FPM over TCP. For a unix socket the published
+                  # form is
+                  # SetHandler proxy:unix:/var/run/php/php8.4-fpm.sock|fcgi://dummy
+                  SetHandler "proxy:fcgi://php:9000"
+              </FilesMatch>
+              # Anything else ending .php is refused, which is the Apache half of
+              # the nginx `location ~ \.php$ { return 404; }`.
+              <FilesMatch "^(?!index\.php$).*\.php$">
+                  Require all denied
+              </FilesMatch>
+
+              <Directory /var/www/html/public>
+                  # No .htaccess lookup at all: Symfony's recommended production
+                  # setup, and the reason symfony/apache-pack is described as the
+                  # shared-hosting fallback rather than the target.
+                  AllowOverride None
+                  Require all granted
+                  # FallbackResource is the whole routing rule: anything that is
+                  # not a real file is handed to the front controller. It replaces
+                  # the four RewriteCond/RewriteRule pairs the apache-pack
+                  # .htaccess needs.
+                  FallbackResource /index.php
+                  Options -MultiViews -Indexes +FollowSymLinks
+              </Directory>
+
+              # Symfony offers this as optional and it is worth taking: a missing
+              # asset 404s instead of falling through to the front controller and
+              # rendering a Symfony error page for a missing image.
+              <Directory /var/www/html/public/bundles>
+                  DirectoryIndex disabled
+                  FallbackResource disabled
+              </Directory>
+
+              # Symfony's commented line, enabled. mod_proxy_fcgi does not forward
+              # the Authorization header on its own, so "basic_auth" and any
+              # bearer-token firewall silently see no credentials without this.
+              SetEnvIfNoCase ^Authorization$ "(.+)" HTTP_AUTHORIZATION=$1
+
+              # Not in Symfony's block: dotfiles under public/ would otherwise be
+              # served. /.well-known stays reachable for ACME.
+              <FilesMatch "^\.(?!well-known)">
+                  Require all denied
+              </FilesMatch>
+
+              # FPM's status and ping pages, declared in the pool.
+              <LocationMatch "^/(fpm-status|fpm-ping)$">
+                  SetHandler "proxy:fcgi://php:9000"
+                  Require ip 127.0.0.1 172.16.0.0/12
+              </LocationMatch>
+
+              # No php_value or php_flag anywhere in this file, and that is
+              # deliberate. Those directives come from mod_php, which is not
+              # loaded in a PHP-FPM stack, so they are either a fatal
+              # "Invalid command" or, when wrapped in <IfModule mod_php.c>,
+              # silently skipped. memory_limit, max_execution_time, the realpath
+              # cache and the opcache preload are set in
+              # docker/php/conf.d/10-symfony.ini and
+              # docker/php/php-fpm.d/zzz-symfony-pool.conf.
+
+              ErrorLog /proc/self/fd/2
+              CustomLog /proc/self/fd/1 combined
+          </VirtualHost>
+      - path: compose.override.yaml
+        verbatim: true
+        content: |
+          # keel-generated. Compose merges compose.override.yaml over compose.yaml
+          # with no extra flags.
+          services:
+            apache:
+              image: httpd:2.4
+              # The official image's httpd.conf has every optional include
+              # commented out and no conf.d glob, so a mounted config file would
+              # never be read. -c processes a directive after the config files are
+              # read, which is how the shared tuning gets in without rebuilding
+              # the image. It in turn includes this framework's VirtualHost.
+              command: ["httpd-foreground", "-c", "Include conf/keel-tuning.conf"]
+              restart: unless-stopped
+              depends_on:
+                php:
+                  condition: service_healthy
+              ports:
+                - "${HTTP_PORT:-8080}:80"
+              volumes:
+                - .:/var/www/html:ro
+                # Shared, owned by recipes/infra/web/apache.yaml. The official
+                # image's stock httpd.conf includes nothing from conf.d, so the
+                # command above pulls this file in with -c, which httpd processes
+                # after the config files are read.
+                - ./.keel/apache/keel-tuning.conf:/usr/local/apache2/conf/keel-tuning.conf:ro
+                # This framework's VirtualHost, owned by this recipe. The shared
+                # tuning file ends with `IncludeOptional conf.d/app-*.conf`, which
+                # is relative to ServerRoot, hence /usr/local/apache2/conf.d and
+                # the app- prefix on the filename.
+                - ./docker/apache/conf.d:/usr/local/apache2/conf.d:ro
+              # No healthcheck: the official httpd image ships no HTTP client, and
+              # Symfony ships no health endpoint to probe anyway.
+  # DDEV already runs apache-fpm when asked, with a Symfony-aware vhost.
+  ddev: {}
+  # Native env: no container. The VirtualHost still applies if you run Apache on
+  # the host; point SetHandler at your own FPM socket.
+  local: {}

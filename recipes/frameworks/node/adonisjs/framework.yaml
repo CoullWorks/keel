@@ -1,0 +1,59 @@
+id: adonisjs
+kind: framework
+label: AdonisJS (full-stack TypeScript, Laravel-like)
+lang: node
+provides: [node, adonisjs, self-serving]
+default: false
+updated: 2026-08-07
+node_version: ">=24"
+pins:
+  adonisjs: ^6.0
+# AdonisJS requires Node >= 24 (see node_version above), so there is one
+# supported line to offer. The question is still asked rather than hidden,
+# so the constraint is visible instead of surprising.
+versions:
+  node_version:
+    label: Node.js version
+    recommended: "24"
+    options:
+      - value: "24"
+        label: "Node 24 LTS"
+        note: "required: AdonisJS needs Node 24 or newer"
+# AdonisJS needs Node >=24. If nvm is present, keel switches to 24 (run
+# `keel doctor --fix` once); otherwise it uses the active Node (which must be
+# >=24). There is no files: block because the vendor scaffolder writes the whole
+# project itself.
+install:
+  # Scaffold into .keeltmp and merge, the same way the Laravel recipe does.
+  #
+  # create-adonisjs refuses to write into a directory that already has anything
+  # in it - and it still exits 0. The env recipe has by then written Dockerfile,
+  # compose.yaml and .dockerignore, so scaffolding straight into `.` printed
+  # "Destination already exists", reported success, and left a project with no
+  # package.json at all. The container then sat waiting for dependencies that
+  # were never going to arrive.
+  #
+  # The temp directory is `keeltmp`, without a leading dot, because
+  # create-adonisjs takes the package name from the destination directory and
+  # npm rejects a name starting with a dot. With `.keeltmp` the project
+  # scaffolded fine and then died on every boot inside hot-hook with
+  # `Invalid name: ".keeltmp"`. `npm pkg set` puts the real project name back,
+  # lowercased because npm names may not contain uppercase.
+  #
+  # `test -f package.json` at the end turns a silent no-op back into a failure.
+  - "bash -lc 'export NVM_DIR=\"$HOME/.nvm\"; [ -s \"$NVM_DIR/nvm.sh\" ] && { . \"$NVM_DIR/nvm.sh\"; nvm use 24 >/dev/null 2>&1; }; rm -rf keeltmp && npm init adonisjs@latest -y -- keeltmp --kit=api --pkg=npm && cp -a keeltmp/. . && rm -rf keeltmp && test -f package.json && npm pkg set name=\"$(basename \"$PWD\" | tr \"[:upper:]\" \"[:lower:]\")\"'"
+  # After the host scaffold, so the image build has files to COPY.
+  - "{{start}}"
+  # The app started before its dependencies existed, so bring it back up now
+  # that they are installed. Renders empty, and is dropped, on a native env.
+  - "{{restart}}"
+smoke:
+  - "bash -lc 'export NVM_DIR=\"$HOME/.nvm\"; [ -s \"$NVM_DIR/nvm.sh\" ] && { . \"$NVM_DIR/nvm.sh\"; nvm use 24 >/dev/null 2>&1; }; node ace list >/dev/null'"
+tasks:
+  test: "{{exec}} node ace test"
+  # From the vendor starter kit, which ships @adonisjs/eslint-config and a
+  # `lint` script. keel does not add the eslint add-on to AdonisJS for exactly
+  # that reason: it would be a second, conflicting config.
+  lint: "{{exec}} npm run lint"
+  dev: "bash -lc 'export NVM_DIR=\"$HOME/.nvm\"; [ -s \"$NVM_DIR/nvm.sh\" ] && { . \"$NVM_DIR/nvm.sh\"; nvm use 24 >/dev/null 2>&1; }; node ace serve --watch'"
+  build: "bash -lc 'export NVM_DIR=\"$HOME/.nvm\"; [ -s \"$NVM_DIR/nvm.sh\" ] && { . \"$NVM_DIR/nvm.sh\"; nvm use 24 >/dev/null 2>&1; }; npm run build'"

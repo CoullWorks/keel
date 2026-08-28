@@ -1,0 +1,129 @@
+id: django-htmx
+kind: frontend
+label: HTMX + Alpine (server-rendered, no SPA)
+appliesTo: [django]
+requires: [django]
+provides: [frontend, htmx]
+priority: 60 # after backend + env + db
+# Server-rendered Django: HTMX for partial updates, Alpine for sprinkles — no
+# separate SPA, no CORS. Kept self-contained (inline view) so it needs no
+# settings/app changes; grow it into templates + an app when you're ready.
+smoke:
+  - "{{manage}} check"
+files:
+  - path: config/urls.py
+    content: |
+      # keel: a self-contained, production-ready landing page that proves the
+      # environment works, and that htmx is wired. The "ping" button issues an
+      # hx-get and swaps in a server-rendered partial, so a successful swap is
+      # proof the request reached Django and came back. Kept inline (no template
+      # dir, no app) so it needs no settings changes; move _PAGE into a real
+      # templates/ file and switch to render() when you grow this out.
+      from django.contrib import admin
+      from django.http import HttpResponse
+      from django.urls import path
+
+      _PAGE = """<!doctype html>
+      <html lang="en">
+      <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>Django is running</title>
+        <script src="https://unpkg.com/htmx.org@2"></script>
+        <script defer src="https://unpkg.com/alpinejs@3"></script>
+        <style>
+          :root { color-scheme: dark; }
+          * { box-sizing: border-box; }
+          body {
+            margin: 0;
+            font-family: system-ui, -apple-system, sans-serif;
+            background: #020617;
+            color: #e2e8f0;
+            line-height: 1.5;
+          }
+          .wrap { max-width: 44rem; margin: 0 auto; padding: 5rem 1.5rem; }
+          .badge {
+            display: inline-flex; align-items: center; gap: .5rem;
+            border: 1px solid rgba(16,185,129,.3);
+            background: rgba(16,185,129,.1);
+            color: #6ee7b7;
+            border-radius: 9999px; padding: .25rem .75rem;
+            font-size: .75rem; font-weight: 500;
+          }
+          .dot { width: .375rem; height: .375rem; border-radius: 9999px; background: #34d399; }
+          h1 { margin: 1.5rem 0 0; font-size: 2.5rem; letter-spacing: -.02em; }
+          .sub { margin: 1rem 0 0; color: #94a3b8; font-size: 1.125rem; }
+          code { background: #1e293b; border-radius: .25rem; padding: .1rem .375rem; font-size: .9em; }
+          .links { display: flex; flex-wrap: wrap; gap: .75rem; margin-top: 2rem; }
+          .btn {
+            border-radius: .5rem; padding: .5rem 1rem;
+            font-size: .875rem; font-weight: 600; text-decoration: none;
+            cursor: pointer; border: 1px solid transparent; font-family: inherit;
+          }
+          .btn-primary { background: #10b981; color: #020617; }
+          .btn-primary:hover { background: #34d399; }
+          .btn-ghost { border-color: #334155; color: #e2e8f0; background: transparent; }
+          .btn-ghost:hover { background: #0f172a; }
+          .demo {
+            margin-top: 2.5rem; padding: 1.25rem;
+            border: 1px solid #1e293b; border-radius: .75rem; background: rgba(15,23,42,.5);
+          }
+          .demo p { margin: 0 0 .75rem; font-size: .875rem; color: #94a3b8; }
+          .grid { display: grid; gap: 1rem; margin-top: 2rem; grid-template-columns: 1fr; }
+          @media (min-width: 640px) { .grid { grid-template-columns: repeat(3, 1fr); } }
+          .card { border: 1px solid #1e293b; border-radius: .75rem; padding: 1.25rem; background: rgba(15,23,42,.5); }
+          .card h2 { margin: 0; font-size: 1rem; }
+          .card p { margin: .25rem 0 0; font-size: .875rem; color: #94a3b8; }
+        </style>
+      </head>
+      <body>
+        <div class="wrap">
+          <span class="badge"><span class="dot"></span> running</span>
+          <h1>Your Django app is running</h1>
+          <p class="sub">
+            Server-rendered with htmx, scaffolded by keel. Edit
+            <code>config/urls.py</code> to make it yours.
+          </p>
+          <div class="links">
+            <a class="btn btn-primary" href="https://coullworks.com/tools/keel">keel docs</a>
+            <a class="btn btn-ghost" href="https://htmx.org">htmx docs</a>
+          </div>
+
+          <div class="demo">
+            <p>Prove htmx is wired, this button swaps in a partial rendered by Django:</p>
+            <button class="btn btn-ghost" hx-get="/ping" hx-swap="outerHTML">
+              Ping the server
+            </button>
+            <div x-data="{ n: 0 }" style="margin-top: .75rem">
+              <button class="btn btn-ghost" @click="n++">
+                Alpine count: <span x-text="n"></span>
+              </button>
+            </div>
+          </div>
+
+          <div class="grid">
+            <div class="card"><h2>htmx</h2><p>HTML over the wire, partial swaps, no SPA.</p></div>
+            <div class="card"><h2>Server-rendered</h2><p>Django views + templates, no CORS.</p></div>
+            <div class="card"><h2>keel-managed</h2><p>keel run dev · test · build, one vocabulary.</p></div>
+          </div>
+        </div>
+      </body>
+      </html>"""
+
+
+      def home(request):
+          return HttpResponse(_PAGE)
+
+
+      def ping(request):
+          # The server-rendered partial htmx swaps in, proof the round-trip works.
+          return HttpResponse(
+              '<button class="btn btn-ghost">pong from the server ✓</button>'
+          )
+
+
+      urlpatterns = [
+          path("", home),
+          path("ping", ping),
+          path("admin/", admin.site.urls),
+      ]

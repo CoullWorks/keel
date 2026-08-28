@@ -1,0 +1,182 @@
+id: apache-streamlit
+schema_version: 2
+kind: config
+label: Streamlit VirtualHost for Apache
+updated: 2026-08-12
+# Written from docs/infra/streamlit.md plus the Apache 2.4 module reference.
+# Streamlit names Apache as a reverse-proxy option and gives no example, so
+# everything here is keel's translation, built from Apache's own mod_proxy,
+# mod_proxy_wstunnel and mod_proxy_balancer documentation applied to Streamlit's
+# documented websocket transport.
+#
+# The application server does not change between the nginx and the Apache
+# choice, and for Streamlit it cannot: there is no WSGI callable, no ASGI
+# callable and no way to put it behind gunicorn or Uvicorn. `streamlit run`
+# starts one Tornado server and the proxy sits in front of it.
+#
+# Apache has the better answer than nginx on exactly one point here, and it is
+# the point that matters most for this framework: session affinity.
+# mod_proxy_balancer's stickysession is cookie-based, so it survives a client
+# changing address, where open-source nginx only offers ip_hash.
+#
+# Division of labour. The shared Apache service (recipes/infra/web/apache.yaml)
+# owns .keel/apache/keel-tuning.conf: MPM event tuning, the LoadModule lines for the
+# proxy modules, global compression, mod_expires, ServerTokens Prod,
+# ServerSignature Off, TraceEnable Off, the global security headers, and the
+# `IncludeOptional conf.d/app-*.conf` that pulls this file in.
+when:
+  framework: streamlit
+  uses: apache
+files:
+  - path: docker/apache/conf.d/app-streamlit.conf
+    content: |
+      # Streamlit on its own Tornado server, proxied. Included by the shared
+      # httpd.conf.
+      <VirtualHost *:80>
+          ServerName localhost
+
+          # Stated rather than assumed. Apache: "Do not enable proxying with
+          # ProxyRequests until you have secured your server. Open proxy servers
+          # are dangerous both to your network and to the Internet at large."
+          ProxyRequests Off
+
+          # On, so Streamlit sees the browser's Host. Apache defaults it Off,
+          # which would send the upstream name and break the websocket origin
+          # check that server.enableXsrfProtection relies on.
+          ProxyPreserveHost On
+
+          # mod_proxy_http adds X-Forwarded-For, X-Forwarded-Host and
+          # X-Forwarded-Server itself, and warns they "will contain more than one
+          # (comma-separated) value if the original request already contained one
+          # of these headers". Clearing the client's copy first makes Apache's
+          # the only value the app can read.
+          RequestHeader unset X-Forwarded-For
+          RequestHeader unset X-Forwarded-Host
+          RequestHeader unset X-Forwarded-Server
+          # mod_proxy_http does NOT add X-Forwarded-Proto. Change to "https" when
+          # TLS terminates here.
+          RequestHeader set X-Forwarded-Proto "http"
+
+          # The websocket. Apache 2.4.47 and later carries an upgrade end to end
+          # through mod_proxy_http: "the connection will be upgraded and tunneled
+          # by mod_proxy_http only if the origin server accepts/initiates the
+          # upgrade (HTTP response 101 Switching Protocols). If the origin server
+          # responds with anything else mod_proxy_http will continue forwarding
+          # (and enforcing) the HTTP protocol as usual." That is exactly the
+          # shape Streamlit needs, because the same path serves both the page and
+          # the socket. The httpd:2.4-alpine image is well past 2.4.47.
+          #
+          # timeout=3600 is keel's number and the Apache equivalent of nginx's
+          # proxy_read_timeout: the "number of seconds Apache httpd waits for
+          # data sent by / to the backend". Left unset it falls back to
+          # ProxyTimeout and then to Apache's Timeout of 300, so a user reading a
+          # dashboard for six minutes loses the session. Streamlit publishes no
+          # number for this.
+          #
+          # Under the native env there is no `app` host: change these to
+          # http://127.0.0.1:8501/.
+          ProxyPass        / http://app:8501/ upgrade=websocket connectiontimeout=5 timeout=3600
+          ProxyPassReverse / http://app:8501/
+
+          # On Apache 2.4.46 and earlier, mod_proxy_http cannot do this and
+          # mod_proxy_wstunnel must be used instead. Apache's own documented form
+          # for a backend whose websocket URLs are not known in advance, placed
+          # above the ProxyPass with the ProxyPass left as a plain http mapping:
+          #   RewriteEngine on
+          #   RewriteCond %{HTTP:Upgrade} websocket [NC]
+          #   RewriteCond %{HTTP:Connection} upgrade [NC]
+          #   RewriteRule ^/?(.*) "ws://app:8501/$1" [P,L]
+
+          # Session affinity. Not needed at one replica, mandatory beyond it:
+          # Streamlit states "If you use load balancing or replication in your
+          # deployment, some Streamlit features won't work without session
+          # affinity or stickiness", and "Enable session affinity (also known as
+          # stickiness) in your proxy."
+          #
+          # Apache's own documented mechanism, from mod_proxy_balancer:
+          # mod_headers stamps a ROUTEID cookie carrying the chosen worker's
+          # route, and stickysession names that cookie. HttpOnly and SameSite are
+          # keel's additions to the vendor line; the vendor example is
+          # `Header add Set-Cookie "ROUTEID=.%{BALANCER_WORKER_ROUTE}e; path=/"
+          # env=BALANCER_ROUTE_CHANGED`.
+          #
+          # Header add Set-Cookie "ROUTEID=.%{BALANCER_WORKER_ROUTE}e; path=/; HttpOnly; SameSite=Lax" env=BALANCER_ROUTE_CHANGED
+          # <Proxy "balancer://streamlit">
+          #     BalancerMember "http://app-1:8501" route=1 upgrade=websocket timeout=3600
+          #     BalancerMember "http://app-2:8501" route=2 upgrade=websocket timeout=3600
+          #     ProxySet stickysession=ROUTEID
+          # </Proxy>
+          # ProxyPass        / balancer://streamlit/
+          # ProxyPassReverse / balancer://streamlit/
+
+          # LimitRequestBody alone does NOT cap a proxied request: the directive
+          # is enforced when Apache itself serves the request, not when
+          # mod_proxy_http streams the body through to a backend. The rewrite
+          # below is what actually rejects it. [R=413] aborts with that status
+          # rather than redirecting, because mod_rewrite treats any code outside
+          # 300-399 as an abort.
+          #
+          # 200 MiB, tracking Streamlit's own server.maxUploadSize default of 200
+          # (megabytes). The two must move together or uploads fail at whichever
+          # is lower with an error the other side never sees.
+          #
+          # Caveat: this reads the declared Content-Length, so a chunked upload
+          # that sends none is not caught.
+          RewriteEngine On
+          RewriteCond expr "%{HTTP:Content-Length} -gt 209715200"
+          RewriteRule ^ - [R=413,L]
+          # Apache's LimitRequestBody default is 0, meaning unlimited, so here the
+          # risk runs the opposite way from nginx: set it deliberately or a single
+          # request can be any size at all.
+          LimitRequestBody 209715200
+      </VirtualHost>
+
+      # Serving from a subfolder: map the prefix here and set server.baseUrlPath
+      # on the app to exactly the same value, or every asset URL Streamlit
+      # generates points outside this VirtualHost.
+      #   ProxyPass        /dashboard/ http://app:8501/ upgrade=websocket timeout=3600
+      #   ProxyPassReverse /dashboard/ http://app:8501/
+      #
+      # Apache has no one-line equivalent of nginx's `return 200`, so there is no
+      # proxy-local health endpoint. The container health check probes
+      # Streamlit's documented /_stcore/health through this vhost, which proves
+      # the whole proxy path.
+provision:
+  compose:
+    files:
+      - path: compose.override.yaml
+        content: |
+          # Compose merges compose.override.yaml over compose.yaml with no extra
+          # flags, so the app service written by the env recipe is untouched.
+          services:
+            apache:
+              image: httpd:2.4-alpine
+              # The stock httpd.conf is left in place: it loads mpm_event and the base
+              # module set. -c appends this directive after it is read, pulling in the
+              # shared tuning and this framework's VirtualHost. Without it the image
+              # starts on stock config and serves its default page - it does not fail.
+              command: ["httpd-foreground", "-c", "Include conf/keel-tuning.conf"]
+              restart: unless-stopped
+              depends_on:
+                app:
+                  condition: service_healthy
+              ports:
+                - "${HTTP_PORT:-8080}:80"
+              volumes:
+                # Shared, owned by recipes/infra/web/apache.yaml.
+                - ./.keel/apache/keel-tuning.conf:/usr/local/apache2/conf/keel-tuning.conf:ro
+                # This framework's VirtualHost, owned by this recipe.
+                - ./docker/apache/conf.d:/usr/local/apache2/conf.d:ro
+              healthcheck:
+                # Streamlit's own documented endpoint, reached through the proxy.
+                test: ["CMD", "wget", "-qO-", "http://127.0.0.1/_stcore/health"]
+                interval: 15s
+                timeout: 5s
+                retries: 5
+                start_period: 15s
+              # Matches the app's stop_grace_period, so the proxy is not torn
+              # down under sessions the app is still closing.
+              stop_grace_period: 30s
+  # Native env: no container to add. The VirtualHost above still applies, but
+  # change the ProxyPass target to http://127.0.0.1:8501/.
+  local: {}

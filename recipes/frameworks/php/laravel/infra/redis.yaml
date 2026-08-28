@@ -1,0 +1,15 @@
+id: redis-laravel
+schema_version: 2
+kind: config
+label: Laravel wiring for Redis
+# Injected whenever a Laravel plan includes Redis. Django needs none of this:
+# its settings.py already reads the cache location from the environment.
+when:
+  framework: laravel
+  uses: redis
+patch:
+  - file: .env
+    set:
+      REDIS_HOST: redis
+      CACHE_STORE: redis
+      QUEUE_CONNECTION: redis

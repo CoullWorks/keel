@@ -1,0 +1,7 @@
+id: django-anymail
+kind: addon
+label: Anymail (transactional email ESPs)
+appliesTo: [django]
+provides: [anymail]
+install:
+  - '{{exec}} uv add "django-anymail[mailgun]"'

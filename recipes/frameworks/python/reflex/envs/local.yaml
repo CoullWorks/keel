@@ -1,0 +1,60 @@
+id: reflex-local
+schema_version: 2
+kind: env
+env_family: local
+label: Local (native, no Docker)
+appliesTo: [reflex]
+provides: [env]
+default: true
+updated: 2026-08-12
+# Native Python via uv: no daemon, no containers. `keel run dev` runs
+# `reflex run`, which starts the frontend on 3000 and the backend on 8000 and
+# needs a node toolchain on the host, because `reflex init` and `reflex export`
+# download npm dependencies and compile the frontend.
+#
+# There is no Dockerfile here by definition, so the container requirements the
+# Docker env carries have no place to live. What still applies on a bare host:
+#
+#   - Set api_url (or the API_URL environment variable) to the public backend
+#     hostname BEFORE exporting the frontend. It is baked into the compiled
+#     JavaScript, not read at runtime: "when exporting the frontend, set the
+#     API_URL environment variable to the ingress hostname of the backend
+#     service".
+#   - Build with `reflex init` then `reflex export --frontend-only --no-zip`,
+#     and publish the exported client build to a static server or CDN.
+#   - Make missing routes return /404.html, not /index.html. The vendor: "Most
+#     static hosts will automatically use the /404.html file to handle 404
+#     errors. This is essential for dynamic routes to work correctly."
+#   - Provision Redis and set REFLEX_REDIS_URL if there will ever be more than
+#     one backend process. Without it, state_manager_mode stays on disk and is
+#     local to one instance.
+#   - Run `reflex db migrate` once, as a single process, before the backend
+#     starts.
+#   - Start the backend with `reflex run --env prod --backend-only` on 8000.
+#   - Point the proxy at 8000 for /_event/*, /ping, /_upload and /_upload/*
+#     only, and verify /ping returns pong.
+#   - Change cors_allowed_origins away from its ('*',) default and decide on
+#     telemetry_enabled, which defaults to True.
+#
+# Selecting nginx or apache writes the matching server block or VirtualHost to
+# .keel/, with the vendor's four backend path matchers translated faithfully.
+# See docs/infra/reflex.md.
+commands:
+  start: ""
+  # How this environment tears itself down. Used when a build fails partway:
+  # keel removes the directory it created, and without this the containers,
+  # volumes and network it started stay behind holding a bind mount to a
+  # path that no longer exists. The next attempt then reuses that container
+  # and dies with "current working directory is outside of container mount
+  # namespace root".
+  # The only thing keel starts under a native env is the local database, which
+  # the database recipe brings up from docker-compose.db.yml. Nothing else here
+  # runs in a container, so this is the whole teardown - and without it nothing
+  # ever stopped that container: `keel delete` left it running and holding the
+  # fixed host port, so the next project that wanted a database could not start.
+  # Guarded on the file so an environment built with no database is a no-op.
+  down: "[ -f docker-compose.db.yml ] && docker compose -f docker-compose.db.yml down -v || true"
+  restart: ""
+  exec: ""
+smoke:
+  - "uv --version"

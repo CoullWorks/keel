@@ -1,0 +1,196 @@
+id: astro-docker
+schema_version: 2
+kind: env
+env_family: compose
+label: Docker (compose, static site)
+appliesTo: [astro]
+provides: [env, docker]
+priority: -10
+# Written from docs/infra/astro.md, and this one is deliberately not a Node
+# server.
+#
+# Astro is static by default. `astro build` emits dist/ as plain files, and the
+# right way to serve that is a web server, not node. Wrapping static HTML in a
+# Node process would be slower, larger and less reliable for no gain. So the
+# runtime image IS the web server, and choosing nginx or Apache swaps the stage
+# rather than adding a container in front of one.
+#
+# If the project adds server features it needs @astrojs/node in standalone mode
+# and listens on 4321, not 3000. That is a different recipe, and the framework
+# recipe says so rather than this one guessing which the project is.
+#
+# output: 'hybrid' was REMOVED in Astro 5 and merged into 'static'. Astro is on
+# 7. Any config still emitting hybrid is broken, which is worth stating because
+# a lot of older material still recommends it.
+#
+# Three runtime stages, selected by WEB_TARGET:
+#   runtime         (default) nginx with its own stock configuration, so a
+#                   project with no web server chosen still boots.
+#   nginx-runtime   the shared nginx.conf plus the tuned server block from
+#                   recipes/frameworks/node/astro/infra/nginx.yaml.
+#   apache-runtime  the shared httpd.conf plus the VirtualHost from
+#                   recipes/frameworks/node/astro/infra/apache.yaml.
+# The two service recipes set WEB_TARGET in .env; nothing here has to know which
+# was picked.
+commands:
+  start: "docker compose up -d --build"
+  # Where the project can be opened once the build finishes.
+  site_url: "http://localhost:{{http_port}}"
+  # How this environment tears itself down. Used when a build fails partway:
+  # keel removes the directory it created, and without this the containers,
+  # volumes and network it started stay behind holding a bind mount to a
+  # path that no longer exists. The next attempt then reuses that container
+  # and dies with "current working directory is outside of container mount
+  # namespace root".
+  down: "docker compose down -v --remove-orphans"
+  restart: "docker compose restart"
+  exec: "docker compose exec -T web"
+  create: "docker compose build"
+smoke:
+  - "docker compose ps"
+files:
+  - path: Dockerfile
+    content: |
+      # `dev` is what compose builds by default, and it is the only stage with
+      # node in it. The three runtime stages below are nginx or httpd serving a
+      # built dist/, so `npm install` cannot run in them: keel execs into this
+      # service, and an image without npm would fail every install step.
+      #
+      # It carries no application code, because the project is bind-mounted from
+      # the host. astro dev then rebuilds on edit with no container rebuild.
+      FROM node:{{pin.node_version}}-slim AS dev
+      WORKDIR /app
+      # uid 1000 in the node image, which matches the default first user on a
+      # Linux or WSL host, so files created in the bind mount are owned by you
+      # rather than by root. It also means this cannot bind a privileged port,
+      # which is why dev serves on Astro's own 4321 rather than on 80.
+      USER node
+      EXPOSE 4321
+      # Wait for the dependencies keel installs into the bind mount: astro is
+      # itself one of them, so on a first run the process would exit and
+      # `restart: unless-stopped` would turn that into a restart loop.
+      # --host because astro dev binds to localhost by default, which inside a
+      # container only the container itself can reach.
+      CMD ["sh", "-c", "until [ -f node_modules/.package-lock.json ]; do echo \"waiting for dependencies\"; sleep 2; done; exec npm run dev -- --host 0.0.0.0"]
+
+      FROM node:{{pin.node_version}}-slim AS build
+      WORKDIR /app
+      # package-lock.json* (glob) so a freshly scaffolded project, which has no
+      # lockfile yet, still builds. Commit the lock and npm ci becomes a real
+      # guarantee rather than a formality.
+      COPY package.json package-lock.json* ./
+      RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
+      COPY . .
+      RUN npm run build
+
+      # No node in any runtime stage: they serve files.
+      #
+      # Default. The nginx image's stock /etc/nginx/conf.d/default.conf already
+      # serves /usr/share/nginx/html with an index fallback, so this boots
+      # without a web server recipe having been chosen. It is not tuned: no
+      # immutable caching for /_astro/, no explicit 404 page, no security
+      # headers. Choose the nginx service to get those.
+      FROM nginx:1.27-alpine AS runtime
+      COPY --from=build /app/dist /usr/share/nginx/html
+      EXPOSE 80
+
+      # WEB_TARGET=nginx-runtime. nginx.conf is the shared http-level config
+      # owned by recipes/infra/web/nginx.yaml; conf.d/ holds this framework's
+      # server block.
+      FROM nginx:1.27-alpine AS nginx-runtime
+      COPY --from=build /app/dist /usr/share/nginx/html
+      COPY .keel/nginx/nginx.conf  /etc/nginx/nginx.conf
+      COPY docker/nginx/conf.d/    /etc/nginx/conf.d/
+      EXPOSE 80
+
+      # WEB_TARGET=apache-runtime. Astro's own published Apache Dockerfile
+      # copies dist/ into /usr/local/apache2/htdocs/ on httpd:2.4, which is what
+      # this does. keel-tuning.conf is the shared global config owned by
+      # recipes/infra/web/apache.yaml; conf.d/ holds this framework's
+      # VirtualHost.
+      FROM httpd:2.4-alpine AS apache-runtime
+      COPY --from=build /app/dist /usr/local/apache2/htdocs
+      # The stock httpd.conf is left in place rather than replaced. It is what
+      # loads mpm_event and the base module set; replacing it would mean owning
+      # every LoadModule the image expects, forever. keel's config is layered on
+      # top through the CMD below.
+      COPY .keel/apache/keel-tuning.conf /usr/local/apache2/conf/keel-tuning.conf
+      # conf.d sits at the ServerRoot, not under conf/, because the shared
+      # tuning file ends with `IncludeOptional conf.d/app-*.conf` and that path
+      # is resolved relative to ServerRoot (/usr/local/apache2).
+      COPY docker/apache/conf.d/         /usr/local/apache2/conf.d/
+      EXPOSE 80
+      # -c appends the directive after the stock config is read, which is what
+      # pulls in keel's tuning and this framework's VirtualHost. Without it the
+      # image starts on stock config and serves its default page: it does not
+      # fail, it just silently ignores everything above.
+      CMD ["httpd-foreground", "-c", "Include conf/keel-tuning.conf"]
+  - path: compose.yaml
+    content: |
+      services:
+        web:
+          build:
+            context: .
+            # Set by the nginx or Apache service recipe. Defaults to `dev`,
+            # which is the only stage carrying node and therefore the only one
+            # keel can run `npm install` in.
+            target: "${WEB_TARGET:-dev}"
+          volumes:
+            # Meaningful under the dev stage, where the project is served
+            # straight from the host. Inert under the three static stages, which
+            # serve a built dist/ from the image and never read /app.
+            - .:/app
+          restart: unless-stopped
+          # Published directly: unlike the eight Node frameworks there is no app
+          # container behind this one, so this service is the whole stack.
+          ports:
+            # APP_PORT tracks the stage: 4321 under dev, 80 once a web server
+            # recipe switches WEB_TARGET to one of the static stages.
+            - "${HTTP_PORT:-8080}:${APP_PORT:-4321}"
+          healthcheck:
+            # / rather than /healthz: the default stage serves the stock nginx
+            # configuration, which has no health route. The tuned nginx block
+            # adds one; this probe works under all three stages.
+            test: ["CMD", "wget", "-qO-", "http://127.0.0.1:${APP_PORT:-4321}/"]
+            interval: 15s
+            timeout: 5s
+            retries: 5
+            start_period: 10s
+
+        # The database, when one is selected.
+        #
+        # Every field that differs between Postgres, MySQL and MariaDB comes from
+        # the chosen db recipe as a var, so this one definition serves all three.
+        # Writing it per engine is what left the Node frameworks with no database
+        # service at all: the compose file only ever had `app`, the db recipe's
+        # overlay had no image, and compose does not auto-merge that overlay, so
+        # picking a database silently produced nothing.
+        db:
+          image: {{db.type}}:{{db.version}}
+          restart: unless-stopped
+          environment: {{db.compose_env}}
+          volumes:
+            - dbdata:{{db.data_dir}}
+            # The tuned configuration the db recipe wrote. Mounted here rather
+            # than left in an overlay file compose never reads.
+            - {{db.config_mount}}
+          {{db.command}}
+          healthcheck:
+            # The app waits on this, so it must answer only once the server
+            # really accepts connections rather than when the port opens.
+            test: {{db.healthcheck}}
+            interval: 10s
+            timeout: 5s
+            retries: 12
+            start_period: 30s
+
+      volumes:
+        dbdata:
+  - path: .dockerignore
+    content: |
+      node_modules
+      dist
+      .astro
+      .git
+      .env*
+      npm-debug.log

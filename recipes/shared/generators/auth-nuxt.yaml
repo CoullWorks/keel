@@ -1,0 +1,11 @@
+# Auth as a level:stack generator (nuxt-auth-utils). Points at the nuxt-auth-utils
+# addon that already exists. Thin pointer, not a second copy of how it installs.
+id: gen-auth-nuxt
+kind: generator
+level: stack
+label: "Authentication (nuxt-auth-utils - sealed session, login, protected routes)"
+appliesTo: [nuxt]
+provides: [auth]
+apply: [nuxt-auth-utils]
+schema_version: 2
+updated: 2026-08-24

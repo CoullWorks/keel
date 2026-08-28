@@ -1,0 +1,74 @@
+id: woo-perf
+kind: extra
+label: Core Web Vitals preset (Lighthouse budget + CI)
+appliesTo: [woocommerce, woocommerce-bedrock]
+provides: [performance]
+files:
+  - path: lighthouse-budget.json
+    content: |
+      [
+        {
+          "path": "/*",
+          "timings": [
+            { "metric": "largest-contentful-paint", "budget": 2500 },
+            { "metric": "cumulative-layout-shift", "budget": 0.1 },
+            { "metric": "total-blocking-time", "budget": 200 },
+            { "metric": "first-contentful-paint", "budget": 1800 },
+            { "metric": "interactive", "budget": 3800 }
+          ],
+          "resourceSizes": [
+            { "resourceType": "script", "budget": 350 },
+            { "resourceType": "image", "budget": 500 },
+            { "resourceType": "total", "budget": 1800 }
+          ]
+        }
+      ]
+  - path: .github/workflows/lighthouse.yml
+    content: |
+      name: Lighthouse (Core Web Vitals)
+      # WordPress runs live, so this audits a URL on a schedule and on demand.
+      # Set the repo variable LIGHTHOUSE_URL, or pass one when running manually.
+      on:
+        workflow_dispatch:
+          inputs:
+            url:
+              description: URL to audit
+              required: true
+        schedule:
+          - cron: "0 6 * * 1" # weekly, Monday 06:00 UTC
+      jobs:
+        lighthouse:
+          runs-on: ubuntu-latest
+          steps:
+            - uses: actions/checkout@v4
+            - name: Audit against the Core Web Vitals budget
+              uses: treosh/lighthouse-ci-action@v12
+              with:
+                urls: ${{ github.event.inputs.url || vars.LIGHTHOUSE_URL }}
+                budgetPath: ./lighthouse-budget.json
+                uploadArtifacts: true
+  - path: PERFORMANCE.md
+    content: |
+      # Core Web Vitals (WooCommerce / WordPress)
+
+      keel wired a Lighthouse budget (`lighthouse-budget.json`) and a workflow
+      (`.github/workflows/lighthouse.yml`) that audits a live URL. Target the
+      Google "good" thresholds: **LCP <= 2.5s, INP <= 200ms, CLS <= 0.1**. Set
+      the repo variable `LIGHTHOUSE_URL`.
+
+      ## The wins that actually move CWV on WooCommerce
+      - **Page caching**: a cache plugin (or server/Varnish/Cloudflare) so most
+        visitors get static HTML. Exclude cart/checkout/my-account from the cache.
+      - **Object cache (Redis)**: cache DB queries; WooCommerce is query-heavy.
+        keel can wire a Redis service; pair it with a persistent-object-cache drop-in.
+      - **Fewer plugins = less JS/CSS**: every plugin is payload and attack
+        surface. Remove unused ones; dequeue assets on pages that don't need them.
+      - **Images**: WebP/AVIF, correct sizes, `width`/`height` on every image
+        (kills CLS), lazy-load below the fold. A modern image plugin or a CDN.
+      - **Defer/async non-critical JS**: the #1 INP killer is third-party and
+        plugin scripts. Defer them; keep above-the-fold JS minimal.
+      - **A lean, block-based theme**: heavy page builders tank CWV. Prefer a
+        lightweight theme; inline critical CSS, defer the rest.
+
+      Measure a real product and cart URL on mobile throttling, and track field
+      data (CrUX / Search Console) not just lab scores.

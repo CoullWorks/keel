@@ -1,0 +1,291 @@
+id: laravel-next
+kind: frontend
+label: Next.js SPA (Sanctum cookie auth)
+appliesTo: [laravel]
+requires: [php]
+provides: [frontend, next]
+priority: 60 # after backend + env + db + services
+install:
+  - "{{start}}"
+  - "{{exec}} bash -lc 'php artisan install:api --no-interaction'"
+  - "{{exec}} bash -lc 'grep -q SANCTUM_STATEFUL_DOMAINS .env || printf \"\\nFRONTEND_URL=https://{{project}}.ddev.site:3001\\nSANCTUM_STATEFUL_DOMAINS={{project}}.ddev.site:3001\\nSESSION_DOMAIN=.{{project}}.ddev.site\\n\" >> .env'"
+  - "{{restart}}"
+smoke:
+  - "{{exec}} bash -lc 'cd frontend && npm run build'"
+files:
+  # --- the join keel owns on the backend ---
+  - path: config/cors.php
+    content: |
+      <?php
+
+      // Wired by keel for the Sanctum SPA (Next.js) frontend. Credentials on, and
+      // the SPA origin allowed so cookies flow. See AUTH-SETUP.md.
+      return [
+          'paths' => ['api/*', 'sanctum/csrf-cookie', 'login', 'logout'],
+          'allowed_methods' => ['*'],
+          'allowed_origins' => [env('FRONTEND_URL', 'https://localhost:3001')],
+          'allowed_origins_patterns' => [],
+          'allowed_headers' => ['*'],
+          'exposed_headers' => [],
+          'max_age' => 0,
+          'supports_credentials' => true,
+      ];
+  - path: .ddev/config.frontend.yaml
+    content: |
+      # Runs the Next dev server in the web container (DDEV ships Node) and exposes
+      # it on :3001 (https). Same host as the API → the session cookie is shared.
+      web_extra_exposed_ports:
+        - name: nextjs
+          container_port: 3000
+          http_port: 3000
+          https_port: 3001
+      web_extra_daemons:
+        - name: nextjs
+          command: "bash -lc 'npm install && npm run dev -- -H 0.0.0.0 -p 3000'"
+          directory: /var/www/html/frontend
+  - path: AUTH-SETUP.md
+    content: |
+      # Frontend + auth wiring (Next.js + Laravel Sanctum)
+
+      keel scaffolded a Next.js SPA in `frontend/`, running in DDEV at
+      **https://{{project}}.ddev.site:3001**, talking to the Laravel API at
+      **https://{{project}}.ddev.site**. Same host → the session cookie is shared,
+      so this uses Sanctum's SPA cookie auth (not API tokens - the official
+      recommendation for a first-party SPA).
+
+      ## Already wired
+      - `config/cors.php` - `supports_credentials => true`, SPA origin allowed.
+      - `.env` - `FRONTEND_URL`, `SANCTUM_STATEFUL_DOMAINS`, `SESSION_DOMAIN`.
+      - `frontend/lib/api.ts` - primes `/sanctum/csrf-cookie`, sends `credentials`
+        and the `X-XSRF-TOKEN` header.
+      - `frontend/` - a Tailwind-styled landing page (`app/page.tsx`) that consumes
+        the Laravel API. Tailwind v4 is wired via `@tailwindcss/postcss`
+        (`postcss.config.mjs` + `app/globals.css`).
+
+      ## One manual step (Laravel 11+)
+      Enable stateful API middleware in `bootstrap/app.php`:
+
+      ```php
+      ->withMiddleware(function (Middleware $middleware) {
+          $middleware->statefulApi();
+      })
+      ```
+
+      Then add a couple of routes in `routes/api.php` (a `/login`, `/logout`, and a
+      `GET /user` behind `auth:sanctum`) and you have an authenticated SPA.
+  # --- the generated Next app (frontend/) ---
+  - path: frontend/package.json
+    content: |
+      {
+        "name": "frontend",
+        "private": true,
+        "scripts": {
+          "dev": "next dev",
+          "build": "next build",
+          "start": "next start"
+        },
+        "dependencies": {
+          "next": "^15.0.0",
+          "react": "^19.0.0",
+          "react-dom": "^19.0.0"
+        },
+        "devDependencies": {
+          "typescript": "^5",
+          "@types/node": "^22",
+          "@types/react": "^19",
+          "@types/react-dom": "^19",
+          "tailwindcss": "^4",
+          "@tailwindcss/postcss": "^4"
+        }
+      }
+  - path: frontend/tsconfig.json
+    content: |
+      {
+        "compilerOptions": {
+          "target": "ES2022",
+          "lib": ["dom", "dom.iterable", "esnext"],
+          "allowJs": true,
+          "skipLibCheck": true,
+          "strict": true,
+          "noEmit": true,
+          "esModuleInterop": true,
+          "module": "esnext",
+          "moduleResolution": "bundler",
+          "resolveJsonModule": true,
+          "isolatedModules": true,
+          "jsx": "preserve",
+          "incremental": true,
+          "plugins": [{ "name": "next" }],
+          "paths": { "@/*": ["./*"] }
+        },
+        "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
+        "exclude": ["node_modules"]
+      }
+  - path: frontend/next.config.mjs
+    content: |
+      /** @type {import('next').NextConfig} */
+      const nextConfig = {};
+      export default nextConfig;
+  - path: frontend/postcss.config.mjs
+    content: |
+      // Next.js uses PostCSS (not the Vite plugin): Tailwind v4 via @tailwindcss/postcss.
+      export default {
+        plugins: { "@tailwindcss/postcss": {} },
+      };
+  - path: frontend/app/globals.css
+    content: |
+      @import "tailwindcss";
+  - path: frontend/next-env.d.ts
+    content: |
+      /// <reference types="next" />
+      /// <reference types="next/image-types/global" />
+  - path: frontend/.env.local
+    content: |
+      NEXT_PUBLIC_API_URL=https://{{project}}.ddev.site
+  - path: frontend/.gitignore
+    content: |
+      node_modules/
+      .next/
+      .env.local
+  - path: frontend/lib/api.ts
+    content: |
+      // Minimal Laravel Sanctum SPA client: prime the CSRF cookie, then send
+      // credentials + the X-XSRF-TOKEN header on every mutating request.
+      const API = process.env.NEXT_PUBLIC_API_URL ?? "";
+
+      function cookie(name: string): string | undefined {
+        return document.cookie
+          .split("; ")
+          .find((c) => c.startsWith(name + "="))
+          ?.split("=")[1];
+      }
+
+      async function csrf(): Promise<void> {
+        await fetch(`${API}/sanctum/csrf-cookie`, { credentials: "include" });
+      }
+
+      export async function api(path: string, init: RequestInit = {}): Promise<Response> {
+        const method = (init.method ?? "GET").toUpperCase();
+        if (method !== "GET" && !cookie("XSRF-TOKEN")) await csrf();
+        const xsrf = cookie("XSRF-TOKEN");
+        return fetch(`${API}${path}`, {
+          ...init,
+          credentials: "include",
+          headers: {
+            Accept: "application/json",
+            "Content-Type": "application/json",
+            ...(xsrf ? { "X-XSRF-TOKEN": decodeURIComponent(xsrf) } : {}),
+            ...(init.headers ?? {}),
+          },
+        });
+      }
+
+      export async function login(email: string, password: string): Promise<Response> {
+        await csrf();
+        return api("/login", { method: "POST", body: JSON.stringify({ email, password }) });
+      }
+  - path: frontend/app/layout.tsx
+    content: |
+      import "./globals.css";
+
+      export const metadata = { title: "Frontend", description: "Next.js + Laravel Sanctum" };
+
+      export default function RootLayout({ children }: { children: React.ReactNode }) {
+        return (
+          <html lang="en">
+            <body>{children}</body>
+          </html>
+        );
+      }
+  - path: frontend/app/page.tsx
+    content: |
+      // keel: a production-ready landing page that proves Next.js + Tailwind are wired
+      // and that this SPA consumes the Laravel API over Sanctum cookie auth.
+      "use client";
+
+      import { useState } from "react";
+      import { api, login } from "@/lib/api";
+
+      const features = [
+        ["Next.js", "React Server Components + App Router, decoupled from Laravel."],
+        ["Laravel API", "Consumes the Laravel backend over Sanctum cookie auth."],
+        ["keel-managed", "keel run dev · test · build, one vocabulary."],
+      ];
+
+      export default function Home() {
+        const [out, setOut] = useState<string>("not signed in");
+
+        async function whoami() {
+          const res = await api("/api/user");
+          setOut(res.ok ? await res.text() : `error ${res.status}`);
+        }
+
+        return (
+          <main className="min-h-screen bg-slate-950 text-slate-100">
+            <div className="mx-auto max-w-3xl px-6 py-20">
+              <span className="inline-flex items-center gap-2 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-300">
+                <span className="size-1.5 rounded-full bg-emerald-400" /> running
+              </span>
+              <h1 className="mt-6 text-4xl font-bold tracking-tight sm:text-5xl">
+                Your Laravel app is running
+              </h1>
+              <p className="mt-4 text-lg text-slate-400">
+                Built with Next.js, scaffolded by keel. Edit{" "}
+                <code className="rounded bg-slate-800 px-1.5 py-0.5 text-sm">frontend/app/page.tsx</code>{" "}
+                to make it yours.
+              </p>
+              <p className="mt-2 text-sm text-slate-500">
+                Talking to the Laravel API at{" "}
+                <code className="rounded bg-slate-800 px-1.5 py-0.5 text-xs">
+                  {process.env.NEXT_PUBLIC_API_URL}
+                </code>
+              </p>
+              <div className="mt-8 flex flex-wrap gap-3">
+                <a
+                  href="https://coullworks.com/tools/keel"
+                  className="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-emerald-400"
+                >
+                  keel docs
+                </a>
+                <a
+                  href="https://nextjs.org"
+                  className="rounded-lg border border-slate-700 px-4 py-2 text-sm font-semibold hover:bg-slate-900"
+                >
+                  Next.js docs
+                </a>
+              </div>
+
+              {/* Prove the API round-trip: sign in, then hit GET /api/user. */}
+              <div className="mt-10 rounded-xl border border-slate-800 bg-slate-900/50 p-5">
+                <div className="flex flex-wrap gap-3">
+                  <button
+                    onClick={() => login("test@example.com", "password")}
+                    className="rounded-lg border border-slate-700 px-3 py-1.5 text-sm font-medium hover:bg-slate-800"
+                  >
+                    Sign in
+                  </button>
+                  <button
+                    onClick={whoami}
+                    className="rounded-lg border border-slate-700 px-3 py-1.5 text-sm font-medium hover:bg-slate-800"
+                  >
+                    Who am I?
+                  </button>
+                </div>
+                <pre className="mt-4 overflow-x-auto rounded-lg bg-slate-950 p-4 text-sm text-slate-300">{out}</pre>
+              </div>
+
+              <div className="mt-12 grid gap-4 sm:grid-cols-3">
+                {features.map(([title, body]) => (
+                  <div
+                    key={title}
+                    className="rounded-xl border border-slate-800 bg-slate-900/50 p-5"
+                  >
+                    <h2 className="font-semibold">{title}</h2>
+                    <p className="mt-1 text-sm text-slate-400">{body}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </main>
+        );
+      }

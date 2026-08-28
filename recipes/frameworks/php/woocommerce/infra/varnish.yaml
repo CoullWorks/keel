@@ -1,0 +1,13 @@
+id: varnish-wordpress
+schema_version: 2
+kind: config
+label: WordPress wiring for Varnish
+# One overlay per framework id: Bedrock is its own framework, so it names itself.
+when:
+  uses: varnish
+  framework: woocommerce
+install:
+  # Purge Varnish when content changes. Bedrock users may prefer
+  # `composer require wpackagist-plugin/varnish-http-purge`.
+  - "{{wp}} plugin install varnish-http-purge --activate"
+  - "{{restart}}"

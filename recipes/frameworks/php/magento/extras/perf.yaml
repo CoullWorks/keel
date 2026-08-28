@@ -1,0 +1,76 @@
+id: magento-perf
+kind: extra
+label: Core Web Vitals preset (Lighthouse budget + CI)
+appliesTo: [magento, magento-mageos]
+provides: [performance]
+files:
+  - path: lighthouse-budget.json
+    content: |
+      [
+        {
+          "path": "/*",
+          "timings": [
+            { "metric": "largest-contentful-paint", "budget": 2500 },
+            { "metric": "cumulative-layout-shift", "budget": 0.1 },
+            { "metric": "total-blocking-time", "budget": 200 },
+            { "metric": "first-contentful-paint", "budget": 1800 },
+            { "metric": "interactive", "budget": 3800 }
+          ],
+          "resourceSizes": [
+            { "resourceType": "script", "budget": 300 },
+            { "resourceType": "image", "budget": 500 },
+            { "resourceType": "total", "budget": 1600 }
+          ]
+        }
+      ]
+  - path: .github/workflows/lighthouse.yml
+    content: |
+      name: Lighthouse (Core Web Vitals)
+      # Magento is too heavy to boot in CI, so this audits a live/staging URL.
+      # Set the repo variable LIGHTHOUSE_URL, or pass one when running manually.
+      on:
+        workflow_dispatch:
+          inputs:
+            url:
+              description: URL to audit
+              required: true
+        schedule:
+          - cron: "0 6 * * 1" # weekly, Monday 06:00 UTC
+      jobs:
+        lighthouse:
+          runs-on: ubuntu-latest
+          steps:
+            - uses: actions/checkout@v4
+            - name: Audit against the Core Web Vitals budget
+              uses: treosh/lighthouse-ci-action@v12
+              with:
+                urls: ${{ github.event.inputs.url || vars.LIGHTHOUSE_URL }}
+                budgetPath: ./lighthouse-budget.json
+                uploadArtifacts: true
+  - path: PERFORMANCE.md
+    content: |
+      # Core Web Vitals (Magento)
+
+      keel wired a Lighthouse budget (`lighthouse-budget.json`) and a workflow
+      (`.github/workflows/lighthouse.yml`) that audits a live URL on a schedule
+      and on demand. Target the Google "good" thresholds: **LCP <= 2.5s,
+      INP <= 200ms, CLS <= 0.1**. Set the repo variable `LIGHTHOUSE_URL`.
+
+      ## The wins that actually move CWV on Magento
+      - **Full Page Cache + Varnish**: serve cached HTML, not PHP. keel's
+        Varnish service wires this; confirm `bin/magento config:show
+        system/full_page_cache/caching_application` is `2` (Varnish).
+      - **Hyvä theme**: the default keel Magento front end. Drops the Luma/
+        RequireJS/jQuery/KnockoutJS payload (~300KB+ JS) for Tailwind + Alpine.
+        This is the single biggest lever for INP/TBT on Magento.
+      - **Images**: WebP/AVIF + explicit dimensions (reserve space, kill CLS).
+        The `yireo-webp2` add-on converts on the fly; lazy-load below the fold.
+      - **Production mode + merged/minified assets**: `bin/magento deploy:mode:set
+        production`; static content deployed; JS/CSS minified and bundled.
+      - **Critical CSS + defer**: inline above-the-fold CSS, defer the rest.
+        Hyvä ships purged, minimal CSS by default.
+      - **Fewer third-party scripts**: every marketing tag hurts INP. Audit and
+        lazy-load them; keep the checkout page especially lean (also a PCI win).
+
+      Measure a real product/category/checkout URL on mobile throttling, and
+      track field data (CrUX / Search Console) not just lab scores.

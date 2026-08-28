@@ -1,0 +1,157 @@
+id: apache-fastapi
+schema_version: 2
+kind: config
+label: FastAPI VirtualHost for Apache
+updated: 2026-08-12
+# Written from docs/infra/fastapi.md plus the Apache 2.4 module reference.
+# FastAPI publishes no Apache configuration of any kind, so this is keel's
+# translation, built to satisfy the forwarded-header contract FastAPI does
+# document.
+#
+# The application server does not change between the nginx and the Apache
+# choice: uvicorn with --workers still speaks HTTP on 8000. FastAPI is ASGI, so
+# there is no mod_wsgi alternative to weigh up at all, which makes the Apache
+# story here simpler than for Django or Flask.
+#
+# Division of labour. The shared Apache service (recipes/infra/web/apache.yaml)
+# owns .keel/apache/keel-tuning.conf: MPM event tuning, the LoadModule lines for the
+# proxy modules, global compression, mod_expires, ServerTokens Prod,
+# ServerSignature Off, TraceEnable Off, the global security headers, and the
+# `IncludeOptional conf.d/app-*.conf` that pulls this file in.
+when:
+  framework: fastapi
+  uses: apache
+files:
+  - path: docker/apache/conf.d/app-fastapi.conf
+    content: |
+      # FastAPI behind uvicorn, proxied. Included by the shared keel-tuning.conf.
+      <VirtualHost *:80>
+          ServerName localhost
+
+          # Stated rather than assumed. Apache: "Do not enable proxying with
+          # ProxyRequests until you have secured your server. Open proxy servers
+          # are dangerous both to your network and to the Internet at large."
+          ProxyRequests Off
+
+          # On, so the app sees the browser's Host. Apache defaults it Off, which
+          # would send the upstream name and break any absolute URL FastAPI
+          # generates.
+          ProxyPreserveHost On
+
+          # mod_proxy_http adds X-Forwarded-For, X-Forwarded-Host and
+          # X-Forwarded-Server itself, and warns they "will contain more than one
+          # (comma-separated) value if the original request already contained one
+          # of these headers". Clearing the client's copy first makes the value
+          # Apache computes the only one the app can read.
+          RequestHeader unset X-Forwarded-For
+          RequestHeader unset X-Forwarded-Host
+          RequestHeader unset X-Forwarded-Server
+          # mod_proxy_http does NOT add X-Forwarded-Proto, and it is one of the
+          # three headers FastAPI documents reading. This is the main practical
+          # difference from the nginx block, where every forwarded header is
+          # written out explicitly. Change to "https" when TLS terminates here.
+          RequestHeader set X-Forwarded-Proto "http"
+
+          # Websocket routes. Apache 2.4.47 and later tunnels an upgrade end to
+          # end through mod_proxy_http: "the connection will be upgraded and
+          # tunneled by mod_proxy_http only if the origin server
+          # accepts/initiates the upgrade (HTTP response 101 Switching
+          # Protocols)". This must precede the catch-all, because ProxyPass rules
+          # are "checked in the order of configuration, the first rule that
+          # matches wins".
+          #
+          # On 2.4.46 and earlier use mod_proxy_wstunnel, in the rewrite form
+          # Apache documents:
+          #   RewriteCond %{HTTP:Upgrade} websocket [NC]
+          #   RewriteCond %{HTTP:Connection} upgrade [NC]
+          #   RewriteRule ^/?ws/(.*) "ws://app:8000/ws/$1" [P,L]
+          #
+          # timeout=3600 is keel's number: an idle socket sends nothing, and
+          # without it the socket timeout falls back to ProxyTimeout and then to
+          # Apache's Timeout of 300.
+          # ProxyPass        /ws/ http://app:8000/ws/ upgrade=websocket timeout=3600
+          # ProxyPassReverse /ws/ http://app:8000/ws/
+
+          # Everything else to uvicorn. Under the native env there is no `app`
+          # host: change these to http://127.0.0.1:8000/.
+          #
+          # connectiontimeout is the wait for the TCP connect, timeout the wait
+          # for data. Left unset, timeout falls back to ProxyTimeout and then to
+          # Apache's Timeout of 300, so a hung backend holds a connection for
+          # five minutes. retry=5 shortens Apache's 60s default, so a worker that
+          # has just restarted is retried in seconds rather than a minute.
+          ProxyPass        / http://app:8000/ connectiontimeout=5 timeout=60 retry=5
+          ProxyPassReverse / http://app:8000/
+
+          # LimitRequestBody alone does NOT cap a proxied request: the directive
+          # is enforced when Apache itself serves the request, not when
+          # mod_proxy_http streams the body through to a backend. The rewrite
+          # below is what actually rejects it. [R=413] aborts with that status
+          # rather than redirecting, because mod_rewrite treats any code outside
+          # 300-399 as an abort.
+          #
+          # Caveat: this reads the declared Content-Length, so a chunked upload
+          # that sends none is not caught. nginx's client_max_body_size covers
+          # both cases.
+          RewriteEngine On
+          RewriteCond expr "%{HTTP:Content-Length} -gt 26214400"
+          RewriteRule ^ - [R=413,L]
+          # Apache's LimitRequestBody default is 0, meaning unlimited, which is a
+          # denial-of-service surface rather than a feature. 25 MiB, matching the
+          # nginx block.
+          LimitRequestBody 26214400
+      </VirtualHost>
+
+      # Serving the API under a prefix. Apache strips the local path when the
+      # remote URL ends in a slash, so the app must be told the prefix with
+      # --root-path /api/v1 or FastAPI(root_path="/api/v1"), exactly as FastAPI's
+      # "Behind a Proxy" page describes for its Traefik example:
+      #   ProxyPass        /api/v1/ http://app:8000/
+      #   ProxyPassReverse /api/v1/ http://app:8000/
+      #
+      # Apache has no one-line equivalent of nginx's `return 200`, so there is no
+      # proxy-local health endpoint. The container health check probes the app's
+      # /health through this vhost, which proves the whole proxy path.
+provision:
+  compose:
+    files:
+      - path: compose.override.yaml
+        content: |
+          # Compose merges compose.override.yaml over compose.yaml with no extra
+          # flags, so the app service written by the env recipe is untouched.
+          services:
+            apache:
+              image: httpd:2.4-alpine
+              # The stock httpd.conf is left in place: it loads mpm_event and the base
+              # module set. -c appends this directive after it is read, pulling in the
+              # shared tuning and this framework's VirtualHost. Without it the image
+              # starts on stock config and serves its default page - it does not fail.
+              command: ["httpd-foreground", "-c", "Include conf/keel-tuning.conf"]
+              restart: unless-stopped
+              depends_on:
+                app:
+                  condition: service_healthy
+              ports:
+                - "${HTTP_PORT:-8080}:80"
+              volumes:
+                # Shared, owned by recipes/infra/web/apache.yaml.
+                - ./.keel/apache/keel-tuning.conf:/usr/local/apache2/conf/keel-tuning.conf:ro
+                # This framework's VirtualHost, owned by this recipe.
+                - ./docker/apache/conf.d:/usr/local/apache2/conf.d:ro
+              healthcheck:
+                test: ["CMD", "wget", "-qO-", "http://127.0.0.1/health"]
+                interval: 15s
+                timeout: 5s
+                retries: 5
+                start_period: 10s
+              # Matches the app's stop_grace_period, so the proxy is not killed
+              # while uvicorn is still draining requests it forwarded.
+              stop_grace_period: 45s
+  # DDEV runs this project with --webserver-type=generic, so Traefik forwards
+  # straight to the uvicorn daemon on :8000 and no Apache is in the local path.
+  # The VirtualHost above is still written, so the deployment shape is
+  # version-controlled next to the code that assumes it.
+  ddev: {}
+  # Native env: no container to add. The VirtualHost above still applies, but
+  # change the ProxyPass target to http://127.0.0.1:8000/.
+  local: {}

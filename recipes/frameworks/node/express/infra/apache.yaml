@@ -1,0 +1,149 @@
+id: apache-express
+schema_version: 2
+kind: config
+label: Express VirtualHost for Apache
+updated: 2026-08-12
+# Written from docs/infra/express.md plus the Apache 2.4 module reference.
+#
+# Division of labour. The shared Apache service (recipes/infra/web/apache.yaml)
+# owns .keel/apache/keel-tuning.conf: the MPM event tuning, the LoadModule lines for
+# mod_proxy, mod_proxy_http, mod_headers, mod_deflate, mod_filter and
+# mod_rewrite, global compression, mod_expires, ServerTokens Prod,
+# ServerSignature Off, TraceEnable Off and the global security headers. It is
+# also where `IncludeOptional conf.d/app-*.conf` pulls this file in. This
+# recipe owns one VirtualHost and the compose wiring that mounts it.
+#
+# mod_remoteip is deliberately not configured here. Apache is the edge in this
+# topology, so the peer address already is the client. If you put a load
+# balancer in front of Apache, RemoteIPHeader plus RemoteIPInternalProxy belong
+# in the shared httpd.conf, not in a per-framework vhost.
+when:
+  framework: express
+  uses: apache
+patch:
+  - file: .env
+    # Same reasoning as the nginx recipe: Express documents `loopback`,
+    # `linklocal` and `uniquelocal` as pre-configured subnet names, and the
+    # proxy here is a sibling container on an RFC1918 compose network, not
+    # 127.0.0.1. Never `true`: Express warns that with true "it may be possible
+    # for the client to provide any value" unless the last proxy overwrites the
+    # forwarded headers.
+    set:
+      TRUST_PROXY: "loopback, uniquelocal"
+files:
+  - path: docker/apache/conf.d/app-express.conf
+    content: |
+      # Express, proxied. Included by the shared keel-tuning.conf.
+      <VirtualHost *:80>
+          ServerName localhost
+
+          # Restated rather than assumed. An accidentally open forward proxy is
+          # the worst thing this file could ship; the module default is Off and
+          # this keeps it visible.
+          ProxyRequests Off
+
+          # mod_proxy_http adds X-Forwarded-For, X-Forwarded-Host and
+          # X-Forwarded-Server itself, and the vendor warns they "will contain
+          # more than one (comma-separated) value if the original request
+          # already contained one of these headers". Dropping the client's copy
+          # first is what makes the value Apache adds the only one Express sees,
+          # which is the Apache spelling of "real IP from the trusted proxy
+          # only".
+          RequestHeader unset X-Forwarded-For
+          RequestHeader unset X-Forwarded-Host
+          RequestHeader unset X-Forwarded-Server
+          # mod_proxy_http does NOT add X-Forwarded-Proto; the documented list
+          # is For, Host and Server only. Express reads req.protocol from this
+          # header, and express-session `secure: true` cookies stop being set
+          # without it. Change to "https" when TLS terminates at this vhost.
+          RequestHeader set X-Forwarded-Proto "http"
+
+          # Pass the client's Host through rather than rewriting it to
+          # app:3000, so req.hostname and any absolute URL the app builds are
+          # the public ones. Module default is Off.
+          ProxyPreserveHost On
+
+          # upgrade=websocket, not mod_proxy_wstunnel. The vendor marks
+          # mod_proxy_wstunnel Deprecated: "Since Apache HTTP Server 2.4.47,
+          # protocol Upgrade (tunneling) can be better handled by
+          # mod_proxy_http." The httpd:2.4-alpine image is 2.4.68. With this
+          # parameter the tunnel is only established if the origin answers 101,
+          # so a non-WebSocket request is still handled as ordinary HTTP.
+          #
+          # connectiontimeout is the connect phase, timeout is the socket read;
+          # both are ProxyPass parameters and both default to the global
+          # ProxyTimeout, which the shared keel-tuning.conf sets.
+          ProxyPass        / http://app:3000/ upgrade=websocket connectiontimeout=5 timeout=60
+          ProxyPassReverse / http://app:3000/
+
+          # LimitRequestBody alone does NOT cap a proxied request, and this is
+          # not a guess: it was tested against httpd 2.4.68 in this exact
+          # topology. With LimitRequestBody set on the vhost, a POST an order of
+          # magnitude over the limit still reached the backend with a 200. The
+          # directive is enforced when Apache itself serves the request, not
+          # when mod_proxy_http streams the body through to a backend. So the
+          # rewrite below is what actually rejects it. [R=413] aborts with that
+          # status rather than redirecting, because mod_rewrite treats any code
+          # outside 300-399 as an abort.
+          #
+          # Caveat worth knowing: this reads the declared Content-Length, so a
+          # chunked upload that sends none is not caught. nginx's
+          # client_max_body_size covers both cases. Keep the application's own
+          # body limit as the backstop either way.
+          RewriteEngine On
+          RewriteCond expr "%{HTTP:Content-Length} -gt 102400"
+          RewriteRule ^ - [R=413,L]
+          # Overrides nothing shared: LimitRequestBody defaults to 0, unlimited.
+          # 102400 bytes is express.json()'s own "100kb" default expressed in
+          # bytes, so Apache and Express reject the same request rather than the
+          # app returning an error the proxy could have absorbed. Raise both
+          # together or neither.
+          LimitRequestBody 102400
+      </VirtualHost>
+
+      # Apache has no one-line equivalent of nginx's `return 200`, so there is
+      # no proxy-local health endpoint here. The container health check below
+      # probes the app's own /health through this vhost instead, which has the
+      # side effect of proving the whole proxy path rather than just that httpd
+      # is running.
+provision:
+  compose:
+    files:
+      - path: compose.override.yaml
+        content: |
+          # Compose merges compose.override.yaml over compose.yaml with no extra
+          # flags, so the app service written by the env recipe is untouched.
+          services:
+            apache:
+              image: httpd:2.4-alpine
+              # The stock httpd.conf is left in place: it loads mpm_event and the base
+              # module set. -c appends this directive after it is read, pulling in the
+              # shared tuning and this framework's VirtualHost. Without it the image
+              # starts on stock config and serves its default page - it does not fail.
+              command: ["httpd-foreground", "-c", "Include conf/keel-tuning.conf"]
+              restart: unless-stopped
+              depends_on:
+                app:
+                  condition: service_healthy
+              # The app service stays on `expose` only, so this is the single
+              # route in, which is what makes the trusted-hop setting sound.
+              ports:
+                - "${HTTP_PORT:-8080}:80"
+              volumes:
+                # Shared, owned by recipes/infra/web/apache.yaml. The official
+                # image documents /usr/local/apache2/conf/httpd.conf as the
+                # configuration file.
+                - ./.keel/apache/keel-tuning.conf:/usr/local/apache2/conf/keel-tuning.conf:ro
+                # This framework's VirtualHost, owned by this recipe.
+                - ./docker/apache/conf.d:/usr/local/apache2/conf.d:ro
+              healthcheck:
+                test: ["CMD", "wget", "-qO-", "http://127.0.0.1/health"]
+                interval: 15s
+                timeout: 5s
+                retries: 5
+                start_period: 10s
+              stop_grace_period: 30s
+  # Native env: no container to add. The VirtualHost above still applies, but
+  # change the ProxyPass target to http://127.0.0.1:3000/ because there is no
+  # `app` host.
+  local: {}

@@ -1,0 +1,256 @@
+id: opensearch
+schema_version: 2
+kind: service
+label: OpenSearch 3 (search engine, tuned)
+category: Search
+appliesTo: [laravel, django, magento, magento-mageos]
+provides: [opensearch, search]
+conflicts: [elasticsearch] # one search engine per project: both bind 9200
+updated: 2026-08-12
+vars:
+  # Adobe lists OpenSearch 3 for Magento 2.4.9 and 2.4.8-p5, and OpenSearch
+  # 2.19 or 3 for 2.4.7-p10; 2.4.9 supports no other engine at all. keel pins
+  # Magento 2.4.8, so 3 is the version that works across every supported
+  # release. See docs/infra/magento.md and Adobe's system requirements:
+  # https://experienceleague.adobe.com/en/docs/commerce-operations/installation-guide/system-requirements
+  opensearch.version: "3"
+  opensearch.host: opensearch
+  opensearch.port: "9200"
+  # Heap, and the container memory it implies. OpenSearch's own guidance is
+  # "Set min and max JVM heap sizes to at least 50% of system RAM"
+  # (https://docs.opensearch.org/latest/install-and-configure/install-opensearch/docker/),
+  # so a 1g heap wants a 2 GB container: 2048 MB x 0.5 = 1024 MB.
+  opensearch.heap: 1g
+files:
+  # Node configuration. Everything here is a static node setting; index settings
+  # (replicas, refresh interval) are per index and cannot live in this file.
+  - path: .keel/opensearch/opensearch.yml
+    content: |
+      # keel-generated: OpenSearch node configuration.
+      #
+      # Sources, fetched 2026-08-12:
+      #   [1] Install OpenSearch with Docker
+      #       https://docs.opensearch.org/latest/install-and-configure/install-opensearch/docker/
+      #   [2] Installing OpenSearch: important settings
+      #       https://docs.opensearch.org/latest/install-and-configure/install-opensearch/index/
+      #   [3] Discovery and cluster formation
+      #       https://docs.opensearch.org/latest/tuning-your-cluster/discovery-cluster-formation/discovery/
+      #   [4] Disabling and enabling the Security plugin
+      #       https://docs.opensearch.org/latest/security/configuration/disable-enable-security/
+
+      cluster.name: keel-search
+      node.name: opensearch-node1
+
+      # "When discovery.type is set to single-node, OpenSearch bypasses the normal
+      # discovery process and forms a single-node cluster immediately." [3]
+      # Without it a fresh node waits for a cluster manager that never arrives and
+      # answers nothing, which reads as a hung container.
+      #
+      # This does NOT skip the vm.max_map_count bootstrap check: that one still
+      # fails the process on a host with the default 65530. See the compose file.
+      discovery.type: single-node
+
+      # Bind inside the container so the app network can reach it. Combined with
+      # publishing the port to 127.0.0.1 only (see the compose file), the node is
+      # reachable from the project and from nothing else.
+      network.host: 0.0.0.0
+
+      # "bootstrap.memory_lock=true disables swapping (along with memlock).
+      # Swapping can dramatically decrease performance and stability, so you
+      # should ensure it is disabled on production clusters." [2]
+      #
+      # Two things must be true for this to work, or the node refuses to start:
+      #   1. the container gets an unlimited memlock ulimit (memlock: -1), and
+      #   2. swap is off on the host (`sudo swapoff -a`) [1].
+      bootstrap.memory_lock: true
+
+      # SECURITY. The Security plugin is disabled here, which is a local
+      # development decision and not a defensible production one. With it off the
+      # node speaks plain HTTP with no authentication, no authorization, no TLS
+      # and no audit log: anything that can open a socket to port 9200 can read,
+      # rewrite or delete every index. That is why the port is published on
+      # loopback only.
+      #
+      # OpenSearch's own wording: "Disabling the Security plugin is not
+      # recommended" and "Disabling or removing the plugin exposes the
+      # configuration index for the Security plugin." [4]
+      #
+      # To turn it on for a deployment: delete the next line, drop
+      # DISABLE_SECURITY_PLUGIN and DISABLE_INSTALL_DEMO_CONFIG from the compose
+      # environment, and set OPENSEARCH_INITIAL_ADMIN_PASSWORD, which "OpenSearch
+      # 2.12 or later requires that you set ... when starting" [1]. The password
+      # is checked with zxcvbn: at least 8 characters with an uppercase, a
+      # lowercase, a digit and a special character. Then point the client at
+      # https:// with those credentials (for Magento:
+      # bin/magento setup:install --opensearch-enable-auth=1
+      # --opensearch-username=admin --opensearch-password=...).
+      plugins.security.disabled: true
+  # A service definition that works two ways: on its own
+  # (docker compose -f docker-compose.opensearch.yml up -d) and as a merge
+  # overlay on a stack that already declares an opensearch service
+  # (docker compose -f docker-compose.yml -f docker-compose.opensearch.yml up -d).
+  - path: docker-compose.opensearch.yml
+    content: |
+      # keel-generated: OpenSearch {{opensearch.version}}.
+      services:
+        opensearch:
+          image: opensearchproject/opensearch:{{opensearch.version}}
+          restart: unless-stopped
+          environment:
+            # "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m sets the size of the Java
+            # heap (we recommend half of system RAM)."
+            # https://docs.opensearch.org/latest/install-and-configure/install-opensearch/index/
+            # Min and max are equal on purpose: a growing heap means the JVM
+            # resizes and pauses under exactly the load you cared about.
+            #
+            # Arithmetic: this expects a 2 GB container, 2048 x 0.5 = 1024 MB.
+            # The other half is not spare, it is the page cache Lucene reads
+            # index segments through, which is why you do not give the heap 90%.
+            # Ceiling: above roughly 26-30 GB the JVM stops using compressed
+            # object pointers and effective capacity DROPS. OpenSearch does not
+            # document a figure; Elastic, on the same JVM behaviour, documents
+            # "26GB is safe on most systems and can be as large as 30GB on some"
+            # (https://www.elastic.co/docs/reference/elasticsearch/jvm-settings).
+            - "OPENSEARCH_JAVA_OPTS=-Xms{{opensearch.heap}} -Xmx{{opensearch.heap}}"
+            # Reads the node config mounted below rather than repeating settings
+            # as environment variables in two places.
+            - "DISABLE_SECURITY_PLUGIN=true"      # see .keel/opensearch/opensearch.yml
+            - "DISABLE_INSTALL_DEMO_CONFIG=true"  # no demo certificates or demo users
+          ulimits:
+            memlock:
+              # Required by bootstrap.memory_lock: true. -1 is unlimited; with a
+              # limit in place the node fails its bootstrap check and exits.
+              soft: -1
+              hard: -1
+            nofile:
+              # "Maximum number of open files for the opensearch user - set to at
+              # least 65536" - OpenSearch's own compose sample. Lucene keeps every
+              # segment file of every shard open.
+              soft: 65536
+              hard: 65536
+          volumes:
+            - opensearch-data:/usr/share/opensearch/data
+            - ./.keel/opensearch/opensearch.yml:/usr/share/opensearch/config/opensearch.yml:ro
+          ports:
+            # Loopback only. An OpenSearch node with the Security plugin off and
+            # port 9200 on 0.0.0.0 is an open database on the network.
+            - "127.0.0.1:9200:9200"
+          healthcheck:
+            # Runs a real cluster-health query rather than checking that the port
+            # is open. wait_for_status=yellow is correct, not a compromise: on a
+            # single node every replica shard is unassigned by definition, so the
+            # cluster is yellow ("All primary shards are allocated, but some
+            # replica shards are unassigned. The cluster is operational, but not
+            # fully redundant.") and a check that waits for green never passes.
+            # https://docs.opensearch.org/latest/api-reference/cluster-api/cluster-health/
+            test: ["CMD-SHELL", "curl -fsS 'http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s' || exit 1"]
+            interval: 10s
+            timeout: 10s
+            retries: 12
+            # A cold JVM plus index recovery takes well over a minute on a laptop.
+            start_period: 90s
+      volumes:
+        opensearch-data:
+  - path: OPENSEARCH.md
+    content: |
+      # OpenSearch (scaffolded by keel)
+
+      Node config: `.keel/opensearch/opensearch.yml` · service:
+      `docker-compose.opensearch.yml` (DDEV: `.ddev/docker-compose.opensearch.yaml`).
+
+      ## The host setting it will not start without
+
+      OpenSearch memory-maps its index files, and the kernel's default limit on
+      memory-map areas is far below what it needs:
+
+          ERROR: [1] bootstrap checks failed
+          [1]: max virtual memory areas vm.max_map_count [65530] is too low,
+               increase to at least [262144]
+
+      That is a bootstrap check, so the container exits rather than running
+      slowly. `vm.max_map_count` is not namespaced per container, so it has to be
+      set on the host that runs Docker:
+
+          # Linux
+          sudo sysctl -w vm.max_map_count=262144            # now
+          echo 'vm.max_map_count=262144' | sudo tee -a /etc/sysctl.conf   # after a reboot
+
+          # Docker Desktop on Windows (WSL 2)
+          wsl -d docker-desktop
+          sysctl -w vm.max_map_count=262144
+
+      Source: https://docs.opensearch.org/latest/getting-started/quickstart/
+
+      Elasticsearch requires a different number (1048576) for the same setting, so
+      do not assume one value covers both engines.
+
+      ## Swap
+
+      `bootstrap.memory_lock: true` only does its job if swap is off on the host
+      (`sudo swapoff -a`) and the container has an unlimited memlock ulimit. Both
+      are set in the compose file; the host half is yours.
+
+      ## Security
+
+      The Security plugin is off, which is why the port is published on 127.0.0.1
+      only. Turning it on for a deployment is three changes, listed at the bottom
+      of `.keel/opensearch/opensearch.yml`.
+provision:
+  ddev:
+    files:
+      # DDEV merges every .ddev/docker-compose.*.yaml into the project stack, so
+      # this replaces (same filename) whatever the ddev-opensearch add-on writes.
+      # The add-on ships the vendor default with a 512m heap and no tuning; keel
+      # owns the tuning, so it owns the file.
+      # https://docs.ddev.com/en/stable/users/extend/custom-compose-files/
+      - path: .ddev/docker-compose.opensearch.yaml
+        content: |
+          # keel-generated: OpenSearch {{opensearch.version}} for DDEV.
+          # Settings and their sources: .keel/opensearch/opensearch.yml and
+          # docker-compose.opensearch.yml in the project root.
+          services:
+            opensearch:
+              container_name: ddev-${DDEV_SITENAME}-opensearch
+              image: opensearchproject/opensearch:{{opensearch.version}}
+              hostname: opensearch
+              restart: "no"
+              # DDEV manages containers by these labels; without them `ddev stop`
+              # and `ddev delete` leave this one running.
+              labels:
+                com.ddev.site-name: ${DDEV_SITENAME}
+                com.ddev.approot: ${DDEV_APPROOT}
+              environment:
+                - "OPENSEARCH_JAVA_OPTS=-Xms{{opensearch.heap}} -Xmx{{opensearch.heap}}"
+                - "DISABLE_SECURITY_PLUGIN=true"
+                - "DISABLE_INSTALL_DEMO_CONFIG=true"
+                - VIRTUAL_HOST=$DDEV_HOSTNAME
+                - HTTP_EXPOSE=9200:9200
+                - HTTPS_EXPOSE=9201:9200
+              ulimits:
+                memlock: {soft: -1, hard: -1}
+                nofile: {soft: 65536, hard: 65536}
+              expose:
+                - "9200"
+              volumes:
+                - opensearch:/usr/share/opensearch/data
+                # Paths in a .ddev compose file resolve relative to .ddev/, so
+                # this is the project-root copy, not a second one.
+                - "../.keel/opensearch/opensearch.yml:/usr/share/opensearch/config/opensearch.yml:ro"
+              healthcheck:
+                test: ["CMD-SHELL", "curl -fsS 'http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s' || exit 1"]
+                interval: 10s
+                timeout: 10s
+                retries: 12
+                start_period: 90s
+          volumes:
+            opensearch:
+    install:
+      - "{{restart}}" # DDEV reads compose files at start, not while running
+  # The environment's own stack is already running; this file merges into it (or
+  # adds the service if the stack has none):
+  #   docker compose -f docker-compose.yml -f docker-compose.opensearch.yml up -d
+  compose: {}
+  sail: {}
+  local:
+    install:
+      - "docker compose -f docker-compose.opensearch.yml up -d"

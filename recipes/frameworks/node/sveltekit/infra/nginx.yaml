@@ -1,0 +1,169 @@
+id: nginx-sveltekit
+schema_version: 2
+kind: config
+label: SvelteKit server block for NGINX
+updated: 2026-08-12
+# Written from docs/infra/sveltekit.md. SvelteKit publishes no nginx
+# configuration (only an Apache .htaccess, for the SPA case), but it is the only
+# framework in this set that publishes a reverse-proxy header contract, and it
+# comes with an explicit spoofing warning:
+#
+#   "x-forwarded-proto and x-forwarded-host are de facto standard headers that
+#   forward the original protocol and host if you're using a reverse proxy
+#   (think load balancers and CDNs). You should only set these variables if your
+#   server is behind a trusted reverse proxy; otherwise, it'd be possible for
+#   clients to spoof these headers."
+#
+# That is why PROTOCOL_HEADER and HOST_HEADER are set by THIS recipe rather than
+# by the env recipe: they are only safe once a proxy is in front, and the env
+# recipe cannot know that. The proxy config and the app environment have to
+# agree or SvelteKit rejects form posts as cross-origin.
+#
+# Division of labour. The shared NGINX service (recipes/infra/web/nginx.yaml)
+# owns .keel/nginx/nginx.conf: worker and http-level tuning, the log format,
+# gzip and its type list, server_tokens off, the default security headers,
+# real_ip from the trusted proxy, and the default client_max_body_size and
+# proxy timeouts. This recipe owns one server block and the compose wiring.
+when:
+  framework: sveltekit
+  uses: nginx
+patch:
+  - file: .env
+    set:
+      # The server block below sets x-forwarded-proto and x-forwarded-host
+      # unconditionally, overwriting anything the client sent, which is the
+      # "trusted reverse proxy" precondition the warning above requires.
+      PROTOCOL_HEADER: "x-forwarded-proto"
+      HOST_HEADER: "x-forwarded-host"
+      # Client IP. The adapter reads X-Forwarded-For from the RIGHT rather than
+      # the left, because leftmost entries are client-supplied and spoofable,
+      # and XFF_DEPTH counts the trusted proxies. With this nginx as the only
+      # hop the value is 1. docs/infra/sveltekit.md records that the docs
+      # explain the right-to-left read but never state the value for the
+      # single-proxy case, so 1 is keel's reading.
+      ADDRESS_HEADER: "x-forwarded-for"
+      XFF_DEPTH: "1"
+files:
+  - path: docker/nginx/conf.d/app.conf
+    content: |
+      # SvelteKit on @sveltejs/adapter-node, proxied. Included by the shared
+      # nginx.conf from /etc/nginx/conf.d/*.conf; http-level config lives there.
+      server {
+        listen 80;
+        server_name _;
+
+        # Overrides the shared default (nginx documents client_max_body_size
+        # 1m). adapter-node's BODY_SIZE_LIMIT defaults to 512kb, so the two
+        # limits agree and a too-large upload is refused once rather than
+        # failing at whichever is lower with a different error. Raise both
+        # together or neither.
+        client_max_body_size 512k;
+
+        location / {
+          proxy_pass http://app:3000;
+
+          # These four lines are standard nginx, not quoted SvelteKit
+          # documentation. What is quoted is the requirement that the values be
+          # trustworthy: they are set unconditionally here, so whatever the
+          # client sent is discarded, which is the precondition for setting
+          # PROTOCOL_HEADER and HOST_HEADER in the app at all.
+          proxy_set_header Host              $host;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header X-Forwarded-Host  $host;
+          proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+
+          # Append, not overwrite: nginx adds the real peer to whatever the
+          # client sent, and the framework walks the list from the right
+          # discarding trusted hops, so a client-supplied prefix is dropped
+          # before it can become the client IP. That holds while the real client
+          # is outside the trusted ranges, which is the internet-facing case. If
+          # this app only ever serves traffic that is itself inside those ranges,
+          # switch to `$remote_addr` here so the header is true by construction,
+          # which is what the Hono recipe has to do because Hono has no walk at
+          # all. Keep the append form if a CDN or load balancer sits in front and
+          # you need its hop preserved, and widen the trusted set to match.
+
+          proxy_set_header X-Real-IP         $remote_addr;
+
+          # Overrides the shared default (nginx documents proxy_buffering on).
+          # The adapter's compression note establishes that SvelteKit streams
+          # responses: "we would recommend using @polka/compression since
+          # SvelteKit streams responses and the more popular compression package
+          # does not support streaming." A buffering proxy holds a streamed body
+          # until it completes. SvelteKit makes no direct buffering statement,
+          # so this is inference from that sentence.
+          proxy_buffering off;
+
+          # Dev-mode HMR uses a Vite WebSocket, which the adapter page does not
+          # document proxying. Harmless in production, where nothing upgrades.
+          proxy_set_header Upgrade    $http_upgrade;
+          proxy_set_header Connection "upgrade";
+        }
+
+        # /_app/immutable/ is where SvelteKit puts the content-hashed client
+        # assets. SvelteKit publishes NO Cache-Control value, unlike Next.js and
+        # Astro which both document public, max-age=31536000, immutable, so this
+        # is keel's convention justified only by the filenames being hashed. It
+        # is applied here and nowhere else: the HTML around these assets is
+        # rendered per request and must not be cached.
+        #
+        # proxy_hide_header first, so the app's own header cannot arrive
+        # alongside this one. Note that declaring add_header in this location
+        # stops the shared http-level add_header directives being inherited into
+        # it, which is nginx's documented behaviour: if the shared nginx.conf
+        # sets security headers with add_header, repeat them here.
+        location /_app/immutable/ {
+          proxy_pass http://app:3000;
+          proxy_set_header Host              $host;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          # Static assets do not stream, and buffering frees the upstream
+          # connection sooner. Overrides the proxy_buffering off above.
+          proxy_buffering on;
+          proxy_hide_header Cache-Control;
+          add_header Cache-Control "public, max-age=31536000, immutable" always;
+        }
+
+        # Answered by nginx, so the web tier's liveness does not depend on the
+        # app or on a rendering path. add_header at this level stops the shared
+        # http-level add_header directives being inherited into it, which is
+        # nginx's documented behaviour and is harmless for a health endpoint.
+        location = /healthz {
+          access_log off;
+          add_header Content-Type text/plain;
+          return 200 "ok\n";
+        }
+      }
+provision:
+  compose:
+    files:
+      - path: compose.override.yaml
+        content: |
+          # Compose merges compose.override.yaml over compose.yaml with no extra
+          # flags, so the app service written by the env recipe is untouched.
+          services:
+            nginx:
+              image: nginx:1.27-alpine
+              restart: unless-stopped
+              depends_on:
+                app:
+                  condition: service_healthy
+              ports:
+                - "${HTTP_PORT:-8080}:80"
+              volumes:
+                # Shared, owned by recipes/infra/web/nginx.yaml.
+                - ./.keel/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+                # This framework's server block, owned by this recipe.
+                - ./docker/nginx/conf.d:/etc/nginx/conf.d:ro
+              healthcheck:
+                test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+                interval: 15s
+                timeout: 5s
+                retries: 5
+                start_period: 10s
+              # adapter-node's SHUTDOWN_TIMEOUT defaults to 30 seconds, so the
+              # app can take that long to drain. The proxy gets the same grace
+              # period rather than being killed first.
+              stop_grace_period: 30s
+  # Native env: no container to add. The server block above still applies, but
+  # change proxy_pass to http://127.0.0.1:3000 because there is no `app` host.
+  local: {}

@@ -1,0 +1,53 @@
+id: sveltekit-daisyui
+kind: addon
+label: DaisyUI (Tailwind component library)
+category: UI kit
+appliesTo: [sveltekit]
+requires: [sveltekit, tailwind]
+provides: [daisyui, ui-library]
+priority: 41 # after the Tailwind addon (40)
+install:
+  - "{{exec}} npm install daisyui"
+smoke:
+  - "{{exec}} npm run build"
+files:
+  - path: src/app.css
+    content: |
+      @import "tailwindcss";
+      @plugin "daisyui";
+  - path: src/routes/+page.svelte
+    content: |
+      <!-- keel: a production-ready landing page built from daisyUI components. -->
+      <script>
+        const features = [
+          ["daisyUI", "Semantic component classes on top of Tailwind."],
+          ["SvelteKit / SSR + filesystem routing", "Server-rendered pages, ready to build on."],
+          ["keel-managed", "keel run dev · test · build, one vocabulary."],
+        ];
+      </script>
+
+      <main class="min-h-screen bg-base-200 text-base-content">
+        <div class="mx-auto max-w-3xl px-6 py-20">
+          <div class="badge badge-success gap-2">running</div>
+          <h1 class="mt-6 text-4xl font-bold">Your SvelteKit app is running</h1>
+          <p class="mt-4 text-base-content/70">
+            Built with daisyUI, scaffolded by keel. Edit
+            <code class="rounded bg-base-300 px-1.5 py-0.5">src/routes/+page.svelte</code>
+            to make it yours.
+          </p>
+          <div class="mt-8 flex flex-wrap gap-3">
+            <a href="https://coullworks.com/tools/keel" class="btn btn-primary">keel docs</a>
+            <a href="https://daisyui.com/components/" class="btn btn-outline">daisyUI components</a>
+          </div>
+          <div class="mt-12 grid gap-4 sm:grid-cols-3">
+            {#each features as [title, body] (title)}
+              <div class="card bg-base-100 shadow-sm">
+                <div class="card-body">
+                  <h2 class="card-title text-base">{title}</h2>
+                  <p class="text-sm text-base-content/70">{body}</p>
+                </div>
+              </div>
+            {/each}
+          </div>
+        </div>
+      </main>

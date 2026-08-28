@@ -1,0 +1,74 @@
+id: astro-flowbite
+kind: addon
+label: Flowbite (Tailwind component library)
+category: UI kit
+appliesTo: [astro]
+requires: [astro, tailwind]
+provides: [flowbite, ui-library]
+priority: 41 # after the Tailwind addon (40)
+install:
+  - "{{exec}} npm install flowbite"
+smoke:
+  - "{{exec}} npm run build"
+files:
+  - path: src/styles/global.css
+    content: |
+      @import "tailwindcss";
+      @plugin "flowbite/plugin";
+      @source "../../node_modules/flowbite";
+  - path: src/pages/index.astro
+    content: |
+      ---
+      // keel: a production-ready landing page built from Flowbite components.
+      import "../styles/global.css";
+      const features = [
+        ["Flowbite", "Tailwind-based components, wired via the Flowbite plugin."],
+        ["Astro islands", "Ships zero JS by default, hydrate only where you need it."],
+        ["keel-managed", "keel run dev · test · build, one vocabulary."],
+      ];
+      ---
+
+      <html lang="en">
+        <head>
+          <meta charset="utf-8" />
+          <meta name="viewport" content="width=device-width, initial-scale=1" />
+          <title>Astro + Flowbite</title>
+        </head>
+        <body class="min-h-screen bg-gray-900 text-gray-100">
+          <main class="mx-auto max-w-3xl px-6 py-20">
+            <span class="inline-flex items-center gap-2 rounded-full bg-green-900 px-3 py-1 text-xs font-medium text-green-300">
+              <span class="h-1.5 w-1.5 rounded-full bg-green-400"></span> running
+            </span>
+            <h1 class="mt-6 text-4xl font-extrabold tracking-tight sm:text-5xl">
+              Your Astro app is running
+            </h1>
+            <p class="mt-4 text-lg text-gray-400">
+              Built with Flowbite, scaffolded by keel. Edit
+              <code class="rounded bg-gray-800 px-1.5 py-0.5 text-sm">src/pages/index.astro</code>
+              to make it yours.
+            </p>
+            <div class="mt-8 flex flex-wrap gap-3">
+              <a
+                href="https://coullworks.com/tools/keel"
+                class="rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-medium text-white hover:bg-blue-700 focus:ring-4 focus:ring-blue-800"
+              >
+                keel docs
+              </a>
+              <a
+                href="https://flowbite.com"
+                class="rounded-lg border border-gray-600 px-5 py-2.5 text-sm font-medium text-gray-300 hover:bg-gray-800 focus:ring-4 focus:ring-gray-700"
+              >
+                Flowbite docs
+              </a>
+            </div>
+            <div class="mt-12 grid gap-4 sm:grid-cols-3">
+              {features.map(([title, body]) => (
+                <div class="rounded-lg border border-gray-700 bg-gray-800 p-5 shadow-sm">
+                  <h2 class="font-semibold text-white">{title}</h2>
+                  <p class="mt-1 text-sm text-gray-400">{body}</p>
+                </div>
+              ))}
+            </div>
+          </main>
+        </body>
+      </html>

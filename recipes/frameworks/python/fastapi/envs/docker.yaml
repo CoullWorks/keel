@@ -1,0 +1,304 @@
+id: fastapi-docker
+schema_version: 2
+kind: env
+env_family: compose
+label: Docker (compose)
+appliesTo: [fastapi]
+provides: [env, docker]
+priority: -10
+updated: 2026-08-12
+# FastAPI's documented production story changed and this env follows the current
+# docs, not the tutorials.
+#
+#   - There is no gunicorn. The server-workers page shows `fastapi run --workers
+#     4 main.py` and `uvicorn main:app --host 0.0.0.0 --port 8080 --workers 4`
+#     and does not mention gunicorn at all. The old
+#     `gunicorn -k uvicorn.workers.UvicornWorker` pattern is gone from the
+#     vendor documentation.
+#   - There is no official image. "There used to be an official FastAPI Docker
+#     image: tiangolo/uvicorn-gunicorn-fastapi. But it is now deprecated",
+#     because "modern Uvicorn supports the --workers flag".
+#   - FastAPI is ASGI only. Putting it behind a WSGI server is simply wrong.
+#
+# --workers is used here because the docs scope it to exactly this case:
+# multiple workers in one container is "for simple apps on single servers or
+# Docker Compose deployments", while "when running on Kubernetes you will
+# probably not want to use workers and instead run a single Uvicorn process per
+# container". This is the Compose case.
+#
+# A web server in front is a separate choice: add `nginx` or `apache` and the
+# config recipe under infra/ drops in the server block or VirtualHost.
+# See docs/infra/fastapi.md.
+commands:
+  # --build so a changed Dockerfile actually rebuilds.
+  start: "docker compose up -d --build"
+  # Where the project can be opened once the build finishes.
+  site_url: "http://localhost:{{http_port}}"
+  # How this environment tears itself down. Used when a build fails partway:
+  # keel removes the directory it created, and without this the containers,
+  # volumes and network it started stay behind holding a bind mount to a
+  # path that no longer exists. The next attempt then reuses that container
+  # and dies with "current working directory is outside of container mount
+  # namespace root".
+  down: "docker compose down -v --remove-orphans"
+  restart: "docker compose restart"
+  create: "docker compose build"
+  # -T because these run from scripts and CI, where there is no TTY.
+  exec: "docker compose exec -T app"
+smoke:
+  - "docker compose ps"
+files:
+  - path: Dockerfile
+    content: |
+      # Two kinds of image, and the distinction is not cosmetic.
+      #
+      # `dev` is what compose builds. It carries no application code and no
+      # dependencies, because the project is bind-mounted from the host: `uv
+      # sync` run through keel writes .venv and uv.lock to your working tree
+      # where they belong, and an edit is live without a rebuild.
+      #
+      # The stages after it build the production image, which copies the source
+      # in and installs without dev dependencies. Build it explicitly with
+      # `docker build --target runtime .`.
+      #
+      # Pointing compose at the production stage instead would look like it
+      # works and would not: with no bind mount, everything uv writes lands in
+      # a layer that the next `--build` discards.
+      FROM python:{{pin.python_version}}-slim-bookworm AS dev
+      COPY --from=ghcr.io/astral-sh/uv:0.12.3 /uv /uvx /bin/
+      WORKDIR /app
+      # The venv lives in the bind-mounted tree, exactly as it would on the
+      # host, so an editor and a shell outside the container see the same
+      # interpreter and the same packages.
+      ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
+          PATH="/app/.venv/bin:$PATH" \
+          PYTHONUNBUFFERED=1
+      # uid 1000, matching the default first user on a Linux or WSL host, so
+      # files created in the bind mount are owned by you rather than by root.
+      RUN useradd --create-home --uid 1000 dev
+      USER dev
+      EXPOSE 8000
+      # The same probe the production stage uses. Without it here, a web server
+      # depending on `condition: service_healthy` can never start: compose
+      # reports "container has no healthcheck configured" and gives up.
+      # start-period is longer than production's because the first run installs
+      # dependencies into the bind mount before the app can serve anything.
+      HEALTHCHECK --interval=10s --timeout=5s --start-period=180s --retries=10 \
+        CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status == 200 else 1)"
+      # The bind mount has no .venv on a first run, and the framework itself
+      # lives in it, so `uv run` would fail and `restart: unless-stopped` would
+      # turn that into a restart loop that `docker compose exec` cannot attach
+      # to. Wait for the install keel is about to run, then exec the real
+      # server so it still receives SIGTERM as PID 1.
+      CMD ["sh", "-c", "until [ -d .venv ]; do echo 'waiting for dependencies'; sleep 2; done; exec uv run uvicorn main:app --host 0.0.0.0 --port 8000 --reload"]
+
+      # keel-generated.
+      #
+      # Multi-stage: the compiler and the lockfile live in the build stage, the
+      # runtime stage gets the finished virtualenv.
+      #
+      # FastAPI's own Dockerfiles use the full `python:3.14` image and pip. This
+      # departs from them on three points and says why: a slim base (the docs
+      # make no size claim either way), uv instead of pip (a keel-wide
+      # convention, and it is what keeps the lockfile authoritative), and a patch
+      # pin instead of a floating tag. No FastAPI page fetched states a supported
+      # Python range, so 3.13 is keel's choice and not a vendor constraint.
+      FROM python:{{pin.python_version}}-slim-bookworm AS build
+
+      # uv pinned, per uv's Docker guidance. :latest means a different installer
+      # on every build.
+      COPY --from=ghcr.io/astral-sh/uv:0.12.3 /uv /uvx /bin/
+
+      WORKDIR /app
+      ENV UV_COMPILE_BYTECODE=1 \
+          UV_LINK_MODE=copy \
+          UV_PROJECT_ENVIRONMENT=/app/.venv
+
+      # libpq-dev is psycopg's build dependency (the package name is inherited
+      # from Reflex's shipped Dockerfile comment; psycopg.org refuses automated
+      # fetching, so it is not vendor-confirmed here). build-essential is here
+      # because uvicorn[standard] pulls uvloop, which is a C extension.
+      RUN apt-get update && apt-get install -y --no-install-recommends \
+            build-essential libpq-dev \
+          && rm -rf /var/lib/apt/lists/*
+
+      # Dependencies before application code. FastAPI's own Dockerfiles make the
+      # same split ("the requirements file is copied and installed before the
+      # application code, so the dependency layer caches").
+      COPY pyproject.toml uv.lock* ./
+      # --frozen fails when the lockfile is out of date instead of resolving
+      # something else in silence.
+      # A freshly scaffolded project has no uv.lock yet, so the first build
+      # creates one; commit it, and from then on --frozen is a real guarantee
+      # rather than a formality. The branch exists so that a lockfile which IS
+      # present is never silently regenerated.
+      RUN if [ -f uv.lock ]; then \
+            uv sync --frozen --no-dev --no-install-project; \
+          else \
+            uv lock && uv sync --frozen --no-dev --no-install-project; \
+          fi
+      COPY . .
+      RUN uv sync --frozen --no-dev
+
+      FROM python:{{pin.python_version}}-slim-bookworm AS runtime
+      RUN apt-get update && apt-get install -y --no-install-recommends libpq5 \
+          && rm -rf /var/lib/apt/lists/* \
+          && useradd --create-home --uid 10001 app
+      # uv in the runtime stage too: keel's task vocabulary runs `uv run pytest`
+      # inside this container. One pinned static binary; the dev dependency tree
+      # is still not in the image.
+      COPY --from=ghcr.io/astral-sh/uv:0.12.3 /uv /uvx /bin/
+      WORKDIR /app
+      COPY --from=build --chown=app:app /app /app
+      ENV PATH="/app/.venv/bin:$PATH" \
+          PYTHONUNBUFFERED=1 \
+          PYTHONDONTWRITEBYTECODE=1 \
+          UV_PROJECT_ENVIRONMENT=/app/.venv
+      # Non-root. A container that runs as root and is broken into is a host
+      # that is broken into.
+      USER app
+      EXPOSE 8000
+
+      # FastAPI publishes no health endpoint, so this probes /health, which is a
+      # route in the generated main.py. It proves the ASGI app is routing and
+      # returning JSON, not merely that the socket is open. urllib rather than
+      # curl, because Python is already here.
+      HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=5 \
+        CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status == 200 else 1)"
+
+      # The documented multi-worker command. The equivalent the docs also print
+      # is `fastapi run --workers 4 main.py`, which needs the fastapi-cli that
+      # comes with fastapi[standard]; this project depends on uvicorn[standard],
+      # so the uvicorn form is the one that actually runs here.
+      #
+      # --workers 4 is FastAPI's own example figure. It is not a formula: the
+      # (2 x cores) + 1 rule belongs to gunicorn, which is no longer part of
+      # FastAPI's story. Note the docs' memory warning too, that "multiple
+      # processes normally don't share any memory", so a 1 GB model with four
+      # workers is 4 GB. Drop to one worker for anything model-shaped, and to
+      # one worker per container on Kubernetes.
+      #
+      # --proxy-headers makes uvicorn trust X-Forwarded-* from the reverse
+      # proxy; --forwarded-allow-ips "*" says which peers may set them. "*" is
+      # only safe because this port is never published, so the proxy is the
+      # only thing that can reach it.
+      #
+      # --timeout-graceful-shutdown is set explicitly so the drain window is a
+      # decision; compose sets stop_grace_period longer than it below.
+      #
+      # No --reload: "The --reload option is useful during development but
+      # consumes more resources and is unstable. Do not use --reload in
+      # production."
+      CMD ["uvicorn", "main:app", \
+           "--host", "0.0.0.0", \
+           "--port", "8000", \
+           "--workers", "4", \
+           "--proxy-headers", \
+           "--forwarded-allow-ips", "*", \
+           "--timeout-graceful-shutdown", "30", \
+           "--no-server-header"]
+
+      # If the proxy strips a path prefix, add --root-path /api/v1 here (or set
+      # root_path on the FastAPI() object). Without it the generated URLs and
+      # the OpenAPI docs point at the wrong place.
+  - path: compose.yaml
+    content: |
+      # keel-generated.
+      services:
+        app:
+          build:
+            context: .
+            # dev, not a production stage. See the note at the top of the
+            # Dockerfile: without the bind mount below, anything installed into
+            # this container is discarded by the next build.
+            target: dev
+          volumes:
+            # The project itself, so uv writes .venv and uv.lock to the host and
+            # an edit takes effect without a rebuild.
+            - .:/app
+          restart: unless-stopped
+          env_file:
+            # required: false so a checkout without a .env still comes up.
+            # Listing a missing env_file the short way is a hard compose error.
+            - path: .env
+              required: false
+          environment:
+            KEEL_DB: postgres
+            # Host, name, user and password match the db.* contract published by
+            # the shared postgres recipe, so this agrees with the DATABASE_URL
+            # the fastapi/infra/postgres.yaml overlay writes into .env instead of
+            # quietly disagreeing with it.
+            DATABASE_URL: "postgresql+psycopg://db:db@db:5432/db"
+          # expose, not ports: the app is reachable only from the compose
+          # network, which is what makes --forwarded-allow-ips "*" defensible.
+          expose: ["8000"]
+          depends_on:
+            db:
+              condition: service_healthy
+          # Longer than uvicorn's --timeout-graceful-shutdown of 30s, so a
+          # request finishing inside the drain window is not SIGKILLed halfway.
+          stop_grace_period: 45s
+
+        db:
+          # Major-pinned, matching the shared postgres recipe.
+          image: postgres:{{db.version}}
+          restart: unless-stopped
+          environment:
+            POSTGRES_DB: db
+            POSTGRES_USER: db
+            POSTGRES_PASSWORD: db
+          volumes:
+            - pgdata:/var/lib/postgresql
+            # The tuned configuration the postgres recipe wrote. Without this
+            # mount the file is generated and never read, and the server runs
+            # on image defaults.
+            - {{db.config_mount}}
+          {{db.command}}
+          healthcheck:
+            # pg_isready answers only once the server accepts connections.
+            test: ["CMD-SHELL", "pg_isready -U db -d db"]
+            interval: 10s
+            timeout: 5s
+            retries: 10
+
+        # Migrations belong here, not in the app's CMD. FastAPI's deployment
+        # concepts page is explicit: "you will want to have a single process to
+        # perform those previous steps, before starting the application". With
+        # four workers, running them in the app command runs them four times.
+        # Uncomment once a migration tool is wired up (FastAPI names none;
+        # Alembic is the conventional choice and is keel's suggestion, not
+        # FastAPI's).
+        # migrate:
+        #   build: .
+        #   env_file:
+        #     - path: .env
+        #       required: false
+        #   environment:
+        #     DATABASE_URL: "postgresql+psycopg://db:db@db:5432/db"
+        #   command: ["alembic", "upgrade", "head"]
+        #   depends_on:
+        #     db:
+        #       condition: service_healthy
+        #   restart: "no"
+
+      volumes:
+        pgdata:
+  - path: .dockerignore
+    content: |
+      .git
+      .github
+      .venv
+      .keel
+      # The web server's own config and the compose files: mounted by the proxy
+      # container, never needed inside the application image.
+      docker/
+      compose.yaml
+      compose.override.yaml
+      Dockerfile
+      __pycache__
+      *.pyc
+      .env
+      app.db
+      .pytest_cache
+      .ruff_cache
+      .mypy_cache

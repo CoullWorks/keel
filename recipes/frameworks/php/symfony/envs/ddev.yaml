@@ -1,0 +1,74 @@
+id: symfony-ddev
+schema_version: 2
+kind: env
+env_family: ddev
+label: DDEV
+appliesTo: [symfony]
+provides: [env, docker]
+default: true
+priority: -10 # provision DDEV (config + start) before the app is created
+commands:
+  start: "ddev start"
+  # How this environment tears itself down. Used when a build fails partway:
+  # keel removes the directory it created, and without this the containers,
+  # volumes and network it started stay behind holding a bind mount to a
+  # path that no longer exists. The next attempt then reuses that container
+  # and dies with "current working directory is outside of container mount
+  # namespace root".
+  down: "ddev delete -Oy"
+  restart: "ddev restart"
+  exec: "ddev exec"
+  composer: "ddev composer"
+  console: "ddev exec php bin/console"
+  site_url: "https://{{project}}.ddev.site"
+  webserver_nginx: "ddev config --webserver-type=nginx-fpm"
+  webserver_apache: "ddev config --webserver-type=apache-fpm"
+  redis_addon: "ddev add-on get ddev/ddev-redis"
+  rabbitmq_addon: "ddev add-on get ddev/ddev-rabbitmq"
+  elasticsearch_addon: "ddev add-on get ddev/ddev-elasticsearch"
+files:
+  # DDEV already serves through PHP-FPM behind nginx (nginx-fpm) or Apache
+  # (apache-fpm), and the shared nginx / apache service recipes flip between them
+  # with the webserver_* tokens above. What DDEV does not do is tune PHP.
+  - path: .ddev/php/keel-symfony.ini
+    verbatim: true
+    content: |
+      ; keel-generated. Symfony development PHP settings for DDEV.
+      ; NOT the production set: that is docker/php/conf.d/10-symfony.ini, written by the
+      ; Docker envs, and it carries Symfony's published opcache numbers in full.
+      [PHP]
+      memory_limit = 512M
+      max_execution_time = 120
+
+      ; Symfony's published realpath values, which cost nothing locally and make
+      ; cache:clear noticeably quicker. Its caveat holds here too: PHP disables the
+      ; realpath cache entirely when open_basedir is set.
+      ; docs/infra/symfony.md, source 4.
+      realpath_cache_size = 4096K
+      realpath_cache_ttl = 600
+
+      [opcache]
+      ; Symfony's own reason for raising this from PHP's 8MB default: the default
+      ; "is too low for Symfony applications, which use many fully-qualified class
+      ; names". True in development as well.
+      opcache.interned_strings_buffer = 32
+      opcache.max_accelerated_files = 32531
+
+      ; 1, not Symfony's production 0. Your working tree is bind-mounted and you
+      ; expect an edit to take effect on reload.
+      opcache.validate_timestamps = 1
+      opcache.revalidate_freq = 0
+
+      ; Doctrine is the first thing the PHP manual names when it warns that
+      ; discarding doc comments breaks annotation-driven frameworks.
+      opcache.save_comments = 1
+
+      ; No opcache.preload here. Preloading pins compiled classes in shared memory
+      ; for the life of the FPM master, so a preloaded class does not pick up your
+      ; edit until the pool restarts. It belongs in production, not in a
+      ; bind-mounted development container.
+install:
+  - "ddev config --project-type=symfony --docroot=public {{db.ddev_flag}}"
+  - "ddev start"
+smoke:
+  - "ddev describe"

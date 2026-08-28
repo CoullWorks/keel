@@ -1,0 +1,366 @@
+id: astro-better-auth
+schema_version: 2
+kind: addon
+label: "Auth (better-auth: email + password, sessions, protected routes)"
+category: Auth
+appliesTo: [astro]
+requires: [astro]
+provides: [auth]
+updated: 2026-08-24
+pins:
+  better-auth: ^1.7.0
+  "@astrojs/node": ^9.0.0
+# better-auth is the framework-agnostic auth library the official Astro docs
+# target. It ships with an in-memory database adapter that is used automatically
+# when no `database:` is configured, so this scaffold boots and its build passes
+# with zero external services. That adapter loses all data on restart and is dev
+# only: AUTH-SETUP.md covers swapping in a real database and running the schema
+# migration (`npx @better-auth/cli`), which is left out of `install` because it
+# needs a running database.
+#
+# Auth endpoints must run on the server, so this sets Astro to on-demand
+# rendering (`output: "server"`) and wires the @astrojs/node adapter so the build
+# succeeds and the app is deploy ready. Swap the adapter for your host (Vercel,
+# Netlify, Cloudflare) at deploy time.
+install:
+  - "{{exec}} npm install better-auth"
+  # Astro needs a server adapter to build with output: "server". The node
+  # adapter is the portable default; change it for your deploy target later.
+  - "{{exec}} npm install @astrojs/node"
+smoke:
+  # `npm run build` compiles the auth instance, the catch-all endpoint, the
+  # middleware and every page, and it exercises the output: "server" + adapter
+  # config. A typo in any of them fails here. Under a native env {{exec}} renders
+  # empty and the engine runs it directly.
+  - "{{exec}} npm run build"
+files:
+  # The base ships an empty astro.config.mjs (defineConfig({})), so overwriting
+  # it cleanly is safe: this adds only output: "server" and the node adapter,
+  # both of which auth requires. If you had already customised the config,
+  # re-apply your changes on top of this (see AUTH-SETUP.md).
+  - path: astro.config.mjs
+    content: |
+      // keel-generated. Auth needs server-rendered endpoints, so Astro runs in
+      // on-demand ("server") mode with a deploy adapter. The node adapter is the
+      // portable default; swap it for @astrojs/vercel, @astrojs/netlify or
+      // @astrojs/cloudflare to match your host (see AUTH-SETUP.md).
+      import { defineConfig } from "astro/config";
+      import node from "@astrojs/node";
+
+      // https://astro.build/config
+      export default defineConfig({
+        output: "server",
+        adapter: node({ mode: "standalone" }),
+      });
+  # The better-auth server instance: the single source of truth for providers,
+  # sessions and the database. Email + password is enabled so the flow works out
+  # of the box. No `database:` is set, so better-auth uses its in-memory adapter
+  # (dev only, wiped on restart) and the app boots with zero setup.
+  - path: src/lib/auth.ts
+    content: |
+      // keel-generated. The better-auth instance: the single source of truth for
+      // auth. Email + password sign-in is enabled so the flow works immediately.
+      //
+      // STUB: no `database:` is configured, so better-auth falls back to its
+      // in-memory adapter. That is perfect for a first run (zero setup) but wipes
+      // every user and session when the process restarts, and it is NOT safe for
+      // production. Swap in a real database before you ship: see AUTH-SETUP.md for
+      // the one-liner and the `npx @better-auth/cli` migration step.
+      import { betterAuth } from "better-auth";
+
+      export const auth = betterAuth({
+        // The secret signs sessions and hashes tokens. Read from the environment
+        // so it is never committed. See .env / .env.example.
+        secret: import.meta.env.BETTER_AUTH_SECRET,
+        baseURL: import.meta.env.BETTER_AUTH_URL,
+        // Enable classic email + password auth. Add social providers or plugins
+        // alongside this once a real database is wired.
+        emailAndPassword: {
+          enabled: true,
+        },
+        // STUB: intentionally no `database:` here. Uncomment a real adapter, e.g.
+        //   import Database from "better-sqlite3";
+        //   database: new Database("./auth.db"),
+        // then run `npx @better-auth/cli migrate` (see AUTH-SETUP.md).
+      });
+  # The browser client. createAuthClient talks to the catch-all endpoint below,
+  # so login/logout/signup call better-auth without hand-written fetches.
+  - path: src/lib/auth-client.ts
+    content: |
+      // keel-generated. The browser-side client. Its methods (signIn, signUp,
+      // signOut, useSession) post to the catch-all endpoint at /api/auth/*. Import
+      // this in client scripts and React/Vue/Svelte islands. baseURL defaults to
+      // the current origin, so it works in dev and prod without changes.
+      import { createAuthClient } from "better-auth/client";
+
+      export const authClient = createAuthClient();
+  # The catch-all endpoint. Every better-auth HTTP route (/api/auth/sign-in,
+  # /sign-up, /session, /sign-out, ...) is served here by handing the request to
+  # auth.handler. `ALL` matches every method; `prerender = false` forces this to
+  # run on the server even if a page opts into static rendering elsewhere.
+  - path: src/pages/api/auth/[...all].ts
+    content: |
+      // keel-generated. Serves every better-auth endpoint from one catch-all:
+      // /api/auth/sign-in/email, /sign-up/email, /session, /sign-out, and the
+      // rest. Astro's [...all] param captures the whole subpath and hands the raw
+      // Request to auth.handler, which returns the Response verbatim.
+      import type { APIRoute } from "astro";
+
+      import { auth } from "../../../lib/auth";
+
+      // Redundant under output: "server" (the whole app is on-demand), but kept
+      // explicit so this route stays server-rendered even if you later switch to
+      // hybrid rendering.
+      export const prerender = false;
+
+      export const ALL: APIRoute = (ctx) => auth.handler(ctx.request);
+  # Middleware runs before every request. It reads the session from the incoming
+  # cookies and puts the user + session on Astro.locals, so any page can gate on
+  # Astro.locals.user without re-fetching the session itself.
+  - path: src/middleware.ts
+    content: |
+      // keel-generated. Runs before every request. It asks better-auth for the
+      // session tied to the incoming cookies and stashes the result on
+      // Astro.locals, so any .astro page can read Astro.locals.user / .session
+      // directly (see src/pages/dashboard.astro). Types for these locals live in
+      // src/env.d.ts.
+      import { defineMiddleware } from "astro:middleware";
+
+      import { auth } from "./lib/auth";
+
+      export const onRequest = defineMiddleware(async (context, next) => {
+        const session = await auth.api.getSession({
+          headers: context.request.headers,
+        });
+
+        context.locals.user = session?.user ?? null;
+        context.locals.session = session?.session ?? null;
+
+        return next();
+      });
+  # Types for Astro.locals so `Astro.locals.user` is typed, not `any`. Extends
+  # the base env.d.ts reference the framework relies on.
+  - path: src/env.d.ts
+    content: |
+      // keel-generated. Types the values middleware.ts puts on Astro.locals so
+      // pages get `Astro.locals.user` / `.session` typed instead of `any`.
+      /// <reference path="../.astro/types.d.ts" />
+
+      declare namespace App {
+        interface Locals {
+          user: import("better-auth").User | null;
+          session: import("better-auth").Session | null;
+        }
+      }
+  # The login + register page. One form for each, both calling the browser
+  # client (authClient.signIn / signUp). On success it sends the user to the
+  # protected dashboard so the whole flow is visible end to end.
+  - path: src/pages/login.astro
+    content: |
+      ---
+      // keel-generated. Login + register in one page. The inline script imports
+      // the browser client and calls authClient.signUp.email / signIn.email, then
+      // redirects to /dashboard on success. No server code runs here beyond the
+      // shell; the client talks to /api/auth/* directly.
+      ---
+
+      <html lang="en">
+        <head>
+          <meta charset="utf-8" />
+          <meta name="viewport" content="width=device-width, initial-scale=1" />
+          <title>Sign in</title>
+        </head>
+        <body style="font-family: system-ui, sans-serif; max-width: 360px; margin: 80px auto">
+          <h1>Sign in</h1>
+          <form id="signin">
+            <input name="email" type="email" placeholder="Email" required style="display:block;width:100%;margin:8px 0" />
+            <input name="password" type="password" placeholder="Password (8+ chars)" required style="display:block;width:100%;margin:8px 0" />
+            <button type="submit">Sign in</button>
+            <button type="submit" formnovalidate id="register-btn">Create account</button>
+          </form>
+          <p id="msg" style="color:crimson"></p>
+
+          <script>
+            import { authClient } from "../lib/auth-client";
+
+            const form = document.getElementById("signin") as HTMLFormElement;
+            const msg = document.getElementById("msg") as HTMLParagraphElement;
+            const registerBtn = document.getElementById("register-btn") as HTMLButtonElement;
+
+            let mode: "signin" | "register" = "signin";
+            registerBtn.addEventListener("click", () => {
+              mode = "register";
+            });
+            form.addEventListener("submit", () => {
+              if ((document.activeElement as HTMLElement)?.id !== "register-btn") {
+                mode = "signin";
+              }
+            });
+
+            form.addEventListener("submit", async (event) => {
+              event.preventDefault();
+              msg.textContent = "";
+              const data = new FormData(form);
+              const email = String(data.get("email"));
+              const password = String(data.get("password"));
+
+              const action =
+                mode === "register"
+                  ? authClient.signUp.email({ email, password, name: email })
+                  : authClient.signIn.email({ email, password });
+
+              const { error } = await action;
+              if (error) {
+                msg.textContent = error.message ?? "Something went wrong.";
+                return;
+              }
+              window.location.href = "/dashboard";
+            });
+          </script>
+        </body>
+      </html>
+  # The protected page. It reads Astro.locals.user (set by middleware) on the
+  # server and redirects anyone without a session to /login before rendering, so
+  # the page body only ever runs for a signed-in user.
+  - path: src/pages/dashboard.astro
+    content: |
+      ---
+      // keel-generated. A server-protected page. middleware.ts has already put
+      // the session on Astro.locals, so this checks Astro.locals.user and
+      // redirects unauthenticated visitors to /login BEFORE any HTML is sent.
+      // Proof the whole flow works end to end.
+      const user = Astro.locals.user;
+      if (!user) {
+        return Astro.redirect("/login");
+      }
+      ---
+
+      <html lang="en">
+        <head>
+          <meta charset="utf-8" />
+          <meta name="viewport" content="width=device-width, initial-scale=1" />
+          <title>Dashboard</title>
+        </head>
+        <body style="font-family: system-ui, sans-serif; max-width: 480px; margin: 80px auto">
+          <h1>Dashboard</h1>
+          <p>Signed in as <strong>{user.email}</strong>.</p>
+          <button id="signout">Sign out</button>
+
+          <script>
+            import { authClient } from "../lib/auth-client";
+
+            document.getElementById("signout")?.addEventListener("click", async () => {
+              await authClient.signOut();
+              window.location.href = "/login";
+            });
+          </script>
+        </body>
+      </html>
+  # A focused test that runs under node-vitest (`keel run test`). It imports the
+  # real auth instance and asserts the handler is mounted and rejects a bad
+  # sign-in, proving the instance is constructed and wired without needing a
+  # running server or a real database (the in-memory adapter is enough).
+  - path: src/lib/auth.test.ts
+    content: |
+      // keel-generated. Proves the better-auth instance is constructed and its
+      // handler is mounted: a sign-in with unknown credentials is rejected (not a
+      // 2xx), which only works if auth.handler routes the request. Runs on the
+      // in-memory adapter, so it needs no database and no running server. Runs
+      // under the framework's Vitest (`keel run test`).
+      import { expect, test } from "vitest";
+
+      import { auth } from "./auth";
+
+      test("exposes a request handler", () => {
+        expect(typeof auth.handler).toBe("function");
+      });
+
+      test("rejects sign-in with unknown credentials", async () => {
+        const req = new Request("http://localhost/api/auth/sign-in/email", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email: "nobody@example.com", password: "wrongpassword" }),
+        });
+        const res = await auth.handler(req);
+        expect(res.ok).toBe(false);
+      });
+  # The env keys better-auth needs. BETTER_AUTH_SECRET signs sessions (32+ chars)
+  # and BETTER_AUTH_URL is the canonical origin. Written to .env (git-ignored by
+  # the base framework) AND documented in .env.example so `keel secrets sync` can
+  # fill it.
+  - path: .env
+    content: |
+      # keel-generated. better-auth reads these. Keep this file out of git (the
+      # base .gitignore already ignores .env). Generate a real secret with:
+      #   openssl rand -base64 32
+      BETTER_AUTH_SECRET=change-me-to-a-32-char-minimum-random-string
+      # The canonical origin, used to build callback URLs. Set your real URL in
+      # production (e.g. https://app.example.com).
+      BETTER_AUTH_URL=http://localhost:4321
+  - path: .env.example
+    content: |
+      # Copy to .env and fill in. Generate secrets with: keel secrets sync
+      # better-auth: session-signing secret (32+ chars) and the canonical origin.
+      BETTER_AUTH_SECRET=change-me-to-a-32-char-minimum-random-string
+      BETTER_AUTH_URL=http://localhost:4321
+  - path: AUTH-SETUP.md
+    content: |
+      <!-- keel-generated -->
+      # Auth (better-auth) wired by keel
+
+      keel scaffolded better-auth into this Astro app with email + password
+      sign-in, sessions, and a server-protected page. Everything below is already
+      in place; the only real work left before production is swapping the in-memory
+      database for a real one.
+
+      ## What is wired
+      - `src/lib/auth.ts` the better-auth instance. Email + password is enabled.
+        It uses better-auth's **in-memory adapter** (no `database:` set) so the app
+        boots with zero setup. That store is wiped on every restart and is dev only.
+      - `src/lib/auth-client.ts` the browser client (`createAuthClient`).
+      - `src/pages/api/auth/[...all].ts` the catch-all that serves every
+        better-auth endpoint under `/api/auth/*` via `auth.handler`.
+      - `src/middleware.ts` reads the session and puts `user` + `session` on
+        `Astro.locals`.
+      - `src/env.d.ts` types those locals.
+      - `src/pages/login.astro` login + register form (calls the client).
+      - `src/pages/dashboard.astro` a protected page: it redirects to `/login`
+        server-side when there is no session.
+      - `astro.config.mjs` set to `output: "server"` with the `@astrojs/node`
+        adapter, because auth endpoints must run on the server.
+      - `.env` `BETTER_AUTH_SECRET` (session signing, 32+ chars) + `BETTER_AUTH_URL`.
+
+      ## Try it
+      1. `keel run dev`, open `/login`.
+      2. Click "Create account" with any email + an 8+ char password.
+      3. You land on `/dashboard`. Restart the dev server and you are signed out
+         again, because the in-memory store was wiped: that is expected until you
+         add a real database.
+
+      ## Before you ship
+      1. **Generate a real secret**: `openssl rand -base64 32` and set
+         `BETTER_AUTH_SECRET` in `.env` (and in your host's env for production).
+      2. **Add a real database.** Pick an adapter (Postgres, MySQL, SQLite, or an
+         ORM like Drizzle/Prisma) and set it on `database:` in `src/lib/auth.ts`.
+         The quickest local option is SQLite:
+         ```bash
+         npm install better-sqlite3
+         ```
+         ```ts
+         import Database from "better-sqlite3";
+         // in betterAuth({ ... }):
+         database: new Database("./auth.db"),
+         ```
+      3. **Create the auth tables** (user, session, account, verification) with the
+         better-auth CLI. This needs the database from step 2 to exist, which is
+         why keel does not run it during install:
+         ```bash
+         npx @better-auth/cli generate   # writes the schema / migration files
+         npx @better-auth/cli migrate    # applies them (supported adapters)
+         ```
+      4. **Pick a deploy adapter.** `@astrojs/node` is wired for a portable Node
+         server. For a serverless host swap it in `astro.config.mjs` for
+         `@astrojs/vercel`, `@astrojs/netlify` or `@astrojs/cloudflare` and install
+         that package.
+      5. Optionally add email verification, password reset and social providers
+         from the better-auth docs once the database is in place.

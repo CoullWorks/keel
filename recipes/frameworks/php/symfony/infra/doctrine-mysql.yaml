@@ -1,0 +1,29 @@
+id: doctrine-database-mysql
+schema_version: 2
+kind: config
+label: Symfony wiring for MySQL or MariaDB
+when:
+  framework: symfony
+  uses: mysql
+install:
+  - "{{composer}} require symfony/orm-pack"
+provision:
+  ddev:
+    patch:
+      - file: .env
+        set:
+          DATABASE_URL: "mysql://{{db.user}}:{{db.password}}@{{db.host}}:{{db.port}}/{{db.name}}?serverVersion={{db.version}}&charset=utf8mb4"
+  local:
+    patch:
+      - file: .env
+        set:
+          DATABASE_URL: "mysql://{{db.user}}:{{db.password}}@127.0.0.1:{{db.localPort}}/{{db.name}}?serverVersion={{db.version}}&charset=utf8mb4"
+  # Only reached if you ask for MySQL or MariaDB explicitly on a compose stack:
+  # the Docker envs bring up PostgreSQL by default, so this overlay writes the DSN
+  # for a server you have added yourself. serverVersion must match it, or Doctrine
+  # generates migrations for a platform you are not running.
+  compose:
+    patch:
+      - file: .env
+        set:
+          DATABASE_URL: "mysql://{{db.user}}:{{db.password}}@db:3306/{{db.name}}?serverVersion={{db.version}}&charset=utf8mb4"

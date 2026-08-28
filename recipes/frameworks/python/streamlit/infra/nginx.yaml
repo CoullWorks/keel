@@ -1,0 +1,171 @@
+id: nginx-streamlit
+schema_version: 2
+kind: config
+label: Streamlit server block for NGINX
+updated: 2026-08-12
+# Written from docs/infra/streamlit.md. Streamlit publishes no nginx or Apache
+# configuration: its knowledge base recommends "a reverse proxy to forward
+# requests from a webserver like Apache or Nginx to the port where your
+# Streamlit app is running" and contains no configuration example at all,
+# linking out to community forum posts instead.
+#
+# So the two directives this framework most needs, the websocket upgrade and a
+# read timeout that survives an idle socket, have NO vendor-published values.
+# What IS vendor-published is the fact that forces them: "Streamlit's server is
+# built on the Tornado web framework, which uses WebSockets to maintain a
+# persistent, two-way communication channel between the client and server", and
+# "Each browser tab or window creates its own WebSocket connection". The
+# directives below are keel's inference from that documented transport applied to
+# nginx's own websocket-proxying page. They are not Streamlit's text and must not
+# be presented as such.
+#
+# Session affinity IS vendor-stated, and it is the reason the upstream block is
+# shaped the way it is.
+#
+# Division of labour. The shared NGINX service (recipes/infra/web/nginx.yaml)
+# owns .keel/nginx/nginx.conf: worker and http-level tuning, the log format,
+# gzip and its type list, server_tokens off, the default security headers,
+# real_ip from the trusted proxy, and the default client_max_body_size and proxy
+# timeouts. This recipe owns one server block and the compose wiring.
+when:
+  framework: streamlit
+  uses: nginx
+files:
+  - path: docker/nginx/conf.d/app.conf
+    content: |
+      # Streamlit on its own Tornado server, proxied. Included by the shared
+      # nginx.conf from /etc/nginx/conf.d/*.conf; http-level config lives there.
+
+      upstream streamlit_app {
+        # The compose service name. Under the native env there is no `app` host:
+        # change this to 127.0.0.1:8501 and run Streamlit with
+        # --server.address=127.0.0.1, since the 0.0.0.0 bind is a container
+        # necessity rather than a host one.
+        server app:8501 fail_timeout=0;
+
+        # One replica by default, so no affinity is needed yet. The moment there
+        # is more than one, this stops being optional. Streamlit: "If you use
+        # load balancing or replication in your deployment, some Streamlit
+        # features won't work without session affinity or stickiness", and
+        # "Enable session affinity (also known as stickiness) in your proxy. This
+        # ensures that all requests from a user's session are handled by the same
+        # server instance." Without it, "the HTTP request for the media file
+        # might be routed to a different server than the one handling the user's
+        # WebSocket connection".
+        #
+        # ip_hash is open-source nginx's affinity mechanism; the sticky cookie
+        # directive is nginx Plus only. It keys on the client address, so it
+        # breaks behind a carrier NAT or a mobile network that rotates
+        # addresses. That trade-off is keel's judgement; Streamlit says only that
+        # stickiness is required, not how. The Apache block has the better answer
+        # here, because mod_proxy_balancer's stickysession is cookie-based.
+        #
+        # ip_hash;
+        # server app-2:8501 fail_timeout=0;
+      }
+
+      server {
+        listen 80;
+        server_name _;
+
+        # Overrides the shared default, and it has to be reconciled with the app
+        # rather than guessed: Streamlit's server.maxUploadSize defaults to 200
+        # (megabytes) and nginx's own client_max_body_size default is 1m. Left at
+        # the nginx default, st.file_uploader fails at the proxy with a 413 and
+        # Streamlit never sees the request. These two numbers must move together.
+        client_max_body_size 200m;
+
+        location / {
+          proxy_pass http://streamlit_app;
+          proxy_redirect off;
+
+          # The websocket upgrade. Streamlit publishes no config, so these three
+          # are keel's inference from nginx's own websocket-proxying page applied
+          # to Streamlit's documented Tornado transport. Without all three the
+          # tab connects, fails the handshake, and the app sits there blank.
+          #
+          # proxy_http_version is stated explicitly because nginx only made 1.1
+          # the default in 1.29.7; before that it was 1.0 and the upgrade could
+          # not happen at all.
+          proxy_http_version 1.1;
+          proxy_set_header Upgrade    $http_upgrade;
+          proxy_set_header Connection "upgrade";
+
+          proxy_set_header Host              $http_host;
+          proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header X-Real-IP         $remote_addr;
+
+          # Overrides the shared default of on. A websocket is a stream, not a
+          # response to hold: with buffering on, nginx tries to accumulate
+          # something that never ends.
+          proxy_buffering off;
+
+          # Overrides nginx's own 60s default. nginx documents the behaviour
+          # plainly: "By default, the connection will be closed if the proxied
+          # server does not transmit any data within 60 seconds. This timeout can
+          # be increased with the proxy_read_timeout directive." A user reading a
+          # dashboard transmits nothing, so at the default their session is
+          # dropped after a minute of thinking. Streamlit publishes no number for
+          # this; 3600s is keel's.
+          proxy_connect_timeout 5s;
+          proxy_send_timeout    3600s;
+          proxy_read_timeout    3600s;
+        }
+
+        # Serving from a subfolder. Set server.baseUrlPath on the app to exactly
+        # the same prefix, or every asset URL Streamlit generates points outside
+        # this location.
+        # location /dashboard/ {
+        #   proxy_pass http://streamlit_app/;
+        #   ... same header, buffering and timeout block as above ...
+        # }
+
+        # Answered by nginx, so the web tier's liveness does not depend on
+        # Tornado. Streamlit's own /_stcore/health is what the container health
+        # check probes; this one proves only that the proxy is up. add_header at
+        # this level stops the shared http-level add_header directives being
+        # inherited into it, which is nginx's documented behaviour and is
+        # harmless for a health endpoint.
+        location = /healthz {
+          access_log off;
+          add_header Content-Type text/plain;
+          return 200 "ok\n";
+        }
+      }
+provision:
+  compose:
+    files:
+      - path: compose.override.yaml
+        content: |
+          # Compose merges compose.override.yaml over compose.yaml with no extra
+          # flags, so the app service written by the env recipe is untouched.
+          services:
+            nginx:
+              image: nginx:1.27-alpine
+              restart: unless-stopped
+              depends_on:
+                app:
+                  condition: service_healthy
+              ports:
+                - "${HTTP_PORT:-8080}:80"
+              volumes:
+                # Shared, owned by recipes/infra/web/nginx.yaml.
+                - ./.keel/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+                # This framework's server block, owned by this recipe.
+                - ./docker/nginx/conf.d:/etc/nginx/conf.d:ro
+              healthcheck:
+                # Streamlit's own documented endpoint, reached through the proxy,
+                # so this proves the websocket-capable path end to end rather
+                # than just that nginx started.
+                test: ["CMD", "wget", "-qO-", "http://127.0.0.1/_stcore/health"]
+                interval: 15s
+                timeout: 5s
+                retries: 5
+                start_period: 15s
+              # Matches the app's stop_grace_period, so the proxy is not torn
+              # down under sessions the app is still closing.
+              stop_grace_period: 30s
+  # Native env: no container to add. The server block above still applies, but
+  # change the upstream to 127.0.0.1:8501.
+  local: {}

@@ -1,0 +1,216 @@
+id: mongodb
+schema_version: 2
+kind: service
+label: MongoDB 8 as a secondary document store (authenticated, tuned)
+category: Database
+appliesTo: [laravel, django]
+provides: [mongodb]
+# Not alongside Mongo-as-the-primary-database (recipes/infra/db/mongo.yaml).
+# That recipe already runs a mongod, shaped differently: a single-node replica
+# set so Django's transaction.atomic() has something to work with. Running both
+# would mean two mongod containers and two conflicting configurations.
+conflicts: [db-mongo]
+updated: 2026-08-12
+vars:
+  mongodb.version: "8.0"
+  mongodb.host: mongodb
+  mongodb.port: "27017"
+  mongodb.localPort: "27017"
+  mongodb.db: app
+  mongodb.rootUser: root
+  mongodb.rootPassword: root-change-me
+files:
+  - path: .keel/mongodb/mongod-service.conf
+    content: |
+      # keel-generated: MongoDB 8 as a SECONDARY document store.
+      #
+      # This is the shape for a document store beside a relational primary:
+      # event logs, product enrichment, CMS blocks, anything schemaless. It is a
+      # standalone mongod WITH authentication enabled.
+      #
+      # It is deliberately not the same shape as recipes/infra/db/mongo.yaml,
+      # which runs Mongo as the primary database for Django. That one is a
+      # single-node replica set, because multi-document transactions require a
+      # replica set or a sharded cluster, and enabling access control on a
+      # replica set additionally requires a shared key file for internal
+      # authentication. A standalone has no internal auth to arrange, so this
+      # instance can require a password from the first start with no key file at
+      # all. The trade is real and worth stating: NO TRANSACTIONS here. Writes
+      # spanning two documents are not atomic.
+      #
+      # Sources, all fetched 2026-08-12:
+      #   [1] WiredTiger Storage Engine
+      #       https://www.mongodb.com/docs/manual/core/wiredtiger/
+      #   [2] Transactions
+      #       https://www.mongodb.com/docs/manual/core/transactions/
+      #   [3] mongo Docker Official Image
+      #       https://hub.docker.com/_/mongo
+      #   [4] UNIX ulimit Settings
+      #       https://www.mongodb.com/docs/manual/reference/ulimit/
+
+      storage:
+        dbPath: /data/db
+        wiredTiger:
+          engineConfig:
+            # "The default WiredTiger internal cache size is the larger of
+            # either: 50% of (RAM - 1GB), or 0.256 GB." [1]
+            #
+            # Arithmetic for a 1 GB container:
+            #   0.5 x (1 GB - 1 GB) = 0 GB, so the 0.256 GB floor applies.
+            # Set explicitly, because MongoDB warns that it may not see the
+            # container's limit at all: "You may need to configure the WiredTiger
+            # cache to an appropriate value, as WiredTiger may not account for the
+            # memory limits of the specific container in certain cases." [1]
+            # Verify what it detected with db.hostInfo().system.memLimitMB.
+            cacheSizeGB: 0.25
+
+      net:
+        port: 27017
+        bindIp: 0.0.0.0
+
+      security:
+        # Authentication is ON. The official image creates the root user from
+        # MONGO_INITDB_ROOT_USERNAME and MONGO_INITDB_ROOT_PASSWORD, and "If both
+        # are present then MongoDB will start with authentication enabled
+        # (mongod --auth)" [3]. Stating it here as well means the server refuses
+        # anonymous connections even if those variables are ever dropped from the
+        # compose file, rather than quietly opening up.
+        authorization: enabled
+
+      operationProfiling:
+        mode: slowOp
+        slowOpThresholdMs: 100
+
+      systemLog:
+        destination: file
+        path: /var/log/mongodb/mongod.log
+        logAppend: true
+  - path: docker-compose.mongodb.yml
+    content: |
+      # keel-generated: MongoDB {{mongodb.version}} as a secondary document store.
+      # Standalone: docker compose -f docker-compose.mongodb.yml up -d
+      # Or merged:  docker compose -f docker-compose.yml -f docker-compose.mongodb.yml up -d
+      services:
+        mongodb:
+          image: mongo:{{mongodb.version}}
+          restart: unless-stopped
+          command: ["mongod", "--config", "/etc/mongo/mongod.conf"]
+          environment:
+            # Both are required for the image to create the user and turn
+            # authentication on; setting one without the other does nothing.
+            MONGO_INITDB_ROOT_USERNAME: "{{mongodb.rootUser}}"
+            MONGO_INITDB_ROOT_PASSWORD: "{{mongodb.rootPassword}}"
+            MONGO_INITDB_DATABASE: "{{mongodb.db}}"
+          ulimits:
+            # "-n (open files) 64000", "-u (processes/threads) 64000", and
+            # "Incoming connections to a mongod or mongos instance require two
+            # file descriptors".
+            # https://www.mongodb.com/docs/manual/reference/ulimit/
+            nofile: {soft: 64000, hard: 64000}
+            nproc: {soft: 64000, hard: 64000}
+          volumes:
+            - mongodb-data:/data/db
+            - mongodb-logs:/var/log/mongodb
+            - ./.keel/mongodb/mongod-service.conf:/etc/mongo/mongod.conf:ro
+          ports:
+            - "127.0.0.1:{{mongodb.localPort}}:27017"
+          healthcheck:
+            # Authenticated ping: proves the server is answering commands AND
+            # that the credentials work, which an unauthenticated probe would
+            # not. "The ping command is a no-op used to test whether a server is
+            # responding to commands. This command will return immediately even
+            # if the server is write-locked."
+            # https://www.mongodb.com/docs/manual/reference/command/ping/
+            test: ["CMD-SHELL", "mongosh --quiet -u \"$$MONGO_INITDB_ROOT_USERNAME\" -p \"$$MONGO_INITDB_ROOT_PASSWORD\" --authenticationDatabase admin --eval \"db.adminCommand('ping').ok\" | grep -q 1"]
+            interval: 10s
+            timeout: 5s
+            retries: 12
+            start_period: 40s
+      volumes:
+        mongodb-data:
+        mongodb-logs:
+  - path: MONGODB-SERVICE.md
+    content: |
+      # MongoDB as a secondary store (scaffolded by keel)
+
+      `mongodb://{{mongodb.rootUser}}:{{mongodb.rootPassword}}@127.0.0.1:{{mongodb.localPort}}/{{mongodb.db}}?authSource=admin`
+      · config `.keel/mongodb/mongod-service.conf`.
+
+      ## What this instance is and is not
+
+      A standalone `mongod` with authentication enabled. It is the right shape
+      for documents beside a relational primary, and it has **no transactions**:
+      multi-document atomicity requires a replica set or a sharded cluster.
+      If the application needs `transaction.atomic()` semantics over Mongo, use
+      the primary-database recipe (`--db mongo`) instead, which runs a
+      single-node replica set.
+
+      ## Give the application its own user
+
+      The root credentials are for administration. Create a scoped user:
+
+          use {{mongodb.db}}
+          db.createUser({
+            user: "app",
+            pwd: "<generated>",
+            roles: [{ role: "readWrite", db: "{{mongodb.db}}" }]
+          })
+
+      and change the root password before this reaches anything shared.
+
+      ## Sizing
+
+      The WiredTiger cache is set explicitly to 0.25 GB because MongoDB may not
+      detect a container memory limit, and the default (50% of RAM minus 1 GB)
+      would then be computed from the host's memory. If you raise the container's
+      memory, raise `cacheSizeGB` with it: everything outside the cache is served
+      through the operating system's file cache, so do not set it to the whole
+      container either.
+provision:
+  ddev:
+    files:
+      - path: .ddev/docker-compose.mongodb.yaml
+        content: |
+          # keel-generated: MongoDB {{mongodb.version}} (secondary store) for DDEV.
+          # Rationale for every setting: .keel/mongodb/mongod-service.conf.
+          services:
+            mongodb:
+              container_name: ddev-${DDEV_SITENAME}-mongodb
+              image: mongo:{{mongodb.version}}
+              hostname: mongodb
+              restart: "no"
+              command: ["mongod", "--config", "/etc/mongo/mongod.conf"]
+              labels:
+                com.ddev.site-name: ${DDEV_SITENAME}
+                com.ddev.approot: ${DDEV_APPROOT}
+              environment:
+                - MONGO_INITDB_ROOT_USERNAME={{mongodb.rootUser}}
+                - MONGO_INITDB_ROOT_PASSWORD={{mongodb.rootPassword}}
+                - MONGO_INITDB_DATABASE={{mongodb.db}}
+              ulimits:
+                nofile: {soft: 64000, hard: 64000}
+                nproc: {soft: 64000, hard: 64000}
+              expose:
+                - "27017"
+              volumes:
+                - mongodb:/data/db
+                # Relative to .ddev/, so this is the project-root copy.
+                - "../.keel/mongodb/mongod-service.conf:/etc/mongo/mongod.conf:ro"
+              healthcheck:
+                test: ["CMD-SHELL", "mongosh --quiet -u \"$$MONGO_INITDB_ROOT_USERNAME\" -p \"$$MONGO_INITDB_ROOT_PASSWORD\" --authenticationDatabase admin --eval \"db.adminCommand('ping').ok\" | grep -q 1"]
+                interval: 10s
+                timeout: 5s
+                retries: 12
+                start_period: 40s
+            web:
+              depends_on:
+                - mongodb
+          volumes:
+            mongodb:
+    install:
+      - "{{restart}}"
+  compose: {}
+  sail: {}
+  local:
+    install:
+      - "docker compose -f docker-compose.mongodb.yml up -d"

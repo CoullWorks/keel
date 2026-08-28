@@ -1,0 +1,394 @@
+id: nextjs-authjs
+schema_version: 2
+kind: addon
+label: Auth.js v5 (login, register, password reset, protected routes)
+category: Auth
+appliesTo: [nextjs]
+requires: [nextjs]
+provides: [auth]
+updated: 2026-08-21
+pins:
+  next-auth: ^5.0.0-beta.25
+# Auth.js v5 (next-auth) is the App Router-native successor to NextAuth. It
+# installs as `next-auth@beta` while v5 is in beta, but the API is stable and is
+# what the official docs target. The Credentials provider is scaffolded because
+# it needs no external service to prove the flow boots; swap it for an OAuth or
+# email provider by editing auth.ts.
+install:
+  - "{{exec}} npm install next-auth@beta"
+smoke:
+  # `npm run build` compiles the route handler, auth config, middleware and every
+  # page: a typo in any of them fails here. It mirrors how breeze.yaml proves the
+  # sign-in route exists, except Next.js proves it at build time rather than by
+  # curling a running server (the sign-in page and /api/auth/[...nextauth] are both
+  # part of the build output). Under the native env {{exec}} renders empty.
+  - "{{exec}} npm run build"
+files:
+  # The Auth.js config: the single source of truth for providers, callbacks and
+  # the custom sign-in page. Split from the route handler so middleware.ts can
+  # import the same `auth` without pulling in Node-only provider code.
+  - path: auth.config.ts
+    content: |
+      // keel-generated. Edge-safe Auth.js config: no database or Node-only
+      // provider code here, so middleware.ts (which runs on the edge) can import
+      // it. Providers that need Node APIs live in auth.ts.
+      import type { NextAuthConfig } from "next-auth";
+
+      export const authConfig = {
+        pages: {
+          signIn: "/signin",
+        },
+        callbacks: {
+          // Gate every route under /dashboard. Returning false sends an
+          // unauthenticated user to the signIn page above.
+          authorized({ auth, request: { nextUrl } }) {
+            const isLoggedIn = !!auth?.user;
+            const isProtected = nextUrl.pathname.startsWith("/dashboard");
+            if (isProtected) return isLoggedIn;
+            return true;
+          },
+        },
+        providers: [], // added in auth.ts, kept empty here so this stays edge-safe
+      } satisfies NextAuthConfig;
+  - path: auth.ts
+    content: |
+      // keel-generated. The Auth.js instance. `auth` is the session helper used
+      // by Server Components and middleware; `handlers` back the route handler;
+      // `signIn`/`signOut` are the server actions.
+      //
+      // The Credentials provider is a STUB: it accepts a demo user so the flow
+      // works with zero setup. Replace `authorize` with a real lookup (hash-check
+      // against your users table) or swap in an OAuth/email provider before you
+      // ship.
+      import NextAuth from "next-auth";
+      import Credentials from "next-auth/providers/credentials";
+      import { z } from "zod";
+
+      import { authConfig } from "./auth.config";
+
+      const credentialsSchema = z.object({
+        email: z.string().email(),
+        password: z.string().min(8),
+      });
+
+      export const { handlers, auth, signIn, signOut } = NextAuth({
+        ...authConfig,
+        providers: [
+          Credentials({
+            credentials: {
+              email: { label: "Email", type: "email" },
+              password: { label: "Password", type: "password" },
+            },
+            async authorize(raw) {
+              const parsed = credentialsSchema.safeParse(raw);
+              if (!parsed.success) return null;
+              const { email, password } = parsed.data;
+              // STUB: replace with a real user lookup + password verification.
+              // Returning null means "invalid credentials".
+              if (email === "demo@example.com" && password === "password123") {
+                return { id: "1", name: "Demo User", email };
+              }
+              return null;
+            },
+          }),
+        ],
+      });
+  # The App Router catch-all that serves every Auth.js endpoint:
+  # /api/auth/signin, /callback, /session, /csrf, /providers, /signout.
+  - path: app/api/auth/[...nextauth]/route.ts
+    content: |
+      // keel-generated. Every Auth.js HTTP endpoint is served from this one
+      // catch-all: /api/auth/session, /api/auth/csrf, /api/auth/callback/... etc.
+      import { handlers } from "@/auth";
+
+      export const { GET, POST } = handlers;
+  # A separate register endpoint. Auth.js signs users IN; creating an account is
+  # the app's job, so this is where you persist a new user. Stubbed to validate
+  # and echo, wired to zod so the shape is enforced.
+  - path: app/api/register/route.ts
+    content: |
+      // keel-generated. Account creation. Auth.js handles sign-IN; sign-UP is the
+      // application's responsibility, so this is where you write the new user to
+      // your database (hash the password with bcrypt/argon2 first). Stubbed to
+      // validate and 201 so the register page has a real endpoint to call.
+      import { NextResponse } from "next/server";
+      import { z } from "zod";
+
+      const registerSchema = z.object({
+        name: z.string().min(1),
+        email: z.string().email(),
+        password: z.string().min(8),
+      });
+
+      export async function POST(request: Request) {
+        const body = await request.json().catch(() => null);
+        const parsed = registerSchema.safeParse(body);
+        if (!parsed.success) {
+          return NextResponse.json(
+            { error: "invalid input", issues: parsed.error.flatten().fieldErrors },
+            { status: 422 },
+          );
+        }
+        // STUB: persist parsed.data.{name,email} + a hashed password here, then
+        // redirect the client to /signin. Do NOT store the plaintext password.
+        return NextResponse.json({ ok: true, email: parsed.data.email }, { status: 201 });
+      }
+  # Password reset request endpoint. Always answers 200 so it can't be used to
+  # enumerate which emails have accounts - the standard pattern.
+  - path: app/api/reset-password/route.ts
+    content: |
+      // keel-generated. Password-reset request. Wire this to send a signed,
+      // expiring reset link by email (Resend/SES/etc.). It always returns 200,
+      // regardless of whether the email exists, so an attacker cannot use it to
+      // discover which addresses have accounts.
+      import { NextResponse } from "next/server";
+      import { z } from "zod";
+
+      const resetSchema = z.object({ email: z.string().email() });
+
+      export async function POST(request: Request) {
+        const body = await request.json().catch(() => null);
+        const parsed = resetSchema.safeParse(body);
+        if (!parsed.success) {
+          return NextResponse.json({ error: "invalid email" }, { status: 422 });
+        }
+        // STUB: look up the user and, if found, email a reset link. Silent either
+        // way to avoid account enumeration.
+        return NextResponse.json({ ok: true }, { status: 200 });
+      }
+  # Middleware gate. Importing the edge-safe auth.config keeps middleware light
+  # (no provider code), and the matcher scopes it to the protected area.
+  - path: middleware.ts
+    content: |
+      // keel-generated. Runs on the edge before matched requests. It imports the
+      // edge-safe auth.config (no Node-only provider code) and lets the
+      // `authorized` callback there decide access. The matcher scopes it to
+      // /dashboard so public pages skip auth entirely.
+      import NextAuth from "next-auth";
+
+      import { authConfig } from "./auth.config";
+
+      export const { auth: middleware } = NextAuth(authConfig);
+
+      export const config = {
+        matcher: ["/dashboard/:path*"],
+      };
+  # Custom sign-in page (auth.config points signIn here). Calls the signIn server
+  # action with the Credentials provider.
+  - path: app/signin/page.tsx
+    content: |
+      // keel-generated. Custom sign-in page. auth.config's `pages.signIn` points
+      // here, so both direct visits and redirected unauthenticated requests land
+      // on it. Submitting calls the `signIn` server action with the Credentials
+      // provider. Demo login: demo@example.com / password123.
+      import { redirect } from "next/navigation";
+
+      import { signIn } from "@/auth";
+
+      export default function SignInPage() {
+        async function authenticate(formData: FormData) {
+          "use server";
+          await signIn("credentials", {
+            email: formData.get("email"),
+            password: formData.get("password"),
+            redirectTo: "/dashboard",
+          });
+          redirect("/dashboard");
+        }
+
+        return (
+          <main style={{ maxWidth: 360, margin: "80px auto", fontFamily: "system-ui" }}>
+            <h1>Sign in</h1>
+            <form action={authenticate}>
+              <input name="email" type="email" placeholder="Email" required style={{ display: "block", width: "100%", margin: "8px 0" }} />
+              <input name="password" type="password" placeholder="Password" required style={{ display: "block", width: "100%", margin: "8px 0" }} />
+              <button type="submit">Sign in</button>
+            </form>
+            <p style={{ marginTop: 16 }}>
+              <a href="/register">Create an account</a> · <a href="/reset-password">Forgot password?</a>
+            </p>
+          </main>
+        );
+      }
+  - path: app/register/page.tsx
+    content: |
+      // keel-generated. Registration page. Posts to /api/register (the account-
+      // creation endpoint), then sends the user to sign in.
+      "use client";
+
+      import { useState } from "react";
+
+      export default function RegisterPage() {
+        const [msg, setMsg] = useState("");
+
+        async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
+          e.preventDefault();
+          const form = new FormData(e.currentTarget);
+          const res = await fetch("/api/register", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              name: form.get("name"),
+              email: form.get("email"),
+              password: form.get("password"),
+            }),
+          });
+          setMsg(res.ok ? "Account created - you can sign in now." : "Registration failed.");
+        }
+
+        return (
+          <main style={{ maxWidth: 360, margin: "80px auto", fontFamily: "system-ui" }}>
+            <h1>Create account</h1>
+            <form onSubmit={onSubmit}>
+              <input name="name" placeholder="Name" required style={{ display: "block", width: "100%", margin: "8px 0" }} />
+              <input name="email" type="email" placeholder="Email" required style={{ display: "block", width: "100%", margin: "8px 0" }} />
+              <input name="password" type="password" placeholder="Password (8+ chars)" required style={{ display: "block", width: "100%", margin: "8px 0" }} />
+              <button type="submit">Register</button>
+            </form>
+            {msg && <p>{msg}</p>}
+            <p style={{ marginTop: 16 }}><a href="/signin">Back to sign in</a></p>
+          </main>
+        );
+      }
+  - path: app/reset-password/page.tsx
+    content: |
+      // keel-generated. Password-reset request page. Posts to /api/reset-password,
+      // which always answers 200 to avoid account enumeration.
+      "use client";
+
+      import { useState } from "react";
+
+      export default function ResetPasswordPage() {
+        const [sent, setSent] = useState(false);
+
+        async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
+          e.preventDefault();
+          const form = new FormData(e.currentTarget);
+          await fetch("/api/reset-password", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ email: form.get("email") }),
+          });
+          setSent(true);
+        }
+
+        return (
+          <main style={{ maxWidth: 360, margin: "80px auto", fontFamily: "system-ui" }}>
+            <h1>Reset password</h1>
+            {sent ? (
+              <p>If that email has an account, a reset link is on its way.</p>
+            ) : (
+              <form onSubmit={onSubmit}>
+                <input name="email" type="email" placeholder="Email" required style={{ display: "block", width: "100%", margin: "8px 0" }} />
+                <button type="submit">Send reset link</button>
+              </form>
+            )}
+            <p style={{ marginTop: 16 }}><a href="/signin">Back to sign in</a></p>
+          </main>
+        );
+      }
+  # The middleware-protected route. A Server Component that reads the session and
+  # renders the signed-in user - proof the whole flow works end to end.
+  - path: app/dashboard/page.tsx
+    content: |
+      // keel-generated. A protected page. middleware.ts gates /dashboard, and this
+      // Server Component reads the session with `auth()` to render the signed-in
+      // user. An unauthenticated request never reaches here - it is redirected to
+      // /signin by the middleware.
+      import { auth, signOut } from "@/auth";
+
+      export default async function DashboardPage() {
+        const session = await auth();
+
+        async function logout() {
+          "use server";
+          await signOut({ redirectTo: "/signin" });
+        }
+
+        return (
+          <main style={{ maxWidth: 480, margin: "80px auto", fontFamily: "system-ui" }}>
+            <h1>Dashboard</h1>
+            <p>Signed in as <strong>{session?.user?.email ?? "unknown"}</strong>.</p>
+            <form action={logout}>
+              <button type="submit">Sign out</button>
+            </form>
+          </main>
+        );
+      }
+  # A focused test that proves the register endpoint validates. It runs under the
+  # framework's existing Vitest setup (`keel run test`).
+  - path: app/register.test.ts
+    content: |
+      // keel-generated. Proves the register endpoint enforces its schema: a bad
+      // email is rejected 422, a valid body is accepted 201. Runs under the
+      // framework's Vitest (`keel run test`).
+      import { expect, test } from "vitest";
+
+      import { POST } from "./api/register/route";
+
+      function req(body: unknown): Request {
+        return new Request("http://localhost/api/register", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+      }
+
+      test("rejects an invalid email", async () => {
+        const res = await POST(req({ name: "A", email: "nope", password: "password123" }));
+        expect(res.status).toBe(422);
+      });
+
+      test("accepts a valid registration", async () => {
+        const res = await POST(req({ name: "A", email: "a@example.com", password: "password123" }));
+        expect(res.status).toBe(201);
+      });
+  # The env keys Auth.js needs. AUTH_SECRET signs the session JWT/cookie; without
+  # it Auth.js refuses to start in production. Written to .env.local (git-ignored)
+  # AND documented in .env.example so `keel secrets sync` can fill it.
+  - path: .env.local
+    content: |
+      # keel-generated. Auth.js reads these. AUTH_SECRET signs the session - keep
+      # it out of git (this file is git-ignored). Generate one with:
+      #   npx auth secret        (or: openssl rand -base64 32)
+      AUTH_SECRET=change-me
+      # The canonical origin, used to build callback URLs. Set to your real URL in
+      # production (e.g. https://app.example.com).
+      AUTH_URL=http://localhost:3000
+  - path: .env.example
+    content: |
+      # Copy to .env.local and fill in. Generate secrets with: keel secrets sync
+      # Auth.js - sign-in session secret and canonical origin.
+      AUTH_SECRET=change-me
+      AUTH_URL=http://localhost:3000
+      DATABASE_URL=postgresql://app:secret@localhost:5432/app
+  - path: AUTH-SETUP.md
+    content: |
+      <!-- keel-generated -->
+      # Auth.js v5 (next-auth) - wired by keel
+
+      keel scaffolded Auth.js v5 into this Next.js app. Everything below is
+      already in place; the only real work left is swapping the stubbed
+      credentials check for your own user store.
+
+      ## What's wired
+      - `auth.config.ts` - edge-safe config: the custom sign-in page and the
+        `authorized` callback that gates `/dashboard`.
+      - `auth.ts` - the Auth.js instance and a **Credentials provider stub**
+        (demo login `demo@example.com` / `password123`). Replace `authorize`
+        with a real lookup, or swap in an OAuth/email provider.
+      - `app/api/auth/[...nextauth]/route.ts` - serves every Auth.js endpoint
+        under `/api/auth/*`.
+      - `app/api/register/route.ts` - account creation (validates, then persist
+        the user + a **hashed** password here).
+      - `app/api/reset-password/route.ts` - reset request (enumeration-safe).
+      - `app/signin`, `app/register`, `app/reset-password` - the three pages.
+      - `app/dashboard/page.tsx` - a protected Server Component reading the
+        session. `middleware.ts` redirects unauthenticated visitors to `/signin`.
+      - `.env.local` - `AUTH_SECRET` (session signing) + `AUTH_URL`.
+
+      ## Before you ship
+      1. Generate a real secret: `npx auth secret` (writes `AUTH_SECRET`).
+      2. Replace the `authorize` stub in `auth.ts` with a real credential check
+         (hash-verify against your users table) or an OAuth/email provider.
+      3. Implement the register + reset endpoints against your database and mailer.

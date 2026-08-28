@@ -1,0 +1,7 @@
+id: laravel-pint
+kind: addon
+label: Pint (code-style fixer)
+appliesTo: [laravel]
+provides: [pint]
+install:
+  - "{{composer}} require laravel/pint --dev"

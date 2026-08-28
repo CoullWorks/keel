@@ -1,0 +1,143 @@
+id: apache-hono
+schema_version: 2
+kind: config
+label: Hono VirtualHost for Apache
+updated: 2026-08-12
+# Written from docs/infra/hono.md plus the Apache 2.4 module reference. Hono
+# documents no reverse proxy configuration of any kind, so every directive here
+# is keel's, and the recipe says so rather than implying vendor endorsement.
+#
+# The thing that makes Hono different: it has NO trust-proxy setting and no
+# equivalent. getConnInfo returns the socket peer and the docs never mention
+# X-Forwarded-For, so the app must parse and validate the header itself. Apache
+# is therefore configured to strip the client's forwarded headers before
+# mod_proxy_http adds its own, so the value that reaches the app is the one
+# Apache computed and nothing else. Express and Fastify would survive a sloppier
+# config because they ship hop logic; Hono would not.
+#
+# Division of labour. The shared Apache service (recipes/infra/web/apache.yaml)
+# owns .keel/apache/keel-tuning.conf: MPM event tuning, the LoadModule lines for the
+# proxy modules, global compression, mod_expires, ServerTokens Prod,
+# ServerSignature Off, TraceEnable Off, the global security headers, and the
+# `IncludeOptional conf.d/app-*.conf` that pulls this file in.
+when:
+  framework: hono
+  uses: apache
+patch:
+  - file: .env
+    # Consumed by the forwarded-header handling the app has to implement itself.
+    # With the client's copy stripped below, mod_proxy_http adds exactly one
+    # entry and it is the real client, so the correct depth is 1.
+    set:
+      TRUSTED_PROXY_HOPS: "1"
+files:
+  - path: docker/apache/conf.d/app-hono.conf
+    content: |
+      # Hono on @hono/node-server, proxied. Included by the shared keel-tuning.conf.
+      <VirtualHost *:80>
+          ServerName localhost
+
+          ProxyRequests Off
+
+          # This is the load-bearing part for Hono. mod_proxy_http appends its
+          # own X-Forwarded-For, and the vendor warns the header "will contain
+          # more than one (comma-separated) value if the original request
+          # already contained one of these headers". Every other framework here
+          # has hop logic that copes; Hono has none, so the client's copy is
+          # removed first and Apache's single computed value is all the app ever
+          # sees.
+          RequestHeader unset X-Forwarded-For
+          RequestHeader unset X-Forwarded-Host
+          RequestHeader unset X-Forwarded-Server
+          # mod_proxy_http does NOT add X-Forwarded-Proto; the documented list
+          # is For, Host and Server only. Change to "https" when TLS terminates
+          # at this vhost.
+          RequestHeader set X-Forwarded-Proto "http"
+
+          ProxyPreserveHost On
+
+          # upgrade=websocket rather than mod_proxy_wstunnel, which the vendor
+          # marks Deprecated: "Since Apache HTTP Server 2.4.47, protocol Upgrade
+          # (tunneling) can be better handled by mod_proxy_http." The
+          # httpd:2.4-alpine image is 2.4.68. Hono's own WebSocket example
+          # upgrades at /ws, so the tunnel is scoped to that path and the
+          # ordinary backend keeps ordinary HTTP semantics. Widen it if the app
+          # upgrades elsewhere.
+          #
+          # The /ws entry must come first: mod_proxy evaluates ProxyPass
+          # directives in the order they appear and the first match wins.
+          # timeout=3600 because a WebSocket is idle between messages and the
+          # inherited ProxyTimeout would close it.
+          ProxyPass        /ws http://app:3000/ws upgrade=websocket timeout=3600
+          ProxyPassReverse /ws http://app:3000/ws
+          ProxyPass        /   http://app:3000/ connectiontimeout=5 timeout=60
+          ProxyPassReverse /   http://app:3000/
+
+          # LimitRequestBody alone does NOT cap a proxied request, and this is
+          # not a guess: it was tested against httpd 2.4.68 in this exact
+          # topology. With LimitRequestBody set on the vhost, a POST an order of
+          # magnitude over the limit still reached the backend with a 200. The
+          # directive is enforced when Apache itself serves the request, not
+          # when mod_proxy_http streams the body through to a backend. So the
+          # rewrite below is what actually rejects it. [R=413] aborts with that
+          # status rather than redirecting, because mod_rewrite treats any code
+          # outside 300-399 as an abort.
+          #
+          # Caveat worth knowing: this reads the declared Content-Length, so a
+          # chunked upload that sends none is not caught. nginx's
+          # client_max_body_size covers both cases. Keep the application's own
+          # body limit as the backstop either way.
+          RewriteEngine On
+          RewriteCond expr "%{HTTP:Content-Length} -gt 1048576"
+          RewriteRule ^ - [R=413,L]
+          # LimitRequestBody defaults to 0, unlimited. Hono publishes no
+          # framework-level body limit for Node: its Body Limit middleware
+          # requires maxSize, and on Node nothing caps the body below it. So
+          # this is the only limit unless the app adds the middleware. 1048576
+          # is keel's number; set the middleware to the same value.
+          LimitRequestBody 1048576
+      </VirtualHost>
+
+      # Apache has no one-line equivalent of nginx's `return 200`, so there is
+      # no proxy-local health endpoint. The container health check probes the
+      # app's own /health through this vhost, which proves the whole proxy path.
+provision:
+  compose:
+    files:
+      - path: compose.override.yaml
+        content: |
+          # Compose merges compose.override.yaml over compose.yaml with no extra
+          # flags, so the app service written by the env recipe is untouched.
+          services:
+            apache:
+              image: httpd:2.4-alpine
+              # The stock httpd.conf is left in place: it loads mpm_event and the base
+              # module set. -c appends this directive after it is read, pulling in the
+              # shared tuning and this framework's VirtualHost. Without it the image
+              # starts on stock config and serves its default page - it does not fail.
+              command: ["httpd-foreground", "-c", "Include conf/keel-tuning.conf"]
+              restart: unless-stopped
+              depends_on:
+                app:
+                  condition: service_healthy
+              # The app service stays on `expose` only. That matters more for
+              # Hono than for the others: stripping the client's forwarded
+              # headers is only trustworthy while this proxy is the single
+              # route in.
+              ports:
+                - "${HTTP_PORT:-8080}:80"
+              volumes:
+                # Shared, owned by recipes/infra/web/apache.yaml.
+                - ./.keel/apache/keel-tuning.conf:/usr/local/apache2/conf/keel-tuning.conf:ro
+                # This framework's VirtualHost, owned by this recipe.
+                - ./docker/apache/conf.d:/usr/local/apache2/conf.d:ro
+              healthcheck:
+                test: ["CMD", "wget", "-qO-", "http://127.0.0.1/health"]
+                interval: 15s
+                timeout: 5s
+                retries: 5
+                start_period: 10s
+              stop_grace_period: 30s
+  # Native env: no container to add. The VirtualHost above still applies, but
+  # change the ProxyPass targets to http://127.0.0.1:3000.
+  local: {}

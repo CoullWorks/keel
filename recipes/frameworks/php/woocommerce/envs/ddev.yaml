@@ -1,0 +1,72 @@
+id: woocommerce-ddev
+schema_version: 2
+kind: env
+env_family: ddev
+label: DDEV
+bin: ddev
+appliesTo: [woocommerce]
+provides: [env, docker]
+default: true
+priority: -10 # provision DDEV before WordPress is downloaded
+commands:
+  start: "ddev start"
+  # How this environment tears itself down. Used when a build fails partway:
+  # keel removes the directory it created, and without this the containers,
+  # volumes and network it started stay behind holding a bind mount to a
+  # path that no longer exists. The next attempt then reuses that container
+  # and dies with "current working directory is outside of container mount
+  # namespace root".
+  down: "ddev delete -Oy"
+  restart: "ddev restart"
+  exec: "ddev exec"
+  composer: "ddev composer"
+  wp: "ddev wp"
+  site_url: "https://{{project}}.ddev.site"
+  webserver_nginx: "ddev config --webserver-type=nginx-fpm"
+  webserver_apache: "ddev config --webserver-type=apache-fpm"
+  redis_addon: "ddev add-on get ddev/ddev-redis"
+  varnish_addon: "ddev add-on get ddev/ddev-varnish"
+files:
+  # DDEV already serves through PHP-FPM behind nginx (nginx-fpm) or Apache
+  # (apache-fpm), and the shared nginx / apache service recipes flip between them
+  # with the webserver_* tokens above. What DDEV does not do is give WooCommerce
+  # the memory it asks for.
+  - path: .ddev/php/keel-woocommerce.ini
+    verbatim: true
+    content: |
+      ; keel-generated. WordPress and WooCommerce development PHP settings for DDEV.
+      ; NOT the production set: that is docker/php/conf.d/10-wordpress.ini, written by the
+      ; Docker envs.
+      [PHP]
+      ; WooCommerce's server requirements, verbatim: "WordPress memory limit of
+      ; 256 MB or greater". WordPress core alone only attempts 40M for single site.
+      ; 512M locally because importing sample data and running the WooCommerce
+      ; status report both cost more than serving a page.
+      ; docs/infra/woocommerce.md, source 1.
+      memory_limit = 512M
+      max_execution_time = 300
+
+      ; Media uploads, and they are coupled to the web server: WordPress's own
+      ; nginx config notes "php max upload limit cannot be larger than this" on
+      ; client_max_body_size. DDEV's nginx default is generous enough for 64M.
+      upload_max_filesize = 64M
+      post_max_size = 64M
+
+      ; A WooCommerce variable product with many attributes posts more fields than
+      ; PHP's default 1000, and everything past the limit is discarded silently:
+      ; the product saves and the variations are gone.
+      max_input_vars = 3000
+
+      [opcache]
+      ; 1, and it would be 1 in production too for this stack. WordPress updates
+      ; itself: core, plugin and theme updates rewrite PHP files on the live
+      ; filesystem from the admin UI, so cached opcode goes stale on an update
+      ; nobody deployed. See the long note in docker/php/conf.d/10-wordpress.ini.
+      opcache.validate_timestamps = 1
+      opcache.revalidate_freq = 0
+      opcache.save_comments = 1
+install:
+  - "ddev config --project-type=wordpress --php-version=8.3 {{db.ddev_flag}}"
+  - "ddev start"
+smoke:
+  - "ddev describe"

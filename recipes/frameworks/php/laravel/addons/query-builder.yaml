@@ -1,0 +1,7 @@
+id: laravel-query-builder
+kind: addon
+label: Spatie Query Builder (API query params)
+appliesTo: [laravel]
+provides: [query-builder]
+install:
+  - "{{composer}} require spatie/laravel-query-builder"

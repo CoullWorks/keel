@@ -1,0 +1,17 @@
+id: git
+kind: extra
+label: Git (init + first commit)
+# Every project, not three of them.
+#
+# This lived under recipes/frameworks/php/laravel/extras/ and named laravel,
+# magento and woocommerce. `git init && git add -A && git commit` has nothing to
+# do with any of them, and the effect of the old list was that a Symfony, Python
+# or Node project scaffolded by keel was not a git repository at all.
+appliesTo: ["*"]
+priority: 100 # run last, so the commit captures the whole scaffold
+default: true
+updated: 2026-08-13
+install:
+  - "git init -q"
+  - "git add -A"
+  - "git commit -q -m 'Initial commit, scaffolded with keel'"

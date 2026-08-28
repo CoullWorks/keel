@@ -1,0 +1,26 @@
+id: django-redis-cache
+kind: addon
+label: django-redis (Redis cache backend)
+appliesTo: [django]
+provides: [redis-cache]
+install:
+  - "{{exec}} uv add django-redis"
+files:
+  - path: config/settings.d/60-redis-cache.py
+    content: |
+      # Django's default cache is per-process memory, which means every worker
+      # has its own and nothing is shared. Pointing it at the Redis this stack
+      # already runs is the difference between a cache and a decoration.
+      import os
+
+      CACHES = {
+          "default": {
+              "BACKEND": "django.core.cache.backends.redis.RedisCache",
+              "LOCATION": os.environ.get("REDIS_URL", "redis://redis:6379/1"),
+          }
+      }
+
+      # Sessions in the cache rather than the database: one fewer query per
+      # authenticated request.
+      SESSION_ENGINE = "django.contrib.sessions.backends.cache"
+      SESSION_CACHE_ALIAS = "default"

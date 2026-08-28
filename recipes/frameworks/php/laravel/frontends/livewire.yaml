@@ -1,0 +1,152 @@
+id: laravel-livewire
+kind: frontend
+label: Livewire (+ Volt), server-rendered, no SPA
+appliesTo: [laravel]
+requires: [php]
+provides: [frontend, livewire]
+priority: 60 # after backend + env + db + services
+# Livewire keeps everything in PHP/Blade (no separate SPA to host). Volt adds
+# single-file components. This is the lightest-weight Laravel front end.
+install:
+  - "{{start}}"
+  - "{{composer}} require livewire/livewire livewire/volt"
+  - "{{exec}} bash -lc 'php artisan volt:install'"
+  - "{{exec}} bash -lc 'npm install -D tailwindcss @tailwindcss/vite'"
+  - "{{restart}}"
+smoke:
+  - "{{exec}} bash -lc 'php artisan livewire:list >/dev/null 2>&1 || true'"
+  - "{{exec}} bash -lc 'npm run build'"
+files:
+  - path: resources/views/livewire/counter.blade.php
+    content: |
+      <?php
+      // A Volt single-file component (logic + view in one file).
+      use function Livewire\Volt\{state};
+
+      state(['count' => 0]);
+
+      $increment = fn () => $this->count++;
+      ?>
+
+      <div class="flex items-center gap-4">
+          <button
+              wire:click="increment"
+              class="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-emerald-400"
+          >
+              +
+          </button>
+          <span class="text-2xl font-bold tabular-nums">{{ $count }}</span>
+          <span class="text-sm text-slate-400">live from the server, no page reload</span>
+      </div>
+  - path: resources/views/welcome.blade.php
+    content: |
+      {{-- keel: a production-ready landing page that proves Livewire + Tailwind are wired. --}}
+      <!DOCTYPE html>
+      <html lang="en" class="h-full">
+      <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>{{ config('app.name', 'Laravel') }}</title>
+          @vite(['resources/css/app.css'])
+          @livewireStyles
+      </head>
+      <body class="h-full bg-slate-950 text-slate-100">
+          <main class="min-h-screen">
+              <div class="mx-auto max-w-3xl px-6 py-20">
+                  <span class="inline-flex items-center gap-2 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-300">
+                      <span class="size-1.5 rounded-full bg-emerald-400"></span> running
+                  </span>
+                  <h1 class="mt-6 text-4xl font-bold tracking-tight sm:text-5xl">
+                      Your Laravel app is running
+                  </h1>
+                  <p class="mt-4 text-lg text-slate-400">
+                      Built with Livewire, scaffolded by keel. Edit
+                      <code class="rounded bg-slate-800 px-1.5 py-0.5 text-sm">resources/views/welcome.blade.php</code>
+                      to make it yours.
+                  </p>
+                  <div class="mt-8 flex flex-wrap gap-3">
+                      <a
+                          href="https://coullworks.com/tools/keel"
+                          class="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-emerald-400"
+                      >
+                          keel docs
+                      </a>
+                      <a
+                          href="https://livewire.laravel.com"
+                          class="rounded-lg border border-slate-700 px-4 py-2 text-sm font-semibold hover:bg-slate-900"
+                      >
+                          Livewire docs
+                      </a>
+                  </div>
+
+                  {{-- The interactive Livewire component, rendered inline. --}}
+                  <div class="mt-10 rounded-xl border border-slate-800 bg-slate-900/50 p-5">
+                      <livewire:counter />
+                  </div>
+
+                  <div class="mt-12 grid gap-4 sm:grid-cols-3">
+                      <div class="rounded-xl border border-slate-800 bg-slate-900/50 p-5">
+                          <h2 class="font-semibold">Livewire</h2>
+                          <p class="mt-1 text-sm text-slate-400">Interactive components in pure PHP, no SPA to host.</p>
+                      </div>
+                      <div class="rounded-xl border border-slate-800 bg-slate-900/50 p-5">
+                          <h2 class="font-semibold">Blade + Eloquent</h2>
+                          <p class="mt-1 text-sm text-slate-400">Server-rendered views over Laravel's ORM.</p>
+                      </div>
+                      <div class="rounded-xl border border-slate-800 bg-slate-900/50 p-5">
+                          <h2 class="font-semibold">keel-managed</h2>
+                          <p class="mt-1 text-sm text-slate-400">keel run dev · test · build, one vocabulary.</p>
+                      </div>
+                  </div>
+              </div>
+          </main>
+          @livewireScripts
+      </body>
+      </html>
+  - path: resources/css/app.css
+    content: |
+      @import "tailwindcss";
+  - path: vite.config.js
+    content: |
+      import { defineConfig } from 'vite';
+      import laravel from 'laravel-vite-plugin';
+      import tailwindcss from '@tailwindcss/vite';
+
+      export default defineConfig({
+          plugins: [
+              laravel({ input: ['resources/css/app.css'], refresh: true }),
+              tailwindcss(),
+          ],
+      });
+  - path: FRONTEND-SETUP.md
+    content: |
+      # Frontend: Livewire + Volt (installed by keel)
+
+      Livewire renders on the server and updates over the wire, no separate SPA,
+      no CORS, no auth bridge. keel installed `livewire/livewire` + `livewire/volt`,
+      ran `volt:install`, wired Tailwind CSS (v4, via the Vite plugin), shipped a
+      Tailwind-styled landing page at `resources/views/welcome.blade.php`, and
+      dropped a sample Volt component at `resources/views/livewire/counter.blade.php`
+      that the landing page renders inline as `<livewire:counter />`.
+
+      ## See it
+      Run `npm run dev` (or the DDEV Vite daemon) and visit `/`, Laravel's default
+      route already returns `welcome`. Click the `+` button to see the Livewire
+      component update over the wire, then edit `resources/views/welcome.blade.php`
+      to make it yours.
+
+      ## Build more
+      Add components with `php artisan make:volt <name>` (or `make:livewire <Name>`
+      for class-based) and drop `<livewire:name />` into any Blade view. Point a
+      component at its own route in `routes/web.php`:
+
+      ```php
+      use Livewire\Volt\Volt;
+
+      Volt::route('/counter', 'counter');
+      ```
+
+      ## Styling
+      Tailwind is already wired (`resources/css/app.css` + `@vite` in the layout).
+      Pair with a component library (Flux UI ships for Livewire) by running `keel`
+      again.

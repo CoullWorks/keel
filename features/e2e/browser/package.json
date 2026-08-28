@@ -1,0 +1,12 @@
+{
+  "name": "keel-e2e-browser",
+  "private": true,
+  "description": "Drives a real browser against a booted stack: records the session, captures a screenshot, and fails on a page error.",
+  "scripts": {
+    "capture": "playwright test",
+    "install-browser": "playwright install chromium"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.49.1"
+  }
+}

@@ -1,0 +1,203 @@
+id: sveltekit-docker
+schema_version: 2
+kind: env
+env_family: compose
+label: Docker (compose)
+appliesTo: [sveltekit]
+provides: [env, docker]
+priority: -10
+# Written from docs/infra/sveltekit.md.
+#
+# adapter-node, pinned. Never adapter-auto in a container: it detects the host
+# platform and will pick something other than node the moment the build runs
+# somewhere it recognises.
+#
+# The runtime stage needs THREE things, not one. Unlike Nuxt's self-contained
+# .output, adapter-node emits a build/ that still resolves its dependencies at
+# run time, so it needs build/, package.json, and a production node_modules.
+# Copying only build/ produces a container that fails on its first require.
+#
+# SvelteKit is the only one of these frameworks that publishes a reverse-proxy
+# header contract, and it comes with an explicit spoofing warning: ORIGIN,
+# PROTOCOL_HEADER and HOST_HEADER. Setting ORIGIN is what stops SvelteKit
+# rejecting form posts as cross-origin when it is behind a proxy, and it must
+# match the public URL rather than the container's own address.
+#
+# PROTOCOL_HEADER and HOST_HEADER are NOT set here, and that is deliberate. The
+# vendor's warning is that they should only be set "if your server is behind a
+# trusted reverse proxy; otherwise, it'd be possible for clients to spoof these
+# headers", and this file cannot know whether one was chosen. They are set by
+# the nginx and Apache service recipes in infra/, which do know, and which also
+# make the proxy overwrite the headers so the values are trustworthy. Same for
+# ADDRESS_HEADER and XFF_DEPTH.
+commands:
+  start: "docker compose up -d --build"
+  # Where the project can be opened once the build finishes.
+  site_url: "http://localhost:{{http_port}}"
+  # How this environment tears itself down. Used when a build fails partway:
+  # keel removes the directory it created, and without this the containers,
+  # volumes and network it started stay behind holding a bind mount to a
+  # path that no longer exists. The next attempt then reuses that container
+  # and dies with "current working directory is outside of container mount
+  # namespace root".
+  down: "docker compose down -v --remove-orphans"
+  restart: "docker compose restart"
+  exec: "docker compose exec -T app"
+  create: "docker compose build"
+smoke:
+  - "docker compose ps"
+files:
+  - path: Dockerfile
+    content: |
+      # Two kinds of image, and the distinction is not cosmetic.
+      #
+      # `dev` is what compose builds. It carries no application code and no
+      # dependencies, because the project is bind-mounted from the host: `npm
+      # install` run through keel writes node_modules and package-lock.json to
+      # your working tree where they belong, and an edit is live without a
+      # rebuild.
+      #
+      # The stages after it build the production image, which copies the source
+      # in and installs without dev dependencies. Build it explicitly with
+      # `docker build --target runtime .`.
+      #
+      # Pointing compose at the production stage instead would look like it
+      # works and would not: with no bind mount, every file npm writes lands in
+      # a layer that the next `--build` discards.
+      FROM node:{{pin.node_version}}-slim AS dev
+      WORKDIR /app
+      # uid 1000 in the node image, which matches the default first user on a
+      # Linux or WSL host, so files created in the bind mount are owned by you
+      # rather than by root.
+      USER node
+      EXPOSE 3000
+      # -- --host 0.0.0.0: this framework's dev server binds to localhost by
+      # default, which inside a container means only the container itself can
+      # reach it. The proxy connects over the compose network, so it must
+      # listen on all interfaces.
+      # As above: wait for the dependencies keel installs into the bind mount.
+      # --host because this framework's dev server binds to localhost by
+      # default, which inside a container only the container itself can reach.
+      # --port 3000 because vite ignores PORT and would otherwise serve on its
+      # own default of 5173, which is not the port compose publishes, the
+      # healthcheck probes, or the proxy connects to.
+      CMD ["sh", "-c", "until [ -f node_modules/.package-lock.json ]; do echo \"waiting for dependencies\"; sleep 2; done; exec npm run dev -- --host 0.0.0.0 --port 3000"]
+
+      FROM node:{{pin.node_version}}-slim AS deps
+      WORKDIR /app
+      # package-lock.json* (glob) so a freshly scaffolded project, which has no
+      # lockfile yet, still builds. Commit the lock and npm ci becomes a real
+      # guarantee rather than a formality.
+      COPY package.json package-lock.json* ./
+      RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
+
+      FROM node:{{pin.node_version}}-slim AS build
+      WORKDIR /app
+      COPY --from=deps /app/node_modules ./node_modules
+      COPY . .
+      RUN npm run build
+
+      FROM node:{{pin.node_version}}-slim AS prune
+      WORKDIR /app
+      # package-lock.json* (glob) so a freshly scaffolded project, which has no
+      # lockfile yet, still builds. Commit the lock and npm ci becomes a real
+      # guarantee rather than a formality.
+      COPY package.json package-lock.json* ./
+      RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev; fi
+
+      FROM node:{{pin.node_version}}-slim AS runtime
+      ENV NODE_ENV=production
+      WORKDIR /app
+      # All three. build/ alone does not run.
+      COPY --from=prune --chown=node:node /app/node_modules ./node_modules
+      COPY --from=build --chown=node:node /app/build        ./build
+      COPY --chown=node:node package.json ./
+      USER node
+      EXPOSE 3000
+      CMD ["node", "build"]
+  - path: compose.yaml
+    content: |
+      services:
+        app:
+          build:
+            context: .
+            # dev, not a production stage. See the note at the top of the
+            # Dockerfile: without the bind mount below, anything installed into
+            # this container is discarded by the next build.
+            target: dev
+          volumes:
+            # The project itself, so npm writes node_modules and the lockfile to
+            # the host and an edit takes effect without a rebuild.
+            - .:/app
+          restart: unless-stopped
+          env_file:
+            # required: false so a fresh scaffold comes up before anyone has written
+            # a .env. The short form (env_file: [.env]) is a hard compose error when
+            # the file is absent, and these recipes ship .env.example, not .env.
+            - path: .env
+              required: false
+          environment:
+            HOST: "0.0.0.0"
+            PORT: "3000"
+            # Must be the public URL. Without it SvelteKit rejects form posts
+            # behind a proxy as cross-origin. See the note at the top. Change
+            # the default once a proxy is in front: it publishes on
+            # ${HTTP_PORT:-8080}, not 3000.
+            ORIGIN: "${PUBLIC_ORIGIN:-http://localhost:3000}"
+            # Read from .env so the nginx or Apache service recipe can set them,
+            # and empty otherwise. adapter-node treats an unset value as "do not
+            # derive the origin from forwarded headers", which is the safe
+            # default when nothing is guaranteed to overwrite them.
+            PROTOCOL_HEADER: "${PROTOCOL_HEADER:-}"
+            HOST_HEADER: "${HOST_HEADER:-}"
+            ADDRESS_HEADER: "${ADDRESS_HEADER:-}"
+            XFF_DEPTH: "${XFF_DEPTH:-}"
+            # adapter-node's own default, restated so the number is visible next
+            # to the proxy's client_max_body_size, which has to match it.
+            BODY_SIZE_LIMIT: "${BODY_SIZE_LIMIT:-512K}"
+          expose: ["3000"]
+          healthcheck:
+            test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+            interval: 15s
+            timeout: 5s
+            retries: 5
+            start_period: 20s
+          stop_grace_period: 30s
+
+        # The database, when one is selected.
+        #
+        # Every field that differs between Postgres, MySQL and MariaDB comes from
+        # the chosen db recipe as a var, so this one definition serves all three.
+        # Writing it per engine is what left the Node frameworks with no database
+        # service at all: the compose file only ever had `app`, the db recipe's
+        # overlay had no image, and compose does not auto-merge that overlay, so
+        # picking a database silently produced nothing.
+        db:
+          image: {{db.type}}:{{db.version}}
+          restart: unless-stopped
+          environment: {{db.compose_env}}
+          volumes:
+            - dbdata:{{db.data_dir}}
+            # The tuned configuration the db recipe wrote. Mounted here rather
+            # than left in an overlay file compose never reads.
+            - {{db.config_mount}}
+          {{db.command}}
+          healthcheck:
+            # The app waits on this, so it must answer only once the server
+            # really accepts connections rather than when the port opens.
+            test: {{db.healthcheck}}
+            interval: 10s
+            timeout: 5s
+            retries: 12
+            start_period: 30s
+
+      volumes:
+        dbdata:
+  - path: .dockerignore
+    content: |
+      node_modules
+      build
+      .svelte-kit
+      .git
+      .env*
+      npm-debug.log

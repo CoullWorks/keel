@@ -1,0 +1,34 @@
+id: django-sentry
+kind: addon
+label: Sentry SDK (error/perf monitoring)
+appliesTo: [django]
+provides: [sentry]
+install:
+  - '{{exec}} uv add "sentry-sdk[django]"'
+files:
+  - path: config/settings.d/20-sentry.py
+    content: |
+      # The SDK is inert until init() runs. Without this, the package is
+      # installed, no error is ever reported, and nothing says why.
+      #
+      # DSN comes from the environment: it identifies a project and does not
+      # belong in the repository. With no DSN set, init() is skipped entirely
+      # rather than started against nothing.
+      import os
+
+      _SENTRY_DSN = os.environ.get("SENTRY_DSN", "")
+      if _SENTRY_DSN:
+          import sentry_sdk
+
+          sentry_sdk.init(
+              dsn=_SENTRY_DSN,
+              # Percentage of requests traced. 0.1 rather than 1.0 because full
+              # tracing on a busy service is expensive and rarely what you want
+              # outside an investigation.
+              traces_sample_rate=float(os.environ.get("SENTRY_TRACES_SAMPLE_RATE", "0.1")),
+              # Off by default: it attaches request headers, cookies and user
+              # data to events, which is a privacy decision rather than a
+              # debugging convenience.
+              send_default_pii=False,
+              environment=os.environ.get("SENTRY_ENVIRONMENT", "development"),
+          )

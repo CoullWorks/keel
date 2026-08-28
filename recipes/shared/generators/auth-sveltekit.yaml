@@ -1,0 +1,11 @@
+# Auth as a level:stack generator (better-auth). Points at the sveltekit-better-auth
+# addon that already exists. Thin pointer, not a second copy of how auth installs.
+id: gen-auth-sveltekit
+kind: generator
+level: stack
+label: "Authentication (better-auth - email + password, sessions, protected routes)"
+appliesTo: [sveltekit]
+provides: [auth]
+apply: [sveltekit-better-auth]
+schema_version: 2
+updated: 2026-08-24

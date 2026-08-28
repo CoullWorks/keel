@@ -1,0 +1,12 @@
+id: symfony-phpunit
+schema_version: 2
+kind: addon
+label: PHPUnit + browser testing
+appliesTo: [symfony]
+provides: [tests]
+default: true
+updated: 2026-08-10
+install:
+  - "{{composer}} require --dev symfony/test-pack"
+smoke:
+  - "{{exec}} ./vendor/bin/phpunit --version"

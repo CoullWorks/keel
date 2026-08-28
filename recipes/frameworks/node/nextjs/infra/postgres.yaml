@@ -1,0 +1,26 @@
+id: postgres-nextjs
+schema_version: 2
+kind: config
+label: Next.js wiring for PostgreSQL
+# The framework shipped a hardcoded DATABASE_URL that only matched the compose
+# stack. Under DDEV or the native env it pointed at a host and port nothing was
+# listening on.
+when:
+  framework: nextjs
+  uses: postgres
+provision:
+  ddev:
+    patch:
+      - file: .env
+        set:
+          DATABASE_URL: "postgresql://{{db.user}}:{{db.password}}@{{db.host}}:{{db.port}}/{{db.name}}"
+  compose:
+    patch:
+      - file: .env
+        set:
+          DATABASE_URL: "postgresql://{{db.user}}:{{db.password}}@{{db.host}}:{{db.port}}/{{db.name}}"
+  local:
+    patch:
+      - file: .env
+        set:
+          DATABASE_URL: "postgresql://{{db.user}}:{{db.password}}@127.0.0.1:{{db.localPort}}/{{db.name}}"

@@ -1,0 +1,48 @@
+id: fastapi-local
+schema_version: 2
+kind: env
+env_family: local
+label: Local (native, no Docker)
+appliesTo: [fastapi]
+provides: [env]
+updated: 2026-08-12
+# Native: needs Python and uv on the host. No database is provisioned, so the
+# app falls back to the SQLite URL in its own settings.
+#
+# There is no Dockerfile here by definition, so the container requirements the
+# other envs carry have no place to live. What still applies on a bare host:
+#
+#   - The documented production command is `fastapi run --workers 4 main.py`, or
+#     equivalently `uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4`.
+#     There is no gunicorn in FastAPI's current documentation.
+#   - Never `--reload`: "consumes more resources and is unstable".
+#   - Bind uvicorn to 127.0.0.1 and let nginx or Apache own the public port.
+#   - Add --proxy-headers and --forwarded-allow-ips for the proxy in front, and
+#     --root-path if that proxy strips a path prefix.
+#   - Run migrations as a single process before the server starts: "you will
+#     want to have a single process to perform those previous steps, before
+#     starting the application".
+#   - Arrange start-on-boot and restart-on-crash yourself (systemd or similar).
+#     FastAPI lists both as deployment concepts the app server does not solve.
+#
+# Selecting nginx or apache writes the matching server block or VirtualHost to
+# .keel/, pointed at 127.0.0.1:8000. See docs/infra/fastapi.md.
+commands:
+  start: ""
+  # How this environment tears itself down. Used when a build fails partway:
+  # keel removes the directory it created, and without this the containers,
+  # volumes and network it started stay behind holding a bind mount to a
+  # path that no longer exists. The next attempt then reuses that container
+  # and dies with "current working directory is outside of container mount
+  # namespace root".
+  # The only thing keel starts under a native env is the local database, which
+  # the database recipe brings up from docker-compose.db.yml. Nothing else here
+  # runs in a container, so this is the whole teardown - and without it nothing
+  # ever stopped that container: `keel delete` left it running and holding the
+  # fixed host port, so the next project that wanted a database could not start.
+  # Guarded on the file so an environment built with no database is a no-op.
+  down: "[ -f docker-compose.db.yml ] && docker compose -f docker-compose.db.yml down -v || true"
+  restart: ""
+  exec: ""
+smoke:
+  - "uv run python -c 'import main'"

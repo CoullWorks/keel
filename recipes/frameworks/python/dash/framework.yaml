@@ -1,0 +1,82 @@
+id: dash
+kind: framework
+label: Plotly Dash (analytical web apps)
+lang: python
+provides: [python, dash]
+default: false
+updated: 2026-08-07
+pins:
+  dash: ">=2.18"
+  python: "3.13"
+# The Python line is a choice. This framework supports a range, so keel
+# recommends one and offers the rest. The Dockerfile reads the answer as
+# {{pin.python_version}}.
+versions:
+  python_version:
+    label: Python version
+    # The values are full patch versions, not 3.13: the Dockerfiles pin a
+    # patch on purpose, so that an unrelated rebuild cannot become an
+    # unreviewed Python upgrade. Choosing a line must not give that up.
+    recommended: "3.13.15"
+    options:
+      - value: "3.11.14"
+        label: "Python 3.11"
+        note: "security fixes to Oct 2027"
+      - value: "3.12.12"
+        label: "Python 3.12"
+        note: "security fixes to Oct 2028"
+      - value: "3.13.15"
+        label: "Python 3.13"
+        note: "current stable, widest wheel coverage"
+      - value: "3.14.2"
+        label: "Python 3.14"
+        note: "newest; check your C-extension deps have wheels"
+install:
+  # The stack has to be up before anything can exec into it. Under a native
+  # env {{start}} renders empty and the engine drops the no-op step.
+  - "{{start}}"
+  - "{{exec}} uv sync"
+  # The app started before its dependencies existed, so bring it back up now
+  # that they are installed. Renders empty, and is dropped, on a native env.
+  - "{{restart}}"
+smoke:
+  - "{{exec}} uv run python -c 'import dash'"
+files:
+  - path: pyproject.toml
+    content: |
+      [project]
+      name = "app"
+      version = "0.1.0"
+      requires-python = ">=3.11"
+      # gunicorn is a dependency, not an afterthought: Dash's own dev-tools page
+      # says "the app should be run with `gunicorn` on the `server = app.server`
+      # instance". Declaring it here rather than installing it in the Docker
+      # image means a later `uv sync`, which makes the environment match the
+      # lockfile exactly, cannot prune the very process that serves the app.
+      dependencies = ["dash>=2.18", "gunicorn>=26.0"]
+  - path: app.py
+    content: |
+      from dash import Dash, html
+
+      app = Dash(__name__)
+
+      app.layout = html.Div(
+          style={"fontFamily": "system-ui, sans-serif", "padding": "40px"},
+          children=[
+              html.H1("Plotly Dash"),
+              html.P("Scaffolded by keel. Edit app.py to get started."),
+          ],
+      )
+
+      if __name__ == "__main__":
+          app.run(debug=True)
+  - path: .gitignore
+    content: |
+      .venv/
+      __pycache__/
+      .env
+tasks:
+  test: "{{exec}} uv run pytest"
+  lint: "{{exec}} uv run ruff check ."
+  dev: "{{exec}} uv run python app.py"
+  run: "{{exec}} uv run python app.py"

@@ -1,0 +1,89 @@
+id: gradio
+kind: framework
+label: Gradio (ML demos / interfaces)
+lang: python
+provides: [python, gradio]
+default: false
+updated: 2026-08-07
+pins:
+  gradio: ">=5.0"
+  python: "3.13"
+# The Python line is a choice. This framework supports a range, so keel
+# recommends one and offers the rest. The Dockerfile reads the answer as
+# {{pin.python_version}}.
+versions:
+  python_version:
+    label: Python version
+    # The values are full patch versions, not 3.13: the Dockerfiles pin a
+    # patch on purpose, so that an unrelated rebuild cannot become an
+    # unreviewed Python upgrade. Choosing a line must not give that up.
+    recommended: "3.13.15"
+    options:
+      - value: "3.11.14"
+        label: "Python 3.11"
+        note: "security fixes to Oct 2027"
+      - value: "3.12.12"
+        label: "Python 3.12"
+        note: "security fixes to Oct 2028"
+      - value: "3.13.15"
+        label: "Python 3.13"
+        note: "current stable, widest wheel coverage"
+      - value: "3.14.2"
+        label: "Python 3.14"
+        note: "newest; check your C-extension deps have wheels"
+install:
+  # The stack has to be up before anything can exec into it. Under a native
+  # env {{start}} renders empty and the engine drops the no-op step.
+  - "{{start}}"
+  - "{{exec}} uv sync"
+  # The app started before its dependencies existed, so bring it back up now
+  # that they are installed. Renders empty, and is dropped, on a native env.
+  - "{{restart}}"
+smoke:
+  - "{{exec}} uv run python -c 'import gradio'"
+files:
+  - path: pyproject.toml
+    content: |
+      [project]
+      name = "app"
+      version = "0.1.0"
+      requires-python = ">=3.11"
+      dependencies = ["gradio>=5.0"]
+  - path: app.py
+    content: |
+      import gradio as gr
+
+
+      def greet(name: str) -> str:
+          return f"Hello, {name}!"
+
+
+      demo = gr.Interface(fn=greet, inputs="text", outputs="text", title="Gradio (keel)")
+
+      if __name__ == "__main__":
+          demo.launch()
+  # GRADIO_TEMP_DIR is /app/tmp, and the compose env mounts the gradio-tmp
+  # volume there - inside the project bind mount. Docker creates any missing
+  # parent of a mount point and creates it as root, so without this the first
+  # `up` leaves a root-owned tmp/ on the host: it shows in `git status`, the
+  # app cannot write to it, and removing your own project needs sudo.
+  #
+  # Writing this placeholder makes keel create the directory as the invoking
+  # user first, leaving only the mount itself to the daemon. Same fix as
+  # django's staticfiles/ and reflex's uploaded_files/.
+  - path: tmp/.gitkeep
+    content: |
+  - path: .gitignore
+    content: |
+      .venv/
+      __pycache__/
+      .env
+      .gradio/
+      # Uploads and the examples cache, written into the volume mounted here.
+      /tmp/*
+      !/tmp/.gitkeep
+tasks:
+  test: "{{exec}} uv run pytest"
+  lint: "{{exec}} uv run ruff check ."
+  dev: "{{exec}} uv run python app.py"
+  run: "{{exec}} uv run python app.py"

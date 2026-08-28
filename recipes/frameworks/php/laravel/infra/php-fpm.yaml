@@ -1,0 +1,660 @@
+id: laravel-php-fpm
+schema_version: 2
+kind: config
+label: Laravel production PHP-FPM image, php.ini and pool
+# The INDIVIDUAL PHP half for Laravel: the image, the opcache sizing, the FPM
+# pool and the worker/scheduler processes. The parts that are the same for every
+# PHP framework (expose_php, display_errors, session hardening, the FPM [global]
+# block) are not repeated here: they come from the shared
+# recipes/frameworks/php/shared/php-production.yaml baseline, which is read first.
+#
+# Also owns compose.yaml, because the application half of the stack (PHP,
+# database, cache, queue worker, scheduler) is identical whichever web server you
+# picked. The web server itself is added by the env recipe as a compose override:
+# recipes/frameworks/php/laravel/envs/docker.yaml (nginx) or docker-apache.yaml.
+#
+# Sourcing note, and it matters for reading the numbers below: Laravel publishes
+# NO php.ini, opcache, realpath cache or PHP-FPM values at all. See
+# docs/infra/laravel.md, Open questions 1 to 5. Every number here is therefore
+# keel's, derived from a PHP-manual default and a stated assumption, and each one
+# says so. Contrast Magento and Symfony, whose numbers are the vendor's.
+when:
+  framework: laravel
+  env: compose
+priority: -20
+updated: 2026-08-12
+# The PHP line chosen in the wizard, written where compose will read it.
+#
+# It goes through .env rather than into the Dockerfile because the Dockerfile is
+# verbatim: it is full of ${...} that must reach Docker untouched, so keel does
+# not template it. A build arg keeps the choice out of the image definition and
+# lets it be changed later without regenerating anything.
+patch:
+  - file: .env
+    set:
+      PHP_VERSION: "{{pin.php_version}}"
+      # Your uid and gid, so the dev image can give its application user the
+      # same ones. Without this, FPM writes as uid 33 into a tree you own and
+      # neither side can write the other's files. Committed to .env rather than
+      # compose.yaml because they are specific to this machine.
+      APP_UID: "{{uid}}"
+      APP_GID: "{{gid}}"
+files:
+  - path: Dockerfile
+    verbatim: true
+    content: |
+      # syntax=docker/dockerfile:1
+      # keel-generated. Production Laravel image: PHP-FPM, never `artisan serve`.
+      #
+      # `php artisan serve` is Laravel's development server. It is single-process,
+      # unsupervised and explicitly not a production server, so it appears nowhere
+      # in this file. Requests are served by PHP-FPM behind nginx or Apache.
+      #
+      # Four stages:
+      #   base    the runtime: PHP-FPM plus the extensions the deployment docs list
+      #   vendor  composer install, so Composer never ships in the runtime image
+      #   dev     what compose.yaml builds: root, no app code baked in, so a
+      #           bind-mounted project owned by your host user stays writable
+      #   prod    the deployable image: app + vendor baked in, running as www-data
+      #
+      # Build the deployable one explicitly:
+      #   docker build --target prod -t myapp:1.2.3 .
+
+      # Pinned to a PHP line AND a Debian release. `php:8.3-fpm` alone silently
+      # moves base distribution under you. Laravel 13 requires PHP >= 8.3
+      # (laravel.com/docs/13.x/deployment); Laravel 12 required >= 8.2.
+      # 8.4, not 8.3. Laravel 12 supports 8.2-8.4, and the current dev tooling
+      # has moved past 8.3: `composer require fruitcake/laravel-debugbar --dev`
+      # resolves symfony/console 8.1.x, which requires php >=8.4.1 and fails
+      # the whole install on an 8.3 image.
+      ARG PHP_VERSION=8.4
+      ARG PHP_BASE=php:${PHP_VERSION}-fpm-bookworm
+
+      # ---------------------------------------------------------------- base ---
+      FROM ${PHP_BASE} AS base
+
+      # Extensions. The deployment docs list Ctype, cURL, DOM, Fileinfo, Filter,
+      # Hash, Mbstring, OpenSSL, PCRE, PDO, Session, Tokenizer and XML as required;
+      # the ones below are the subset the official image does not already build in.
+      # pcntl and posix are in laravel/framework's `suggest` with the reason
+      # "Required to use all features of the queue worker": without them
+      # `queue:restart` and graceful shutdown do not work as documented, which is
+      # a silent failure on every deploy. docs/infra/laravel.md, source 3.
+      # libfcgi-bin supplies cgi-fcgi, which the healthcheck below speaks FastCGI with.
+      RUN set -eux; \
+          apt-get update; \
+          # git and unzip are for Composer, not for you. Without unzip it falls
+          # back to PHP's zip extension and says so on every install: "any UNIX
+          # permissions (e.g. executable) defined in the archives will be lost",
+          # which is how a vendor/bin binary arrives without its execute bit. git
+          # is what it uses for a package required from a VCS repository, which
+          # is every private or forked dependency.
+          apt-get install -y --no-install-recommends \
+            libicu-dev libzip-dev libpng-dev libjpeg62-turbo-dev libfreetype6-dev \
+            libfcgi-bin cron git unzip; \
+          docker-php-ext-configure gd --with-freetype --with-jpeg; \
+          docker-php-ext-install -j"$(nproc)" \
+            bcmath exif gd intl pcntl pdo_mysql zip; \
+          pecl install redis; \
+          docker-php-ext-enable redis; \
+          # purge WITHOUT --auto-remove. The -dev packages are safe to drop, but
+          # --auto-remove also takes the runtime libraries they pulled in - libzip4,
+          # libicu and friends - which the extensions compiled a line earlier are
+          # dynamically linked against. The image still builds; PHP then warns
+          # "Unable to load dynamic library" on every start and FPM exits 78.
+          apt-get purge -y libicu-dev libzip-dev libpng-dev \
+            libjpeg62-turbo-dev libfreetype6-dev; \
+          rm -rf /var/lib/apt/lists/* /tmp/pear
+
+      # opcache is compiled in but not enabled by the official image.
+      RUN docker-php-ext-enable opcache
+
+      # The stock pool is a 5-child development pool and it sorts AFTER our own
+      # file (www.conf > 10-...), so leaving it in place would silently win.
+      # docker.conf and zz-docker.conf stay: they set listen = 9000, clear_env,
+      # catch_workers_output and daemonize = no, all of which we want.
+      RUN rm -f /usr/local/etc/php-fpm.d/www.conf /usr/local/etc/php-fpm.d/www.conf.default
+
+      # Read in filename order: 00-php-production.ini (shared baseline) then
+      # 10-laravel.ini (this framework's opcache, memory and realpath values).
+      COPY docker/php/conf.d/ /usr/local/etc/php/conf.d/
+      # zz-global.conf ([global], shared) then zzz-laravel-pool.conf ([www], ours).
+      COPY docker/php/php-fpm.d/ /usr/local/etc/php-fpm.d/
+
+      # Baked in rather than bind-mounted: cron refuses a file in /etc/cron.d that
+      # is not owned by root, and a host bind mount carries your uid.
+      COPY docker/php/cron/laravel.cron /etc/cron.d/laravel
+      RUN chmod 0644 /etc/cron.d/laravel
+
+      WORKDIR /var/www/html
+
+      # php-fpm.8: SIGQUIT is the graceful stop; SIGTERM and SIGINT terminate
+      # immediately. Docker sends SIGTERM by default, so without this a rolling
+      # deploy kills in-flight requests. The official php:*-fpm image already sets
+      # it; restated because this file is also the reference for a VM deploy.
+      STOPSIGNAL SIGQUIT
+
+      # Speaks FastCGI to the pool's ping.path, so the check exercises the same
+      # path a real request takes rather than just proving the process exists.
+      HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=3 \
+        CMD SCRIPT_NAME=/fpm-ping SCRIPT_FILENAME=/fpm-ping REQUEST_METHOD=GET \
+            cgi-fcgi -bind -connect 127.0.0.1:9000 || exit 1
+
+      EXPOSE 9000
+      CMD ["php-fpm"]
+
+      # -------------------------------------------------------------- vendor ---
+      # Major-version pin, not `latest` and not a minor. A minor pin goes stale
+      # fast (Magento 2.4.9 already asks for Composer 2.10).
+      FROM composer:2 AS vendor
+      WORKDIR /app
+      # Copy the manifests first so the dependency layer is cached until they change.
+      COPY composer.json composer.lock ./
+      # --no-dev: "ensures that development packages are not installed in the
+      # production environment". --optimize-autoloader builds a class map.
+      # Both are the flags Laravel's deployment page publishes.
+      # --no-scripts because artisan is not present yet at this point in the build.
+      RUN composer install --no-dev --optimize-autoloader --no-scripts \
+            --no-interaction --prefer-dist --no-progress
+      COPY . .
+      RUN composer dump-autoload --no-dev --optimize --no-interaction
+
+      # ----------------------------------------------------------------- dev ---
+      # What compose.yaml builds. Deliberately NOT `USER www-data`: the
+      # project is bind-mounted from the host, where it is owned by your uid, and a
+      # uid-33 process could not write storage/ or bootstrap/cache. The prod stage
+      # below is the non-root one.
+      FROM base AS dev
+      # Development overrides, dev stage only: opcache timestamp validation back
+      # on, realpath cache short, errors on screen. Without the first of these,
+      # the bind-mounted code you are editing is not the code being run.
+      COPY docker/php/dev/95-dev.ini /usr/local/etc/php/conf.d/95-dev.ini
+      # The one thing the dev image must agree with the host about: who you are.
+      #
+      # The project is bind-mounted, so the tree inside the container is the tree
+      # in your editor, with your uid on every file. FPM's pool runs as www-data,
+      # which is uid 33 in this image, and uid 33 cannot write a file owned by
+      # uid 1000. The two then take turns losing: the application could not append
+      # to storage/logs/laravel.log, and once it had created that log itself,
+      # composer running as you could not append to it either. Both failures
+      # surface as something unrelated - a 500 with a tempnam() notice, or a
+      # composer post-install script exiting 1.
+      #
+      # So www-data adopts your uid here. This is what Laravel Sail does with
+      # WWWUSER, and it is confined to the dev stage: the prod image below has no
+      # bind mount and keeps the distribution's own uid 33.
+      #
+      # `|| true`: the numbers may already be taken in the base image, and on a
+      # rootless or Docker Desktop setup the host uid may already map to the
+      # container user, in which case there is nothing to change and nothing
+      # wrong. The chown afterwards catches the files the image itself created.
+      ARG APP_UID=1000
+      ARG APP_GID=1000
+      RUN if [ "$APP_UID" != "33" ]; then \
+            groupmod -o -g "$APP_GID" www-data || true; \
+            usermod -o -u "$APP_UID" -g "$APP_GID" www-data || true; \
+            chown -R "$APP_UID:$APP_GID" /var/www/html || true; \
+          fi
+      COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
+      ENV COMPOSER_ALLOW_SUPERUSER=1
+
+      # ---------------------------------------------------------------- prod ---
+      FROM base AS prod
+      COPY --from=vendor /app /var/www/html
+      # Config, events, routes and views cached in one command, exactly as the
+      # deployment page documents. Note the documented consequence: once the config
+      # is cached the .env file is not loaded and env() outside config/ returns null.
+      # Run before the chown, or the caches it writes are left owned by root.
+      RUN php artisan optimize
+      # storage/ and bootstrap/cache are the only two paths Laravel's deployment
+      # page says must be writable by the web server process owner. Everything else
+      # stays owned by root and read-only to the runtime user, so a compromised
+      # request cannot rewrite the application's own code.
+      RUN chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cache
+      USER www-data
+
+  - path: .dockerignore
+    verbatim: true
+    content: |
+      # keel-generated. Keeps host build artefacts and secrets out of the image
+      # and out of the build context (a large context slows every build).
+      .git
+      .gitignore
+      .github
+      .keel
+      .idea
+      .vscode
+      .env
+      .env.*
+      !.env.example
+      auth.json
+      docker-compose*.yml
+      Dockerfile
+      .dockerignore
+      # Rebuilt inside the image by the vendor stage.
+      vendor
+      node_modules
+      # Runtime state. Copying a host cache into the image is how a stale
+      # config:cache from someone's laptop ends up in production.
+      storage/framework/cache/data
+      storage/framework/sessions
+      storage/framework/views
+      storage/logs
+      bootstrap/cache/*.php
+      tests
+      phpunit.xml
+      README.md
+
+  - path: docker/php/dev/95-dev.ini
+    verbatim: true
+    content: |
+      ; keel-generated, and copied ONLY into the dev stage of the Dockerfile.
+      ;
+      ; The production baseline sets opcache.validate_timestamps = 0, which is
+      ; correct for an immutable image: the code cannot change under a running
+      ; container, so checking every file on every request is pure overhead.
+      ;
+      ; The dev stage bind-mounts your working tree, where the code changes
+      ; constantly, and there the same setting is a trap. PHP keeps serving the
+      ; version of every file it compiled when the container started: you edit a
+      ; controller, reload, and see the old page. Nothing errors and nothing in
+      ; the logs mentions it. It also hides new code entirely - a package
+      ; installed after boot stays invisible until the container is restarted,
+      ; which is how a freshly installed Telescope answered 404 on a route that
+      ; `artisan route:list` could see perfectly well.
+      ;
+      ; Read last (95- sorts after 00- and 10-), so it overrides the baseline.
+      opcache.validate_timestamps = 1
+      ; Check on every request. The stat() is cheap next to being served code
+      ; that is one edit out of date.
+      opcache.revalidate_freq = 0
+
+      ; The realpath cache has exactly the same problem: a stale entry means a
+      ; file you just created is reported as missing. 
+      realpath_cache_ttl = 10
+
+      ; Development display settings. The production baseline sends errors to the
+      ; log and shows the user nothing, which is right in production and useless
+      ; on your own machine.
+      display_errors = On
+      display_startup_errors = On
+      error_reporting = E_ALL
+  - path: docker/php/conf.d/10-laravel.ini
+    verbatim: true
+    content: |
+      ; keel-generated. Laravel's own PHP values.
+      ; Read after docker/php/conf.d/00-php-production.ini (the shared baseline), so
+      ; anything set here wins.
+      ;
+      ; READ THIS FIRST: Laravel publishes no php.ini or opcache values at all.
+      ; docs/infra/laravel.md, Open questions 1 to 5, records that memory_limit,
+      ; max_execution_time, every opcache.* directive and realpath_cache_* are
+      ; absent from the deployment, installation and Octane documentation. So
+      ; unlike the Magento and Symfony files beside this one, the numbers below are
+      ; keel's choices. Each says what it was derived from and how to check it.
+
+      [PHP]
+      ; php.ini-production ships 128M. Raised because Laravel's own console work
+      ; (queue jobs handling collections, Excel exports, image manipulation) is
+      ; routinely what exceeds it, and a fatal "Allowed memory size exhausted" in a
+      ; queue worker fails the job rather than the request. keel's choice, not
+      ; Laravel's: there is no vendor value.
+      memory_limit = 256M
+
+      ; php.ini-production ships 30, and it is a reasonable web ceiling: a request
+      ; taking longer than 30s belongs on the queue. It happens to match Octane's
+      ; own documented config default ('max_execution_time' => 30 in
+      ; config/octane.php), which is the nearest thing Laravel publishes.
+      ; The FPM pool's request_terminate_timeout is the backstop for when this
+      ; directive cannot stop the script (a blocked socket read, for instance).
+      max_execution_time = 30
+
+      ; PHP's default is 4096K / 120. Symfony is the only PHP framework that
+      ; publishes realpath values and it asks for "at least" 4096K with a 600s TTL
+      ; for "applications that open many PHP files". A Laravel app opens a
+      ; comparable number, so keel uses the same shape here. Symfony's caveat
+      ; applies to Laravel too: PHP disables the realpath cache entirely when
+      ; open_basedir is set. docs/infra/symfony.md, source 4.
+      realpath_cache_size = 4096K
+      realpath_cache_ttl = 600
+
+      [opcache]
+      ; PHP's default is 128 (php.net/manual/en/opcache.configuration.php). 192
+      ; leaves headroom for a Laravel skeleton plus a typical vendor tree without
+      ; reserving memory a small container does not have. Check it rather than
+      ; trusting it: opcache_get_status()['memory_usage']['free_memory'] should not
+      ; be trending towards zero, and ['opcache_statistics']['oom_restarts'] must
+      ; stay at 0. If it climbs, raise this, do not raise max_wasted_percentage.
+      opcache.memory_consumption = 192
+
+      ; PHP's default is 8MB. Symfony's performance page explains why 8 is too low
+      ; for a framework "which uses many fully-qualified class names", and that is
+      ; equally true of Laravel with its facades and service container bindings.
+      ; 16 rather than Symfony's 32 because Laravel's class graph is smaller.
+      opcache.interned_strings_buffer = 16
+
+      ; PHP's default is 10000, which a Laravel app plus vendor exceeds. The manual
+      ; rounds this to the first value in
+      ; {223, 463, 983, 1979, 3907, 7963, 16229, 32531, 65407, ...} that is >= the
+      ; configured number, so setting the prime directly is honest about what PHP
+      ; will actually use. 16229 fits an app of roughly 10k files with headroom.
+      ; Check with opcache_get_status()['opcache_statistics']: num_cached_keys must
+      ; stay well below max_cached_keys, or files are being evicted every request.
+      opcache.max_accelerated_files = 16229
+
+      ; No timestamp check per request. This is the whole point of an immutable
+      ; image: the code cannot change under a running container, so checking is
+      ; pure overhead. The corollary is that a deploy MUST replace the container
+      ; (or restart FPM). Editing files inside a running container will appear to
+      ; do nothing. If you bind-mount code for development, set this back to 1.
+      opcache.validate_timestamps = 0
+
+      ; PHP's default, restated deliberately. Discarding doc comments "may break
+      ; applications and frameworks that rely on comment parsing for annotations,
+      ; including Doctrine, Zend Framework 2 and PHPUnit"
+      ; (php.net/manual/en/opcache.configuration.php). Laravel core uses attributes
+      ; rather than annotations, but packages in a real app do not all agree.
+      ; The saving is not worth the class of bug it buys.
+      opcache.save_comments = 1
+
+      ; No opcache.preload here on purpose. Preloading needs a file that includes
+      ; the classes to warm, and Laravel core ships no config/preload.php: it is an
+      ; Octane and FrankenPHP concern, where the framework stays resident between
+      ; requests anyway. docs/infra/laravel.md.
+
+  - path: docker/php/php-fpm.d/zzz-laravel-pool.conf
+    verbatim: true
+    content: |
+      ; keel-generated. Laravel's PHP-FPM pool.
+      ; Read after docker/php/php-fpm.d/zz-global.conf (the shared [global] block) and
+      ; after the official image's docker.conf and zz-docker.conf, so this file is
+      ; the authority on every [www] directive it sets.
+      ;
+      ; Laravel publishes no pool guidance at all: no pm mode, no pm.max_children,
+      ; no pm.max_requests, no request_terminate_timeout. docs/infra/laravel.md,
+      ; Open question 5. The arithmetic below is keel's, with its assumptions
+      ; written down so you can redo it with your own measurements.
+
+      [www]
+      ; Commented out because the prod image runs the whole container as www-data
+      ; (Dockerfile, prod stage), and when FPM is not started by root it ignores
+      ; these with a NOTICE. Uncomment both if you run the master as root instead,
+      ; which is what you want when one FPM serves several pools as different users.
+      user = www-data
+      group = www-data
+
+      listen = 9000
+      ; listen.allowed_clients is deliberately not set, and 127.0.0.1 is the
+      ; wrong value for it here.
+      ;
+      ; It filters on the peer address, and in compose the peer is the web
+      ; server in its own container, arriving from an address on the bridge
+      ; network that Docker assigns at run time. 127.0.0.1 is the loopback
+      ; inside THIS container, so nothing that is not this container can match
+      ; it: FPM accepted every connection from nginx and reset it immediately,
+      ; and the site answered 502 Bad Gateway on every request.
+      ;
+      ; Unset means any peer, and the isolation comes from the network instead:
+      ; port 9000 is published to no one, so the only things that can reach it
+      ; are the services on the same compose network. On a VM where FPM and the
+      ; web server share a host, use a unix socket with listen.owner and
+      ; listen.group, which is a stronger boundary than an address list.
+
+      ; dynamic keeps spare workers warm for traffic that arrives in bursts, which
+      ; is what a web front end sees. ondemand trades a cold start for idle memory
+      ; and suits a low-traffic admin box; static suits a node whose only job is
+      ; serving one app at a known concurrency.
+      ; php.net/manual/en/install.fpm.configuration.php
+      pm = dynamic
+
+      ; pm.max_children is "the limit on the number of simultaneous requests that
+      ; will be served" (PHP manual). The arithmetic:
+      ;
+      ;   pm.max_children = RAM available to PHP / peak RSS of one worker
+      ;
+      ; Worked here as 2048 MB (a 2 GB container with room left for the OS) divided
+      ; by 64 MB, the peak resident size assumed for a Laravel worker. 2048 / 64 = 32.
+      ;
+      ; REPLACE 64 WITH YOUR OWN MEASUREMENT before this matters. Under load:
+      ;   ps -o rss= -C php-fpm | sort -n | tail -5
+      ; gives the real peak in kB. Over-setting this is worse than under-setting:
+      ; the box swaps and every request slows, rather than a few requests queueing.
+      pm.max_children = 32
+
+      ; dynamic requires all three. start_servers is a quarter of the ceiling so a
+      ; cold container is useful immediately without reserving the full 2 GB.
+      pm.start_servers = 8
+      pm.min_spare_servers = 4
+      pm.max_spare_servers = 12
+
+      ; "The number of requests each child process should execute before
+      ; respawning. This can be useful to work around memory leaks in 3rd party
+      ; libraries" (PHP manual). The manual's default is 0, meaning never respawn,
+      ; so a leak in any dependency grows until the OOM killer intervenes.
+      ; 500 is Octane's documented worker-recycling default ("workers are gracefully
+      ; restarted after 500 requests"), which is the only figure Laravel publishes
+      ; about how long one of its workers should live. docs/infra/laravel.md.
+      pm.max_requests = 500
+
+      ; The backstop for when max_execution_time (30s, docker/php/conf.d/10-laravel.ini)
+      ; does not stop the script, which is exactly what the manual says this is
+      ; for. Set above max_execution_time so PHP's own error fires first and is
+      ; logged with a stack trace, rather than the worker being killed silently.
+      request_terminate_timeout = 60s
+      ; PHP 7.3+. Without it the timeout stops applying after
+      ; fastcgi_finish_request(), so a slow after-response task runs unbounded.
+      request_terminate_timeout_track_finished = yes
+
+      ; Dumps a PHP backtrace for any request slower than this. Off by default,
+      ; which is why nobody knows which endpoint is slow until a user complains.
+      request_slowlog_timeout = 10s
+      slowlog = /proc/self/fd/2
+
+      ; Monitoring endpoints. The web server configs keel ships restrict both to
+      ; the local network: /fpm-status lists active workers, queue depth and the
+      ; slowest request, which is not public information. ping.path is what the
+      ; Dockerfile HEALTHCHECK calls over FastCGI.
+      pm.status_path = /fpm-status
+      ping.path = /fpm-ping
+      ping.response = pong
+
+      ; Only ever hand .php to the interpreter. Belt and braces next to the web
+      ; server rules: it is the last line of defence if a location block is
+      ; mis-edited and an uploaded file reaches FPM.
+      security.limit_extensions = .php
+
+  - path: docker/php/supervisor/laravel-worker.conf
+    verbatim: true
+    content: |
+      ; keel-generated. Laravel queue worker under Supervisor, for a VM or bare
+      ; metal deploy. The compose stack runs the same command as its own `queue`
+      ; container instead, because there the orchestrator IS the process manager.
+      ;
+      ; This is Laravel's published block (docs/infra/laravel.md, source 10) with
+      ; the paths changed. Install to /etc/supervisor/conf.d/laravel-worker.conf,
+      ; then: supervisorctl reread && supervisorctl update &&
+      ; supervisorctl start "laravel-worker:*"
+
+      [program:laravel-worker]
+      process_name=%(program_name)s_%(process_num)02d
+      command=php /var/www/html/artisan queue:work --sleep=3 --tries=3 --max-time=3600
+      autostart=true
+      autorestart=true
+      ; stopasgroup and killasgroup make Supervisor signal the whole process group.
+      ; Without them a job that shelled out leaves the child orphaned and running.
+      stopasgroup=true
+      killasgroup=true
+      user=www-data
+      numprocs=8
+      redirect_stderr=true
+      stdout_logfile=/var/www/html/storage/logs/worker.log
+      ; 3600, NOT 60. Laravel's own warning, verbatim: "You should ensure that the
+      ; value of stopwaitsecs is greater than the number of seconds consumed by
+      ; your longest running job. Otherwise, Supervisor may kill the job before it
+      ; is finished processing." A 60 here silently truncates any job over a
+      ; minute, mid-write, on every single deploy. Raise it if your longest job is
+      ; longer than an hour.
+      stopwaitsecs=3600
+
+  - path: docker/php/cron/laravel.cron
+    verbatim: true
+    content: |
+      # keel-generated. The scheduler crontab. Laravel needs exactly ONE entry no
+      # matter how many scheduled tasks the application defines: the schedule
+      # itself lives in PHP and this line only wakes it up.
+      # docs/infra/laravel.md, source 9.
+      #
+      # Mounted into the `scheduler` container, which runs `cron -f`.
+      * * * * * www-data cd /var/www/html && php artisan schedule:run >> /proc/1/fd/1 2>&1
+      # A crontab file must end with a newline or cron ignores the last line.
+
+  - path: compose.yaml
+    verbatim: true
+    content: |
+      # keel-generated. Laravel application stack: PHP-FPM, MySQL, Redis, a queue
+      # worker and the scheduler.
+      #
+      # There is no web server in this file on purpose. That is the one part of
+      # the stack you choose, and choosing it (the nginx or apache service recipe)
+      # writes compose.override.yaml with the container and this framework's own
+      # server block. Compose merges compose.override.yaml over compose.yaml with
+      # no extra flags.
+      #
+      # This is a local stack: it bind-mounts your working tree and builds the
+      # Dockerfile's `dev` target. The deployable image is `--target prod`.
+      services:
+        php:
+          build:
+            context: .
+            target: dev
+            args:
+              # The PHP line chosen in the wizard, written to .env by this
+              # recipe. The Dockerfile carries the same default, so a checkout
+              # without a .env still builds.
+              PHP_VERSION: "${PHP_VERSION:-8.4}"
+              APP_UID: "${APP_UID:-1000}"
+              APP_GID: "${APP_GID:-1000}"
+          volumes: [".:/var/www/html"]
+          # expose, never ports. A PHP-FPM pool speaks FastCGI, not HTTP, and it
+          # will execute whatever script path it is handed with no authentication
+          # of any kind. Publishing 9000 to the host is remote code execution
+          # waiting for a port scan.
+          expose: ["9000"]
+          environment:
+            DB_CONNECTION: mysql
+            DB_HOST: db
+            DB_PORT: "3306"
+            DB_DATABASE: app
+            DB_USERNAME: app
+            DB_PASSWORD: secret
+            REDIS_HOST: redis
+          depends_on:
+            db: { condition: service_healthy }
+            redis: { condition: service_started }
+
+        queue:
+          build:
+            context: .
+            target: dev
+            args:
+              # Same three as the php service: without them this service builds a
+              # second, near-identical image, and one of them has the wrong uid.
+              PHP_VERSION: "${PHP_VERSION:-8.4}"
+              APP_UID: "${APP_UID:-1000}"
+              APP_GID: "${APP_GID:-1000}"
+          volumes: [".:/var/www/html"]
+          # The same recycling flags as the Supervisor block in
+          # docker/php/supervisor/laravel-worker.conf. --max-time=3600 retires the
+          # worker every hour so a leaked reference cannot accumulate for days.
+          # Runs as you, like every other process that touches the bind mount.
+          #
+          # Without this the worker boots Laravel as root, and the first thing it
+          # logs creates storage/logs/laravel.log owned by root. Everything else
+          # in the stack runs as your uid by then, so nothing can append to that
+          # file afterwards: `artisan telescope:install` died on it, reporting a
+          # stream it could not open rather than anything to do with Telescope.
+          #
+          # php artisan needs no privileges. cron, in the scheduler service
+          # below, genuinely does - which is why that one stays root and names
+          # the user in its crontab line instead.
+          user: "${APP_UID:-1000}:${APP_GID:-1000}"
+          command: ["php", "artisan", "queue:work", "--sleep=3", "--tries=3", "--max-time=3600"]
+          # The image's HEALTHCHECK probes PHP-FPM on port 9000. This container
+          # runs `artisan queue:work`, not FPM, so that probe can never succeed
+          # and the container sits permanently "unhealthy" while working
+          # perfectly. Worse, anything waiting on `condition: service_healthy`
+          # for it would wait forever. An inherited check that cannot pass is
+          # worse than no check: `restart: unless-stopped` already covers the
+          # process dying.
+          healthcheck:
+            disable: true
+          # SIGTERM reaches artisan directly, and the worker finishes its current
+          # job before exiting. Give it longer than your longest job, for the same
+          # reason Supervisor's stopwaitsecs is 3600.
+          stop_grace_period: 3600s
+          environment:
+            DB_CONNECTION: mysql
+            DB_HOST: db
+            DB_PORT: "3306"
+            DB_DATABASE: app
+            DB_USERNAME: app
+            DB_PASSWORD: secret
+            REDIS_HOST: redis
+          depends_on:
+            db: { condition: service_healthy }
+            redis: { condition: service_started }
+
+        scheduler:
+          build:
+            context: .
+            target: dev
+            args:
+              # Same three as the php service: without them this service builds a
+              # second, near-identical image, and one of them has the wrong uid.
+              PHP_VERSION: "${PHP_VERSION:-8.4}"
+              APP_UID: "${APP_UID:-1000}"
+              APP_GID: "${APP_GID:-1000}"
+          volumes: [".:/var/www/html"]
+          # /etc/cron.d/laravel is baked into the image (see the Dockerfile): cron
+          # ignores a crontab in that directory unless root owns it.
+          command: ["cron", "-f", "-L", "2"]
+          # As with the queue container: the image's HEALTHCHECK probes PHP-FPM,
+          # and this one runs cron. An inherited probe that can never pass makes
+          # a working container look broken.
+          healthcheck:
+            disable: true
+          depends_on:
+            db: { condition: service_healthy }
+
+        db:
+          # 8.4 is the current MySQL LTS. 8.0 reached end of life in April 2026
+          # (WordPress's hosting handbook tracks the dates); Laravel's own floor is
+          # only MySQL 5.7+, so the LTS line is keel's choice, not a constraint.
+          image: mysql:8.4
+          environment:
+            MYSQL_DATABASE: app
+            MYSQL_USER: app
+            MYSQL_PASSWORD: secret
+            MYSQL_ROOT_PASSWORD: secret
+          # The tuned configuration the db recipe writes. Mounted here because
+          # this compose file is verbatim and cannot substitute a var there;
+          # leaving it out means the file is generated and never read.
+          volumes:
+            - db:/var/lib/mysql
+            - ./.keel/mysql/my.cnf:/etc/mysql/conf.d/keel-mysql.cnf:ro
+          # depends_on: service_healthy above waits for this, so the first
+          # `artisan migrate` does not race the server's own bootstrap.
+          healthcheck:
+            test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-psecret"]
+            interval: 5s
+            timeout: 5s
+            retries: 20
+
+        redis:
+          image: redis:7.4-alpine
+          command: ["redis-server", "--appendonly", "yes"]
+          volumes: [redis:/data]
+
+      volumes:
+        db:
+        redis:

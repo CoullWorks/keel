@@ -1,0 +1,115 @@
+id: nginx-node-proxy
+schema_version: 2
+kind: service
+label: NGINX reverse proxy (optional, TLS/CDN origin in front of the Node app)
+category: Web
+# The OPTIONAL half of Node ingress, and deliberately not the same thing as the
+# PHP "web server" step. A self-serving Node app is already reachable through
+# PM2 (or `node`/`next start`) on its own port; it does not need a front
+# controller. What a reverse proxy buys is a single ingress in front of a PM2
+# cluster, TLS termination, a place to cap request bodies and set security
+# headers, and a clean CDN origin. None of that is required to run, so this is a
+# multi-select Service, not the single-select Web server answer.
+#
+# It provides `reverse-proxy`, NOT `webserver`, on purpose: IsWebServer() stays
+# false, so it does not land in the single-select Web server step and cannot be
+# mistaken for a front controller that would try to mount a language handler.
+appliesTo: [express, fastify, hono, nestjs, adonisjs, nextjs, nuxt, sveltekit, astro]
+provides: [reverse-proxy, nginx-proxy]
+default: false
+updated: 2026-08-22
+vars:
+  nginx.version: "1.30"
+files:
+  - path: docker/nginx/conf.d/app.conf
+    content: |
+      # keel-generated: NGINX as a REVERSE PROXY in front of the Node app.
+      #
+      # This proxies to the app's own listener; it does not serve the app
+      # itself. That is the whole difference from the PHP front-controller
+      # nginx: there is no fastcgi_pass, no root, no try_files, the Node
+      # process is the origin and nginx just forwards to it.
+      #
+      # Sources, fetched 2026-08-22:
+      #   [1] ngx_http_proxy_module
+      #       https://nginx.org/en/docs/http/ngx_http_proxy_module.html
+      #   [2] WebSocket proxying
+      #       https://nginx.org/en/docs/http/websocket.html
+      server {
+        listen 80;
+        server_name _;
+
+        # The proxy is the edge, so it is the right place to cap the body. Pick
+        # a number the app agrees with; 1m is a safe scaffold default. Raise it
+        # here AND in the app if you accept larger uploads, or nginx rejects
+        # first with a 413 the app never sees.
+        client_max_body_size 1m;
+
+        location / {
+          proxy_pass http://app:3000;
+
+          proxy_set_header Host              $host;
+          proxy_set_header X-Real-IP         $remote_addr;
+          # Append the real peer to whatever arrived; the app trusts hops from
+          # the right, so a client-supplied prefix is discarded before it can
+          # become the client IP. Switch to $remote_addr if every real client is
+          # itself inside the trusted ranges. [1]
+          proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header X-Forwarded-Host  $host;
+
+          # WebSocket / HMR upgrade. Harmless for plain HTTP, required for
+          # anything that upgrades. [2]
+          proxy_http_version 1.1;
+          proxy_set_header Upgrade    $http_upgrade;
+          proxy_set_header Connection "upgrade";
+        }
+
+        # Answered by nginx so the proxy's liveness does not depend on the app.
+        location = /healthz {
+          access_log off;
+          add_header Content-Type text/plain;
+          return 200 "ok\n";
+        }
+      }
+  - path: NGINX-PROXY.md
+    content: |
+      # NGINX reverse proxy (scaffolded by keel)
+
+      This is a **reverse proxy**, not a front controller. The Node app serves
+      itself (through PM2 or `node`/`next start`); nginx sits in front of it for
+      TLS, a single ingress across a PM2 cluster, body-size limits, security
+      headers, and as a CDN origin.
+
+      Change the upstream to `http://127.0.0.1:3000` under a native env (there is
+      no `app` container host). If the app runs a PM2 cluster on one host, PM2
+      already load-balances across workers on that port, so a single `proxy_pass`
+      is enough; add an `upstream {}` block only when you fan across hosts.
+provision:
+  compose:
+    files:
+      - path: compose.override.yaml
+        content: |
+          # Compose merges compose.override.yaml over compose.yaml with no extra
+          # flags, so the app service written by the env recipe is untouched.
+          services:
+            nginx:
+              image: nginx:1.30-alpine
+              restart: unless-stopped
+              depends_on:
+                app:
+                  condition: service_healthy
+              ports:
+                - "${HTTP_PORT:-8080}:80"
+              volumes:
+                - ./docker/nginx/conf.d:/etc/nginx/conf.d:ro
+              healthcheck:
+                test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+                interval: 15s
+                timeout: 5s
+                retries: 5
+                start_period: 10s
+              stop_grace_period: 30s
+  # Native env: no container. The server block above still applies once you
+  # point proxy_pass at http://127.0.0.1:3000 and run nginx on the host.
+  local: {}

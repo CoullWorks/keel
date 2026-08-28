@@ -1,0 +1,253 @@
+id: elasticsearch
+schema_version: 2
+kind: service
+label: Elasticsearch 8 (search engine, tuned)
+category: Search
+appliesTo: [laravel, django, magento, magento-mageos]
+provides: [elasticsearch, search]
+conflicts: [opensearch] # one search engine per project: both bind 9200
+updated: 2026-08-12
+vars:
+  # 8.x, not 9.x, and the reason is Magento. Adobe lists Elasticsearch 8 for
+  # 2.4.8-p5 and Elasticsearch 7.17/8 for 2.4.7-p10, and lists NO Elasticsearch
+  # at all for 2.4.9, which takes OpenSearch 3 only. Elasticsearch 7.17 reached
+  # end of support on 15 January 2026. keel pins Magento 2.4.8, so 8 is the only
+  # Elasticsearch line that works, and a Magento 2.4.9 upgrade means moving to
+  # opensearch.yaml rather than bumping this number.
+  # https://experienceleague.adobe.com/en/docs/commerce-operations/installation-guide/system-requirements
+  # and docs/infra/magento.md
+  #
+  # For a non-Magento project (Laravel Scout, django-elasticsearch-dsl) 9.x is
+  # the current line and this var is the only thing to change.
+  elasticsearch.version: "8.19.19"
+  elasticsearch.host: elasticsearch
+  elasticsearch.port: "9200"
+  elasticsearch.heap: 1g
+files:
+  - path: .keel/elasticsearch/elasticsearch.yml
+    content: |
+      # keel-generated: Elasticsearch node configuration.
+      #
+      # Sources, fetched 2026-08-12:
+      #   [1] Install Elasticsearch with Docker (production notes)
+      #       https://www.elastic.co/docs/deploy-manage/deploy/self-managed/install-elasticsearch-docker-prod
+      #   [2] Configure Elasticsearch with Docker
+      #       https://www.elastic.co/docs/deploy-manage/deploy/self-managed/install-elasticsearch-docker-configure
+      #   [3] JVM settings
+      #       https://www.elastic.co/docs/reference/elasticsearch/jvm-settings
+      #   [4] Security settings
+      #       https://www.elastic.co/docs/reference/elasticsearch/configuration-reference/security-settings
+      #   [5] Set up minimal security
+      #       https://www.elastic.co/docs/deploy-manage/security/set-up-minimal-security
+
+      cluster.name: keel-search
+      node.name: elasticsearch-node1
+
+      # A single node forms its own cluster instead of waiting for peers it will
+      # never find. Without this the node stays unavailable and the container
+      # looks hung rather than misconfigured.
+      discovery.type: single-node
+
+      # Required when this file is bind-mounted: "A bind-mounted
+      # elasticsearch.yml must include the network.host: 0.0.0.0 setting" [2].
+      # The image's built-in config sets it; replacing the file drops it, and the
+      # node then listens on localhost inside its own container only.
+      network.host: 0.0.0.0
+
+      # Keeps the heap out of swap. It needs the container's memlock ulimit set to
+      # unlimited as well: "If you opt for the bootstrap.memory_lock: true
+      # approach, you also need to define the memlock: true ulimit" [1], and
+      # "Swapping needs to be disabled for performance and node stability" [1] on
+      # the host.
+      bootstrap.memory_lock: true
+
+      # SECURITY. Elasticsearch 8 turns security on by default and auto-generates
+      # TLS certificates, an elastic password and a Kibana enrolment token on
+      # first start. This file turns that off, which is a local-development
+      # decision only. Elastic's own wording for this setting: "If set to false,
+      # security features are disabled, which is not recommended" [4].
+      #
+      # Off means: no authentication, no authorization, no audit, cleartext HTTP.
+      # Anyone who can reach port 9200 is effectively a superuser, which is why
+      # the compose file publishes it on 127.0.0.1 only.
+      #
+      # Two ways up from here, in increasing order of effort:
+      #   1. Minimal security [5]: set xpack.security.enabled: true, leave
+      #      xpack.security.http.ssl.enabled: false, then
+      #      `bin/elasticsearch-reset-password -u elastic`. You get a password and
+      #      keep plain HTTP; Elastic notes "your browser connections and the
+      #      traffic between Kibana and Elasticsearch will still be unencrypted
+      #      with plain HTTP" and that this "is not sufficient for production mode
+      #      clusters" of more than one node [5].
+      #   2. Full auto-configuration: delete this setting entirely and let the
+      #      image generate certificates and credentials on first start [1].
+      xpack.security.enabled: false
+  # Heap is set through a jvm.options.d drop-in, which is what Elastic documents:
+  # "Do not modify the root jvm.options file. Use files in jvm.options.d/
+  # instead" [3], and "The ES_JAVA_OPTS variable overrides all other JVM options.
+  # We do not recommend using ES_JAVA_OPTS in production" [3].
+  - path: .keel/elasticsearch/jvm.options.d/heap.options
+    content: |
+      # keel-generated: JVM heap for Elasticsearch.
+      #
+      # Elasticsearch 8+ sizes the heap itself: "By default, Elasticsearch
+      # automatically sets the JVM heap size based on a node's roles and total
+      # memory", and Elastic "recommend this default sizing for most production
+      # environments". This file exists because the automatic figure is derived
+      # from the memory the JVM can see, and a container without a memory limit
+      # sees the whole host: on a 32 GB laptop the node helpfully reserves several
+      # gigabytes for a development index of 400 products.
+      #
+      # Two rules, both from
+      # https://www.elastic.co/docs/reference/elasticsearch/jvm-settings :
+      #   1. "Set Xms and Xmx to no more than 50% of the total memory available
+      #      to each Elasticsearch node." The other half is not spare: Lucene
+      #      reads index segments through the operating system page cache.
+      #   2. "Set Xms and Xmx to no more than the threshold for compressed
+      #      ordinary object pointers (oops). The exact threshold varies but 26GB
+      #      is safe on most systems and can be as large as 30GB on some
+      #      systems." Above it, every object reference doubles in size and a
+      #      larger heap holds LESS data.
+      #   3. "The minimum and maximum values must be the same" [3], so the JVM
+      #      never resizes the heap under load.
+      #
+      # Arithmetic: sized for a 2 GB container. 2048 MB x 0.5 = 1024 MB -> 1g.
+      # On a dedicated 64 GB search node: 64 x 0.5 = 32 GB, which is over the
+      # compressed-oops threshold, so the answer is 30g (or 26g to be safe), not
+      # 32g.
+      -Xms1g
+      -Xmx1g
+  - path: docker-compose.elasticsearch.yml
+    content: |
+      # keel-generated: Elasticsearch {{elasticsearch.version}}.
+      # Works standalone (docker compose -f docker-compose.elasticsearch.yml up -d)
+      # or merged into an existing stack:
+      #   docker compose -f docker-compose.yml -f docker-compose.elasticsearch.yml up -d
+      services:
+        elasticsearch:
+          image: docker.elastic.co/elasticsearch/elasticsearch:{{elasticsearch.version}}
+          restart: unless-stopped
+          ulimits:
+            memlock:
+              # Companion to bootstrap.memory_lock in elasticsearch.yml. Elastic's
+              # own docker run example is --ulimit memlock=-1:-1.
+              soft: -1
+              hard: -1
+            nofile:
+              # Elastic's prose says "--ulimit nofile=65535:65535"; their shipped
+              # compose file sets memlock and nothing else, so a copy of it
+              # silently inherits the daemon default. This sets it.
+              soft: 65535
+              hard: 65535
+          volumes:
+            # The image "runs Elasticsearch as user elasticsearch using uid:gid
+            # 1000:0. Bind mounted host directories and files must be accessible
+            # by this user, and the data and log directories must be writable by
+            # this user." A named volume sidesteps that; a bind mount for data
+            # needs chown -R 1000:0 on the host directory.
+            # https://www.elastic.co/docs/deploy-manage/deploy/self-managed/install-elasticsearch-docker-configure
+            - elasticsearch-data:/usr/share/elasticsearch/data
+            - ./.keel/elasticsearch/elasticsearch.yml:/usr/share/elasticsearch/config/elasticsearch.yml:ro
+            - ./.keel/elasticsearch/jvm.options.d:/usr/share/elasticsearch/config/jvm.options.d:ro
+          ports:
+            # Loopback only: with security disabled this is an unauthenticated
+            # database, and it must not be reachable from the network.
+            - "127.0.0.1:9200:9200"
+          healthcheck:
+            # A real cluster-health query, not a port probe. yellow, not green:
+            # on one node every replica shard is unassigned, so green never
+            # arrives and a green healthcheck fails forever.
+            test: ["CMD-SHELL", "curl -fsS 'http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s' || exit 1"]
+            interval: 10s
+            timeout: 10s
+            retries: 12
+            start_period: 90s
+      volumes:
+        elasticsearch-data:
+  - path: ELASTICSEARCH.md
+    content: |
+      # Elasticsearch (scaffolded by keel)
+
+      Node config `.keel/elasticsearch/elasticsearch.yml`, heap
+      `.keel/elasticsearch/jvm.options.d/heap.options`, service
+      `docker-compose.elasticsearch.yml` (DDEV:
+      `.ddev/docker-compose.elasticsearch.yaml`).
+
+      ## The host setting it will not start without
+
+      Elasticsearch "uses a mmapfs directory by default to store its indices",
+      so the kernel limit on memory-map areas has to be raised or "the node may
+      fail to start or experience out-of-memory errors":
+
+          sudo sysctl -w vm.max_map_count=1048576                              # now
+          echo 'vm.max_map_count=1048576' | sudo tee -a /etc/sysctl.conf       # persistent
+          # Docker Desktop on Windows (WSL 2):
+          wsl -d docker-desktop -u root
+          sysctl -w vm.max_map_count=1048576
+
+      Note the value: **Elasticsearch documents 1048576, OpenSearch documents
+      262144**. They are not interchangeable, and the Elasticsearch requirement is
+      four times higher.
+
+      Source: https://www.elastic.co/docs/deploy-manage/deploy/self-managed/vm-max-map-count
+
+      ## Security
+
+      Security is disabled for local development, which is why port 9200 is bound
+      to 127.0.0.1. The two documented ways to turn it back on are written out at
+      the bottom of `.keel/elasticsearch/elasticsearch.yml`.
+
+      ## Magento
+
+      Magento 2.4.9 dropped Elasticsearch entirely and takes OpenSearch 3 only.
+      2.4.8-p5 supports Elasticsearch 8, which is what this recipe pins. If you
+      are upgrading a Magento store to 2.4.9, switch to the opensearch recipe
+      rather than raising the version here.
+provision:
+  ddev:
+    files:
+      # Same filename as the ddev-elasticsearch add-on writes, so there is one
+      # service definition, and it is the tuned one.
+      # https://docs.ddev.com/en/stable/users/extend/custom-compose-files/
+      - path: .ddev/docker-compose.elasticsearch.yaml
+        content: |
+          # keel-generated: Elasticsearch {{elasticsearch.version}} for DDEV.
+          # Rationale for every setting: .keel/elasticsearch/elasticsearch.yml.
+          services:
+            elasticsearch:
+              container_name: ddev-${DDEV_SITENAME}-elasticsearch
+              image: docker.elastic.co/elasticsearch/elasticsearch:{{elasticsearch.version}}
+              hostname: elasticsearch
+              restart: "no"
+              labels:
+                com.ddev.site-name: ${DDEV_SITENAME}
+                com.ddev.approot: ${DDEV_APPROOT}
+              environment:
+                - VIRTUAL_HOST=$DDEV_HOSTNAME
+                - HTTP_EXPOSE=9200:9200
+                - HTTPS_EXPOSE=9201:9200
+              ulimits:
+                memlock: {soft: -1, hard: -1}
+                nofile: {soft: 65535, hard: 65535}
+              expose:
+                - "9200"
+              volumes:
+                - elasticsearch:/usr/share/elasticsearch/data
+                # Relative to .ddev/, so these are the project-root copies.
+                - "../.keel/elasticsearch/elasticsearch.yml:/usr/share/elasticsearch/config/elasticsearch.yml:ro"
+                - "../.keel/elasticsearch/jvm.options.d:/usr/share/elasticsearch/config/jvm.options.d:ro"
+              healthcheck:
+                test: ["CMD-SHELL", "curl -fsS 'http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s' || exit 1"]
+                interval: 10s
+                timeout: 10s
+                retries: 12
+                start_period: 90s
+          volumes:
+            elasticsearch:
+    install:
+      - "{{restart}}"
+  compose: {}
+  sail: {}
+  local:
+    install:
+      - "docker compose -f docker-compose.elasticsearch.yml up -d"

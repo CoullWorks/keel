@@ -1,0 +1,41 @@
+id: django-spectacular
+kind: addon
+label: drf-spectacular (OpenAPI 3 schema)
+appliesTo: [django]
+provides: [spectacular]
+default: true
+install:
+  - "{{exec}} uv add drf-spectacular"
+files:
+  - path: config/settings.d/30-spectacular.py
+    content: |
+      # drf-spectacular needs to be the schema class DRF uses, or it generates
+      # nothing and DRF falls back to its own deprecated generator.
+      INSTALLED_APPS += ["drf_spectacular"]
+      REST_FRAMEWORK["DEFAULT_SCHEMA_CLASS"] = "drf_spectacular.openapi.AutoSchema"
+
+      SPECTACULAR_SETTINGS = {
+          "TITLE": "API",
+          "VERSION": "1.0.0",
+          # The schema endpoint would otherwise appear in the schema it serves.
+          "SERVE_INCLUDE_SCHEMA": False,
+      }
+  - path: config/urls.d/30-spectacular.py
+    content: |
+      # The schema itself, plus the two UIs that render it. drf-spectacular
+      # generates nothing you can look at until these are mounted.
+      from drf_spectacular.views import (
+          SpectacularAPIView,
+          SpectacularRedocView,
+          SpectacularSwaggerView,
+      )
+
+      urlpatterns += [
+          path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
+          path(
+              "api/docs/",
+              SpectacularSwaggerView.as_view(url_name="schema"),
+              name="swagger-ui",
+          ),
+          path("api/redoc/", SpectacularRedocView.as_view(url_name="schema"), name="redoc"),
+      ]

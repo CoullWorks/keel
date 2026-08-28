@@ -1,0 +1,10 @@
+id: symfony-maker
+schema_version: 2
+kind: addon
+label: MakerBundle (code generators for entities, controllers, forms)
+appliesTo: [symfony]
+provides: [generators]
+default: true
+updated: 2026-08-10
+install:
+  - "{{composer}} require --dev symfony/maker-bundle"

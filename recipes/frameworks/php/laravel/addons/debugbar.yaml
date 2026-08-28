@@ -1,0 +1,16 @@
+id: laravel-debugbar
+kind: addon
+label: Debugbar (in-browser debug bar)
+appliesTo: [laravel]
+provides: [debugbar]
+default: true
+install:
+  # barryvdh/*, not fruitcake/*. Both names resolve to the same repository and
+  # the same release, but barryvdh is the one the docs point at and the one
+  # with the download history (137M against 3.2M), so it is the name that will
+  # still be maintained when the fork alias is not.
+  #
+  # No publish step: the package registers through Composer auto-discovery and
+  # only shows itself when APP_DEBUG is true, so it is inert in production
+  # without any configuration.
+  - "{{composer}} require barryvdh/laravel-debugbar --dev"

@@ -1,0 +1,18 @@
+id: django-pytest
+schema_version: 2
+kind: addon
+label: pytest + pytest-django + coverage
+appliesTo: [django]
+provides: [tests]
+updated: 2026-08-22
+# The Django base already declares pytest + pytest-django in its dev group; this
+# addon makes the suite explicit and adds coverage, so a project that opts into
+# "the test suite" gets a runner that reports what it covers rather than only
+# whether it passed. uv add is idempotent, so re-declaring the base's runners is
+# a no-op rather than a conflict.
+install:
+  - "{{exec}} uv add --dev pytest pytest-django pytest-cov"
+smoke:
+  # Runs the suite for real against the base's tests/ layout, the same command
+  # `keel run test` uses.
+  - "{{exec}} uv run pytest"

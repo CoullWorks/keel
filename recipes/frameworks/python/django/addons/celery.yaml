@@ -1,0 +1,59 @@
+id: django-celery
+kind: addon
+label: Celery + Beat (async tasks, Redis broker)
+appliesTo: [django]
+provides: [celery]
+install:
+  - '{{exec}} uv add "celery[redis]" django-celery-beat'
+files:
+  - path: config/settings.d/50-celery.py
+    content: |
+      # Where Celery finds its broker and stores results. The compose stack runs
+      # Redis at `redis`; override with CELERY_BROKER_URL to point elsewhere.
+      import os
+
+      CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://redis:6379/3")
+      CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", CELERY_BROKER_URL)
+      # Match Django's own timezone rather than Celery's UTC default, so a
+      # scheduled task fires when the admin says it will.
+      CELERY_TIMEZONE = TIME_ZONE
+      # Refuse to serialise anything but JSON. pickle is Celery's historical
+      # default and is remote code execution if a broker is ever reachable.
+      CELERY_ACCEPT_CONTENT = ["json"]
+      CELERY_TASK_SERIALIZER = "json"
+      CELERY_RESULT_SERIALIZER = "json"
+
+      INSTALLED_APPS += ["django_celery_beat"]
+  - path: config/celery.py
+    content: |
+      # The Celery application. Without this module there is no app for a worker
+      # to load, and `celery -A config worker` fails with "Unable to load celery
+      # application".
+      import os
+
+      from celery import Celery
+
+      # Set before the app is created: the app reads Django's settings through
+      # this, and doing it afterwards is too late.
+      os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
+
+      app = Celery("config")
+
+      # namespace="CELERY" means every CELERY_* name in settings is a Celery
+      # option, which is why the fragment in settings.d uses that prefix.
+      app.config_from_object("django.conf:settings", namespace="CELERY")
+
+      # Finds tasks.py in each installed app, so a task does not have to be
+      # registered by hand.
+      app.autodiscover_tasks()
+  - path: config/__init__.py
+    content: |
+      # Importing the Celery app here is what makes @shared_task work anywhere in
+      # the project: Django loads this package on start, which loads the app,
+      # which registers the task decorators.
+      #
+      # This file is otherwise empty, and that is the whole reason it has
+      # contents at all.
+      from .celery import app as celery_app
+
+      __all__ = ("celery_app",)

@@ -1,0 +1,13 @@
+# Auth as a level:stack generator (Flask session auth). Points at the
+# flask-login addon, so `keel gen auth` on a Flask project adds Flask-Login:
+# login, logout, register and a protected route, backed by Werkzeug password
+# hashing.
+id: gen-auth-flask
+kind: generator
+level: stack
+label: "Authentication (Flask-Login - session auth: login, logout, protected routes)"
+appliesTo: [flask]
+provides: [auth]
+apply: [flask-login]
+schema_version: 2
+updated: 2026-08-24

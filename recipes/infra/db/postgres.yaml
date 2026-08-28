@@ -1,0 +1,475 @@
+id: postgres
+schema_version: 2
+kind: db
+label: PostgreSQL 18 (tuned)
+# One recipe for every framework that speaks Postgres. It replaces the
+# per-framework copies (django-postgres, fastapi-postgres, nextjs-postgres),
+# which each provisioned it a different way and drifted apart. Old ids keep
+# working through aliases, so existing manifests and profiles are unaffected.
+aliases: [django-postgres, fastapi-postgres, nextjs-postgres]
+appliesTo: [django, fastapi, laravel, nextjs, symfony, express, fastify, hono, nestjs, adonisjs, nuxt, astro, sveltekit, flask, dash, streamlit, gradio]
+provides: [db, postgres, db-postgres]
+# Exactly one database per project: choosing Postgres alongside an environment
+# that brings up MySQL used to build the wrong one in silence.
+conflicts: [db-mysql, db-mariadb, db-mongo]
+# Every framework this recipe applies to, so none of them falls through to an
+# accidental default. A framework named in no db's defaultFor gets whichever
+# database sorts first by id, which is a decision nobody made: it silently gave
+# Symfony and all eight Node frameworks MariaDB.
+#
+# Where the framework states a preference, this follows it. Where it does not,
+# it follows what the framework's own scaffolding actually writes:
+#
+#   symfony - the Symfony docs list MySQL, MariaDB, PostgreSQL and SQLite as
+#     equal DSN examples and name no floor (docs/infra/symfony.md). The
+#     tiebreaker is the Flex recipe that `composer require orm` runs: its
+#     manifest sets DATABASE_URL to
+#     "postgresql://app:!ChangeMe!@127.0.0.1:5432/app?serverVersion=16&charset=utf8"
+#     and its docker-compose service to "postgres:${POSTGRES_VERSION:-16}-alpine",
+#     with the MySQL and MariaDB URLs present only as commented alternatives.
+#     https://raw.githubusercontent.com/symfony/recipes/main/doctrine/doctrine-bundle/2.13/manifest.json
+#
+#   the Node frameworks - none of them ships a database. They share a client
+#     layer that reads DATABASE_URL, and Prisma, the most common of those, sets
+#     the datasource provider to postgresql when `prisma init` is run without
+#     --datasource-provider.
+#     https://www.prisma.io/docs/orm/reference/prisma-cli-reference
+#     keel's own Next.js scaffold already ships
+#     DATABASE_URL=postgresql://..., so this makes the rest agree with it.
+#
+#   flask, dash, streamlit, gradio - none ships a database either, and all four
+#     are already in this recipe's appliesTo. Like Django and FastAPI they wire a
+#     Python app to a database through SQLAlchemy, whose canonical connection URL
+#     and every mainstream tutorial default to PostgreSQL (Dash is itself a Flask
+#     app served by gunicorn). They were in appliesTo but not defaultFor, so they
+#     fell through to whichever db sorts first by id (MariaDB) - the exact
+#     accidental default this list exists to remove.
+#
+# magento and woocommerce are deliberately absent: they are MariaDB's, because
+# Adobe and WordPress both publish MySQL/MariaDB requirements and neither
+# supports PostgreSQL at all. No framework appears in two defaultFor lists.
+defaultFor: [django, fastapi, laravel, nextjs, symfony, express, fastify, hono, nestjs, adonisjs, nuxt, astro, sveltekit, flask, dash, streamlit, gradio]
+priority: -5 # after the env (-10), before the app starts and migrates (0)
+updated: 2026-08-12
+# The contract: this recipe writes the connection into the environment, and each
+# framework reads it. That is what lets one database serve every framework, and
+# a new database work with every framework that already reads these.
+# The engine version is a choice. keel recommends one and the var below
+# reads the answer, so the compose image tag, the DDEV database type and
+# the tuning file all follow a single decision.
+versions:
+  postgres_version:
+    label: postgres version
+    recommended: "18"
+    options:
+      - value: "16"
+        label: "PostgreSQL 16"
+        note: "supported to Nov 2028; the oldest the tuning file targets"
+      - value: "17"
+        label: "PostgreSQL 17"
+        note: "supported to Nov 2029"
+      - value: "18"
+        label: "PostgreSQL 18"
+        note: "current stable"
+vars:
+  db.type: postgres
+  # 18 is the current stable major. DDEV supports Postgres 9 through 18.
+  # The tuning file below is valid on 16 and later, which matters because some
+  # environment stacks pin their own image tag in their docker-compose.yml.
+  # See mariadb.yaml for why this is a whole flag and why it references the
+  # pin rather than db.version.
+  db.ddev_flag: "--database=postgres:{{pin.postgres_version}}"
+  db.version: "{{pin.postgres_version}}"
+  db.host: db
+  db.port: "5432"
+  db.name: db
+  db.user: db
+  db.password: db
+  db.localPort: "55432" # host port the native env publishes on (loopback only)
+  db.sail: pgsql # the service name Sail uses for this database
+  # The three vars below let ONE compose service definition serve any engine.
+  # Without them every framework has to hand-write a postgres service, a mysql
+  # service and a mariadb service, which is how nine Node frameworks ended up
+  # with no database service at all: nobody wrote the third copy.
+  #
+  # compose_env and healthcheck are YAML FLOW form (on one line) on purpose, so
+  # they can be substituted into a compose file without the caller having to
+  # know how deeply the block is indented.
+  #
+  # The credentials are written out rather than referencing db.name/db.user:
+  # a recipe's vars are rendered in sorted key order, so db.compose_env is
+  # resolved before db.name exists and the reference would survive as a
+  # literal token in the compose file.
+  db.compose_env: "{POSTGRES_DB: db, POSTGRES_USER: db, POSTGRES_PASSWORD: db}"
+  # /var/lib/postgresql, NOT /var/lib/postgresql/data. The 18+ images store data
+  # in a major-version-specific subdirectory and refuse to start when they find
+  # a volume mounted at the old path: "Error: in 18+, these Docker images are
+  # configured to store database data in a format which is compatible with
+  # pg_ctlcluster". Mounting the parent is also correct for 16 and 17, whose
+  # PGDATA sits inside it, so one path serves every offered version.
+  db.data_dir: /var/lib/postgresql
+  db.healthcheck: "[\"CMD-SHELL\", \"pg_isready -U db -d db\"]"
+  # The tuned configuration this recipe writes, and how the server is told to
+  # read it. Published as vars so the framework's own compose service mounts
+  # them directly.
+  #
+  # They used to live in a separate docker-compose.<engine>.yml, which compose
+  # never merged (only compose.override.yaml is automatic). Every stack was
+  # therefore running on the image defaults while carrying a tuning file that
+  # nothing read.
+  db.config_mount: ./.keel/postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+  # db.command carries the WHOLE line, key included, because only Postgres
+  # needs one and a recipe has no way to omit a line conditionally. Where it
+  # is empty the template renders a blank line, which YAML ignores.
+  db.command: "command: [\"postgres\", \"-c\", \"config_file=/etc/postgresql/postgresql.conf\"]"
+  # Prisma and Drizzle each spell this database their own way, so the names
+  # live here beside db.sail rather than in a lookup table inside every ORM
+  # recipe. A recipe that hardcodes one of them builds a PostgreSQL client
+  # against a MySQL server and only finds out at the first query.
+  db.prisma: postgresql # the provider name in schema.prisma
+  db.drizzle: postgresql # the dialect name in drizzle.config.ts
+  db.drizzle_driver: postgres # the npm client Drizzle talks to it through
+  db.url: "postgresql://db:db@db:5432/db"
+files:
+  - path: .keel/postgres/postgresql.conf
+    content: |
+      # keel-generated: PostgreSQL 18 server configuration.
+      #
+      # Sized for a database container with 2 GB of RAM. Every derived value
+      # shows its arithmetic, so rescaling for a real node is redoing the sums
+      # rather than guessing which numbers are safe to touch.
+      #
+      # This file REPLACES the server's configuration when it is passed as
+      # config_file, so it has to be complete enough to start a server. It is
+      # not a drop-in fragment.
+      #
+      # Sources, all fetched 2026-08-12, all postgresql.org/docs/current:
+      #   [1] Resource Consumption   /runtime-config-resource.html
+      #   [2] Write Ahead Log        /runtime-config-wal.html
+      #   [3] Query Planning         /runtime-config-query.html
+      #   [4] Connections            /runtime-config-connection.html
+      #   [5] postgres Docker image  https://hub.docker.com/_/postgres
+
+      # ------------------------------------------------------------ connections
+      # REQUIRED when a custom config file is used, and the single most common
+      # way to break a containerised Postgres: "you must set listen_addresses =
+      # '*' so that other containers will be able to access postgres" [5].
+      # Without it the server listens on localhost inside its own container and
+      # every application connection is refused.
+      listen_addresses = '*'
+      port = 5432
+
+      # "The default is typically 100 connections" [4], and it is left there
+      # deliberately. Postgres runs one backend process per connection, so
+      # connections are expensive in a way MySQL threads are not, and
+      # "PostgreSQL sizes certain resources based directly on the value of
+      # max_connections. Increasing its value leads to higher allocation of
+      # those resources, including shared memory" [4].
+      #
+      # The answer to "we need 500 connections" is a pooler (PgBouncer,
+      # pgcat, or the framework's own pool) in front of 100 real ones, not a
+      # bigger number here. Raising it also multiplies the work_mem exposure
+      # calculated below.
+      max_connections = 100
+
+      # -------------------------------------------------------------- memory
+      # "If you have a dedicated database server with 1GB or more of RAM, a
+      # reasonable starting value for shared_buffers is 25% of the memory in your
+      # system. There are some workloads where even larger settings for
+      # shared_buffers are effective, but because PostgreSQL also relies on the
+      # operating system cache, it is unlikely that an allocation of more than
+      # 40% of RAM to shared_buffers will work better than a smaller amount." [1]
+      #
+      # Arithmetic: 2048 MB x 0.25 = 512 MB. On a 16 GB node: 16384 x 0.25 = 4GB.
+      # Default is 128 MB [1]. Restart required; this is not a reload.
+      shared_buffers = 512MB
+
+      # This one allocates NOTHING: "This parameter has no effect on the size of
+      # shared memory allocated by PostgreSQL, nor does it reserve kernel disk
+      # cache; it is used only for estimation purposes." [1] It tells the planner
+      # how much cache a query is likely to find, which decides index scan versus
+      # sequential scan. Set it too low and the planner stops using indexes it
+      # should.
+      #
+      # Arithmetic: shared_buffers + what the kernel is likely to hold.
+      #   2048 MB container - 512 MB shared_buffers - ~256 MB for backends and
+      #   the server itself, so roughly 1280 MB of page cache, plus the 512 MB
+      #   already in shared_buffers => 1536 MB.
+      # PostgreSQL publishes no percentage for this; the familiar "75% of RAM"
+      # is not in the manual. The sum above is what the manual actually asks
+      # for: "consider both PostgreSQL's shared buffers and the portion of the
+      # kernel's disk cache that will be used for PostgreSQL data files" [1].
+      effective_cache_size = 1536MB
+
+      # work_mem is per OPERATION, not per connection, and that is what makes it
+      # dangerous: "a complex query might perform several sort and hash
+      # operations at the same time, with each operation generally being allowed
+      # to use as much memory as this value specifies ... Also, several running
+      # sessions could be doing such operations concurrently. Therefore, the
+      # total memory used could be many times the value of work_mem" [1].
+      #
+      # Arithmetic for the worst case that matters:
+      #   100 connections x 8 MB x ~2 concurrent sort/hash nodes = 1.6 GB
+      # which is most of the container, so 8 MB is already the ceiling at
+      # max_connections = 100. Default is 4 MB [1].
+      # Hash nodes can exceed it further: "The memory limit for a hash table is
+      # computed by multiplying work_mem by hash_mem_multiplier" [1].
+      #
+      # The right way to give a big report more memory is per session
+      # (SET LOCAL work_mem = '256MB') inside that transaction, not here.
+      work_mem = 8MB
+
+      # "Since only one of these operations can be executed at a time by a
+      # database session, and an installation normally doesn't have many of them
+      # running concurrently, it's safe to set this value significantly larger
+      # than work_mem" [1]. Default is 64 MB. Used by VACUUM, CREATE INDEX and
+      # ALTER TABLE ADD FOREIGN KEY, so it is what makes a restore or a migration
+      # finish in minutes rather than hours.
+      maintenance_work_mem = 128MB
+
+      # The trap the manual warns about: "when autovacuum runs, up to
+      # autovacuum_max_workers times this memory may be allocated, so be careful
+      # not to set the default value too high. It may be useful to control for
+      # this by separately setting autovacuum_work_mem" [1]. autovacuum_work_mem
+      # defaults to -1, meaning it inherits maintenance_work_mem, so raising that
+      # to 1 GB on a 2 GB box quietly authorises 3 GB of autovacuum. Capped here.
+      autovacuum_work_mem = 64MB
+
+      # "try (the default) ... the server will try to request huge pages, but
+      # fall back to the default if that fails" [1]. Correct in a container,
+      # where the host may not have huge pages reserved: `on` would refuse to
+      # start. Note this is explicit huge pages, not Linux transparent huge
+      # pages, which the same page says "has been known to cause performance
+      # degradation with PostgreSQL" [1].
+      huge_pages = try
+
+      # ------------------------------------------------------------------ WAL
+      # -1 is the documented automatic setting: "a size equal to 1/32nd (about
+      # 3%) of shared_buffers, but not less than 64kB nor more than the size of
+      # one WAL segment, typically 16MB" [2]. With shared_buffers = 512MB that is
+      # 16 MB, the cap. "The auto-tuning selected by the default setting of -1
+      # should give reasonable results in most cases" [2], so this is stated
+      # rather than overridden.
+      wal_buffers = -1
+
+      # Checkpoints. A checkpoint happens whenever EITHER checkpoint_timeout
+      # elapses OR max_wal_size of WAL has been written since the last one. If
+      # WAL volume triggers them, checkpoints come in bursts under exactly the
+      # write load that can least afford the I/O.
+      #
+      # Defaults are checkpoint_timeout = 5min and max_wal_size = 1GB [2].
+      # Raised together so that time, not volume, is what schedules a
+      # checkpoint on a write-heavy import.
+      #
+      # The cost is stated by the manual for both: "Increasing this parameter can
+      # increase the amount of time needed for crash recovery" [2]. Recovery
+      # replays everything since the last checkpoint, so a longer interval means
+      # a longer start-up after an unclean shutdown. That is a restart-time cost,
+      # not a data-loss one: nothing committed is lost.
+      checkpoint_timeout = 15min
+      max_wal_size = 2GB
+      # "As long as WAL disk usage stays below this setting, old WAL files are
+      # always recycled for future use at a checkpoint, rather than removed. This
+      # can be used to ensure that enough WAL space is reserved to handle spikes
+      # in WAL usage, for example when running large batch jobs." [2]
+      # Default 80 MB; raised so a batch job reuses segments instead of creating
+      # and deleting them.
+      min_wal_size = 512MB
+
+      # checkpoint_completion_target is NOT set: the default is already 0.9, and
+      # "Reducing this parameter is not recommended because it causes the
+      # checkpoint to complete faster. This results in a higher rate of I/O
+      # during the checkpoint" [2]. Older tuning guides tell you to raise it from
+      # 0.5, which stopped being true in PostgreSQL 14.
+
+      # DURABILITY. on is the default and means a commit does not return until
+      # the transaction is on disk.
+      #
+      # Turning it off is the biggest single write-throughput lever Postgres has,
+      # and the manual is precise about what it costs: "Unlike fsync, setting
+      # this parameter to off does not create any risk of database inconsistency:
+      # an operating system or database crash might result in some recent
+      # allegedly-committed transactions being lost, but the database state will
+      # be just the same as if those transactions had been aborted cleanly" [2].
+      #
+      # In plain terms: no corruption, but transactions your application was told
+      # had committed can be gone after a crash. Fine for a test fixture load or
+      # a rebuildable analytics copy. Not for anything that takes money.
+      # It can also be set per transaction (SET LOCAL synchronous_commit = off)
+      # for a bulk import, which is almost always the better trade.
+      synchronous_commit = on
+
+      # full_page_writes stays on. It is what protects against torn pages: "a
+      # page write that is in process during an operating system crash might be
+      # only partially completed, leading to an on-disk page that contains a mix
+      # of old and new data" [2]. Turning it off on ordinary storage risks
+      # unrecoverable corruption, not just lost transactions.
+      full_page_writes = on
+
+      # wal_compression is left off (the default). It "can reduce the WAL volume
+      # without increasing the risk of unrecoverable data corruption, but at the
+      # cost of some extra CPU" [2], and the lz4/zstd methods depend on how the
+      # binary was compiled. Worth enabling on a write-heavy instance with WAL
+      # archiving; check `SELECT * FROM pg_config()` for the build options first.
+
+      # -------------------------------------------------------- query planning
+      # random_page_cost is left at its default of 4.0 on purpose, and this is
+      # the setting most copied configs get wrong. The familiar advice to set it
+      # to 1.1 on SSDs is NOT in the PostgreSQL documentation. What the manual
+      # says is that the default already assumes caching: "a lower default is
+      # used (4.0) because the majority of random accesses to storage, such as
+      # indexed reads, are assumed to be in cache. Also, the latency of
+      # network-attached storage tends to reduce the relative overhead of random
+      # access." [3]
+      #
+      # It also gives the conditions for changing it in each direction: raise it
+      # "If you believe caching is less frequent than the default value
+      # reflects", lower it "if your data is likely to be completely in cache,
+      # such as when the database is smaller than the total server memory" [3].
+      # That is a measurement, not a storage-type rule of thumb.
+
+      # effective_io_concurrency is also left alone: "The default is 16" as of
+      # PostgreSQL 18 [1], up from 1 in every earlier version. A config file
+      # carried over from a PostgreSQL 16 tuning guide that sets 200 is now
+      # fighting a default that was chosen with the new asynchronous I/O
+      # subsystem in mind. "Unnecessarily high values may increase I/O latency
+      # for all queries on the system." [1]
+
+      # --------------------------------------------------------- observability
+      # Off by default (-1). One second surfaces the queries worth reading
+      # without turning the log into a transcript.
+      log_min_duration_statement = 1000ms
+      log_checkpoints = on
+      log_connections = off
+      log_lock_waits = on
+      log_temp_files = 0          # log every temp file: this is how you find a work_mem that is too small
+      log_line_prefix = '%m [%p] %q%u@%d '
+      log_timezone = 'UTC'
+      datestyle = 'iso, mdy'
+      timezone = 'UTC'
+      lc_messages = 'C'
+      default_text_search_config = 'pg_catalog.english'
+provision:
+  # DDEV brings the server up itself from config.db.yaml and injects
+  # web_environment into the web container; the install steps only place the
+  # tuning where DDEV reads it and restart so it is picked up.
+  ddev:
+    files:
+      - path: .ddev/config.db.yaml
+        content: |
+          # keel-generated: PostgreSQL. Frameworks read KEEL_DB and the PG* vars.
+          database:
+            type: postgres
+            version: "{{db.version}}"
+          web_environment:
+            - KEEL_DB=postgres
+            - PGHOST={{db.host}}
+            - PGPORT={{db.port}}
+            - PGDATABASE={{db.name}}
+            - PGUSER={{db.user}}
+            - PGPASSWORD={{db.password}}
+    install:
+      # "If you're using PostgreSQL, a default postgresql.conf is provided in
+      # .ddev/postgres/postgresql.conf. If you need to alter it, remove the
+      # #ddev-generated line and ddev restart."
+      # https://docs.ddev.com/en/stable/users/extend/customization-extendibility/
+      # keel's copy carries no #ddev-generated marker, so DDEV treats it as yours
+      # and stops managing it.
+      #
+      # Copied rather than written twice: .keel/postgres/postgresql.conf stays
+      # the single source of truth (and the copy you deploy with), and DDEV gets
+      # the same bytes at the path it reads.
+      - "mkdir -p .ddev/postgres && cp .keel/postgres/postgresql.conf .ddev/postgres/postgresql.conf"
+      - "{{restart}}"
+  # Under compose and Sail the environment's own stack brings the server up and
+  # publishes the connection; this adds the tuning and a real healthcheck to it.
+  #   docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d
+  compose:
+    files:
+      - path: docker-compose.postgres.yml
+        content: |
+          # keel-generated: tuning overlay for the db service in docker-compose.yml.
+          services:
+            db:
+              # "The entrypoint script is made so that any options passed to the
+              # docker command will be passed along to the postgres server
+              # daemon", and a config file is selected with -c config_file.
+              # https://hub.docker.com/_/postgres
+              command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
+              volumes:
+                - ./.keel/postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+              # "the default /dev/shm size for containers is 64MB. If the shared
+              # memory is exhausted you will encounter ERROR: could not resize
+              # shared memory segment" (image docs). Parallel query and large
+              # hash joins allocate there, so 64 MB is a query that fails under
+              # load and works when you retry it alone.
+              shm_size: 256mb
+              healthcheck:
+                # Runs a real query over TCP as the application user.
+                #
+                # Why not a bare pg_isready: on first start the image's
+                # entrypoint runs a temporary server to create the database, and
+                # that server is started with listen_addresses='' so it accepts
+                # only the local socket. A socket-based check therefore reports
+                # ready while initialisation is still running and the port is not
+                # open yet. Forcing TCP (-h 127.0.0.1) and executing SELECT 1
+                # proves the real server is up, the credentials work and the
+                # database exists.
+                test: ["CMD-SHELL", "psql -h 127.0.0.1 -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\" -Atqc 'SELECT 1' >/dev/null || exit 1"]
+                interval: 10s
+                timeout: 5s
+                retries: 12
+                start_period: 60s
+  sail: {}
+  # Nothing on a bare host provides a database server, so choosing one under the
+  # native env brings up a single container for it. Picking no database leaves
+  # the framework on its own default (SQLite) and needs no Docker at all.
+  local:
+    install:
+      - "docker compose -f docker-compose.db.yml up -d"
+    files:
+      - path: docker-compose.db.yml
+        content: |
+          # keel-generated: a local PostgreSQL for development, tuned by
+          # .keel/postgres/postgresql.conf (edit that file, then bring the
+          # service up again).
+          services:
+            db:
+              image: postgres:{{db.version}}
+              restart: unless-stopped
+              command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
+              environment:
+                POSTGRES_DB: {{db.name}}
+                POSTGRES_USER: {{db.user}}
+                POSTGRES_PASSWORD: {{db.password}}
+                # Checksums detect storage corruption instead of serving it.
+                # They can only be enabled at initdb time, which is now: turning
+                # them on later means a dump and restore.
+                POSTGRES_INITDB_ARGS: "--data-checksums"
+              volumes:
+                - pgdata:/var/lib/postgresql
+                - ./.keel/postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+              shm_size: 256mb
+              healthcheck:
+                # A real query over TCP; see the compose overlay for why
+                # pg_isready on the socket is not enough.
+                test: ["CMD-SHELL", "psql -h 127.0.0.1 -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\" -Atqc 'SELECT 1' >/dev/null || exit 1"]
+                interval: 10s
+                timeout: 5s
+                retries: 12
+                start_period: 60s
+              # Loopback only, on a non-default host port: publishing 5432 on all
+              # interfaces collides with any Postgres already on the machine and
+              # exposes a dev database to the network.
+              ports: ["127.0.0.1:{{db.localPort}}:5432"]
+          volumes:
+            pgdata:
+      - path: .env
+        content: |
+          # keel: connection for the local PostgreSQL container.
+          KEEL_DB=postgres
+          PGHOST=127.0.0.1
+          PGPORT={{db.localPort}}
+          PGDATABASE={{db.name}}
+          PGUSER={{db.user}}
+          PGPASSWORD={{db.password}}

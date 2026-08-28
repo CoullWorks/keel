@@ -1,0 +1,15 @@
+id: varnish-magento
+schema_version: 2
+kind: config
+label: Magento wiring for Varnish
+when:
+  frameworks: [magento, magento-mageos]
+  uses: varnish
+install:
+  # Point Magento's full-page cache at Varnish and set the backend host to the
+  # DDEV varnish service. Tune backend_host/port to your ddev-varnish add-on.
+  - "{{magento}} setup:config:set --http-cache-hosts=varnish:6081 --no-interaction"
+  - "{{magento}} config:set --lock-env system/full_page_cache/caching_application 2"
+  - "{{magento}} config:set --lock-env system/full_page_cache/varnish/backend_host varnish"
+  - "{{magento}} config:set --lock-env system/full_page_cache/varnish/backend_port 8080"
+  - "{{restart}}"

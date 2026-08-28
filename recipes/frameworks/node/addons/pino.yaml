@@ -1,0 +1,80 @@
+id: node-pino
+schema_version: 2
+kind: addon
+label: Pino (structured JSON logging)
+appliesTo: [express, hono, nestjs]
+provides: [logging]
+updated: 2026-08-13
+# Fastify is deliberately absent from appliesTo. It uses Pino as its own logger
+# and keel's Fastify recipe already turns it on with `Fastify({ logger: true })`,
+# so adding this would install a second copy of a logger that is already
+# running and configured.
+#
+# pino-http comes with it. Pino on its own is a logger you have to call; in a
+# web framework the thing you actually want is a line per request with its
+# method, status and duration, and that is pino-http. Installing only pino left
+# you with a dependency and no logs.
+install:
+  - "{{exec}} npm install pino pino-http"
+  # Pretty output is a development convenience and must not reach production:
+  # the point of Pino is one JSON object per line for a log shipper to parse.
+  - "{{exec}} npm install -D pino-pretty"
+smoke:
+  - "{{exec}} node -e \"require('pino')().info('keel: pino is wired up')\""
+files:
+  - path: LOGGING.md
+    content: |
+      # Logging with Pino
+
+      Installed: `pino` (the logger), `pino-http` (one line per request), and
+      `pino-pretty` as a dev dependency.
+
+      ## Express
+
+      ```js
+      import express from "express";
+      import pinoHttp from "pino-http";
+
+      const app = express();
+      app.use(pinoHttp());        // every request logged, with an id
+      app.get("/", (req, res) => {
+        req.log.info("handling the root route");   // correlated with the request
+        res.send("ok");
+      });
+      ```
+
+      ## Hono
+
+      Hono has its own middleware signature, so wrap the logger yourself:
+
+      ```ts
+      import pino from "pino";
+      const log = pino();
+
+      app.use(async (c, next) => {
+        const started = Date.now();
+        await next();
+        log.info({ method: c.req.method, path: c.req.path, status: c.res.status, ms: Date.now() - started });
+      });
+      ```
+
+      ## NestJS
+
+      Use `nestjs-pino`, which wires Pino into Nest's own Logger rather than
+      running alongside it:
+
+      ```
+      npm install nestjs-pino
+      ```
+
+      ## Reading the output
+
+      Pino writes one JSON object per line, which is what a log shipper wants and
+      not what you want in a terminal. In development, pipe it:
+
+      ```
+      npm run dev | npx pino-pretty
+      ```
+
+      Never pipe through pino-pretty in production: it is slower and it destroys
+      the structure that made the logs worth having.

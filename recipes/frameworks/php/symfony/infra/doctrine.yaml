@@ -1,0 +1,32 @@
+id: doctrine-database
+schema_version: 2
+kind: config
+label: Symfony wiring for the chosen database
+# Symfony reads one DATABASE_URL. Doctrine's driver prefix differs per engine, so
+# there is an overlay per database rather than one that guesses.
+when:
+  framework: symfony
+  uses: postgres
+install:
+  - "{{composer}} require symfony/orm-pack"
+provision:
+  ddev:
+    patch:
+      - file: .env
+        set:
+          DATABASE_URL: "postgresql://{{db.user}}:{{db.password}}@{{db.host}}:{{db.port}}/{{db.name}}?serverVersion={{db.version}}&charset=utf8"
+  local:
+    patch:
+      - file: .env
+        set:
+          DATABASE_URL: "postgresql://{{db.user}}:{{db.password}}@127.0.0.1:{{db.localPort}}/{{db.name}}?serverVersion={{db.version}}&charset=utf8"
+  # The compose stack brings PostgreSQL up itself (see the Docker env recipes), so
+  # there is nothing to provision here, only the DSN to write. serverVersion is
+  # load-bearing: Doctrine picks platform-specific SQL from it, and a value that
+  # does not match the running server generates migrations that are wrong rather
+  # than migrations that fail. docs/infra/symfony.md, source 7.
+  compose:
+    patch:
+      - file: .env
+        set:
+          DATABASE_URL: "postgresql://{{db.user}}:{{db.password}}@db:5432/{{db.name}}?serverVersion={{db.version}}&charset=utf8"

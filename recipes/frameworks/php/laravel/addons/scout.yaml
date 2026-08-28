@@ -1,0 +1,17 @@
+id: laravel-scout
+kind: addon
+label: Scout (full-text search sync)
+appliesTo: [laravel]
+provides: [scout]
+install:
+  - "{{composer}} require laravel/scout"
+  # By provider, not by tag. Scout's ScoutServiceProvider calls publishes()
+  # with no tag at all, so `vendor:publish --tag=scout-config` answers
+  # "No publishable resources for tag [scout-config]" and exits 0: the config
+  # is never written and the build reports success. Verified against
+  # laravel/scout 11.5 in a real project.
+  #
+  # The driver default is `collection`, which queries the database directly, so
+  # a fresh project searches without an Algolia or Meilisearch account. Swap
+  # SCOUT_DRIVER once you have one.
+  - "{{artisan}} vendor:publish --provider=\"Laravel\\Scout\\ScoutServiceProvider\""

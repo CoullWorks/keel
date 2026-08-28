@@ -1,0 +1,452 @@
+id: redis
+schema_version: 2
+kind: service
+label: Redis 8 (cache + a separate durable instance for sessions and queues)
+category: Cache
+# One Redis recipe for every framework. There were two recipes for the same
+# service, not because they provisioned it differently, but because Laravel's
+# .env wiring had nowhere else to live. That wiring is now a config overlay, so
+# the service itself is shared.
+aliases: [django-redis]
+appliesTo: [laravel, magento, magento-mageos, woocommerce, woocommerce-bedrock, django]
+provides: [redis]
+default: true
+updated: 2026-08-12
+vars:
+  # Redis 8 is the current line. Licence note, because this ends up inside
+  # commercial projects: from Redis 8 the server is tri-licensed under RSALv2,
+  # SSPLv1 and AGPLv3 (7.2 and earlier were BSD-3). If AGPL in the stack is a
+  # problem, Valkey is the BSD-licensed fork of Redis 7.2.4 and is wire
+  # compatible with everything below. https://redis.io/legal/licenses/
+  redis.version: "8"
+  # The CACHE instance. Evicts under pressure, keeps nothing on restart.
+  redis.host: redis
+  redis.port: "6379"
+  redis.localPort: "6379"
+  # The DURABLE instance. Never evicts, survives a restart. Sessions, queues,
+  # locks, rate limiters: anything whose loss is a visible bug rather than a
+  # slower page.
+  redis.persistentHost: redis-persistent
+  redis.persistentPort: "6379"
+  redis.persistentLocalPort: "6380"
+files:
+  - path: .keel/redis/redis-cache.conf
+    content: |
+      # keel-generated: Redis configured AS A CACHE.
+      #
+      # Everything in this instance is disposable. It evicts under memory
+      # pressure and it keeps nothing across a restart. Point caches at it and
+      # nothing else: see redis-persistent.conf for the other half.
+      #
+      # Sources, all fetched 2026-08-12:
+      #   [1] Key eviction
+      #       https://redis.io/docs/latest/develop/reference/eviction/
+      #   [2] Redis configuration
+      #       https://redis.io/docs/latest/operate/oss_and_stack/management/config/
+      #   [3] Redis administration
+      #       https://redis.io/docs/latest/operate/oss_and_stack/management/admin/
+      #   [4] Redis persistence
+      #       https://redis.io/docs/latest/operate/oss_and_stack/management/persistence/
+      #   [5] redis.conf as shipped with Redis 8.10
+      #       https://raw.githubusercontent.com/redis/redis/8.10/redis.conf
+
+      # ----------------------------------------------------------------- network
+      # The container network. The published port is bound to 127.0.0.1 by the
+      # compose file, which is what keeps this off the LAN.
+      bind 0.0.0.0
+      protected-mode no
+      port 6379
+      # "On Linux, the specified value (in seconds) is the period used to send
+      # ACKs ... A reasonable value for this option is 300 seconds, which is the
+      # new Redis default starting with Redis 3.2.1." [5] Detects clients that
+      # vanished without closing, which otherwise hold connection slots.
+      tcp-keepalive 300
+      # "Note that the Linux kernel will silently truncate it to the value of
+      # /proc/sys/net/core/somaxconn so make sure to raise both the value of
+      # somaxconn and tcp_max_syn_backlog in order to get the desired effect." [5]
+      # 511 is the shipped default and is capped by the host, not by this file.
+      tcp-backlog 511
+      timeout 0
+
+      # ------------------------------------------------------------------ memory
+      # maxmemory defaults to 0, which means unbounded on a 64-bit system [1].
+      # An unbounded cache is not a cache, it is a memory leak with a TTL: it
+      # grows until the kernel OOM-kills it, taking every key with it at the
+      # worst possible moment.
+      #
+      # The documented way to size it: "Set an explicit maxmemory option limit in
+      # your instance to make sure that it will report errors instead of failing
+      # when the system memory limit is near to be reached. Note that maxmemory
+      # should be set by calculating the overhead for Redis, other than data, and
+      # the fragmentation overhead. So if you think you have 10 GB of free
+      # memory, set it to 8 or 9." [3]
+      #
+      # Arithmetic for a 1 GB container: 1024 MB x 0.75 = 768 MB. The remaining
+      # 256 MB is allocator fragmentation, client output buffers and the process
+      # itself, not spare capacity. This instance never forks to write a snapshot
+      # (persistence is off below), so it does not need the copy-on-write
+      # headroom the durable instance does.
+      maxmemory 768mb
+
+      # THE CHOICE THAT MAKES THIS A CACHE. The default is noeviction [5], which
+      # means "Keys are not evicted but the server will return an error when you
+      # try to execute commands that cache new data" [1]. On a cache that is
+      # exactly wrong: a full cache starts refusing writes instead of forgetting
+      # the least useful key, and every cache miss stays a miss.
+      #
+      # allkeys-lru "Evict the least recently used (LRU) keys" [1], and the docs
+      # recommend it as the default choice: "Use allkeys-lru when you expect that
+      # a subset of elements will be accessed far more often than the rest. This
+      # is a very common case according to the Pareto principle, so allkeys-lru
+      # is a good default option if you have no reason to prefer any others." [1]
+      #
+      # allkeys, not volatile: a volatile-* policy only evicts keys that have a
+      # TTL, and "The volatile-xxx policies behave like noeviction if no keys
+      # have an associated expiration" [1]. One cache entry written without an
+      # expiry and the instance is back to erroring on writes.
+      # It is also cheaper: "setting an expire value for a key costs memory, so a
+      # policy like allkeys-lru is more memory efficient since it doesn't need an
+      # expire value to operate" [1].
+      maxmemory-policy allkeys-lru
+      # "The default of 5 produces good enough results. 10 Approximates very
+      # closely true LRU but costs more CPU." [5]
+      maxmemory-samples 5
+
+      # ------------------------------------------------------------- persistence
+      # Both forms of persistence are OFF, deliberately.
+      #
+      # An empty `save` disables RDB snapshots. Redis otherwise saves "After 3600
+      # seconds (an hour) if at least 1 change was performed / After 300 seconds
+      # (5 minutes) if at least 100 changes were performed / After 60 seconds if
+      # at least 10000 changes were performed" [5], and every one of those
+      # snapshots forks the process and writes the whole dataset to disk. For
+      # data that is by definition rebuildable that is pure cost: disk I/O,
+      # latency spikes during the fork, and up to twice the memory in a
+      # write-heavy moment.
+      save ""
+      appendonly no
+      # Without this, a snapshot that fails (a full disk, say) makes Redis refuse
+      # every write until an admin intervenes. On a cache, a failed snapshot of
+      # data nobody needs must not take the site down.
+      stop-writes-on-bgsave-error no
+
+      # ------------------------------------------------------------------- misc
+      # "By default this limit is set to 10000 clients, however if the Redis
+      # server is not able to configure the process file limit to allow for the
+      # specified limit the max number of allowed clients is set to the current
+      # file limit minus 32" [5].
+      maxclients 10000
+      databases 16
+      # Freeing a large key blocks the server; on eviction that is a latency
+      # spike in the request that happened to trigger it. Redis ships all the
+      # lazyfree options off ("the default is to delete objects in a blocking
+      # way, like if DEL was called" [5]); on an evicting cache the asynchronous
+      # form is what keeps eviction off the critical path.
+      lazyfree-lazy-eviction yes
+      lazyfree-lazy-expire yes
+      lazyfree-lazy-server-del yes
+
+      # io-threads is left off. "By default threading is disabled, we suggest
+      # enabling it only in machines that have at least 4 or more cores, leaving
+      # at least one spare core. We also recommend using threaded I/O only if you
+      # actually have performance problems" [5]. Redis is single-threaded for
+      # command execution regardless; threads only move socket reads and writes.
+
+      # NO PASSWORD is set, because this instance is reachable only from the
+      # project's own network and is published on loopback. Before it is exposed
+      # to anything else, add `requirepass` or, better, an ACL user: "Redis
+      # provides two ways to authenticate clients. The recommended authentication
+      # method, introduced in Redis 6, is via Access Control Lists"
+      # https://redis.io/docs/latest/operate/oss_and_stack/management/security/
+      # The same page: "Redis is designed to be accessed by trusted clients
+      # inside trusted environments."
+  - path: .keel/redis/redis-persistent.conf
+    content: |
+      # keel-generated: Redis configured AS A DURABLE STORE.
+      #
+      # Sessions, queues, locks and rate limiters live here. Nothing in this
+      # instance is evicted, and it survives a restart.
+      #
+      # WHY THIS IS A SECOND INSTANCE, not a second database number on the first
+      # one: the eviction policy is per INSTANCE, not per database. Point sessions
+      # at db 2 of an allkeys-lru cache and Redis will, under memory pressure,
+      # evict session keys exactly like any other key. The visible symptom is
+      # customers being logged out at random during a traffic spike, and it is
+      # unreproducible afterwards because the cache is no longer full.
+      #
+      # Redis says the same thing about the mixed-use policies: "The volatile-lru,
+      # volatile-lrm, and volatile-random policies are mainly useful when you want
+      # to use a single Redis instance for both caching and for a set of
+      # persistent keys. However, you should consider running two separate Redis
+      # instances in a case like this, if possible."
+      # https://redis.io/docs/latest/develop/reference/eviction/
+      #
+      # Sources: as redis-cache.conf.
+
+      bind 0.0.0.0
+      protected-mode no
+      port 6379
+      tcp-keepalive 300
+      tcp-backlog 511
+      timeout 0
+
+      # ------------------------------------------------------------------ memory
+      # Lower than the cache instance relative to its container, and for a
+      # documented reason: this one forks to rewrite the AOF. "If you are using
+      # Redis in a write-heavy application, while saving an RDB file on disk or
+      # rewriting the AOF log, Redis can use up to 2 times the memory normally
+      # used."
+      # https://redis.io/docs/latest/operate/oss_and_stack/management/admin/
+      #
+      # Arithmetic for a 1 GB container: 1024 MB x 0.45 = 460 -> 448 MB, which
+      # leaves room for the copy-on-write pages a rewrite dirties. Size the
+      # container from the real working set: sessions are small but numerous, and
+      # a queue backlog is unbounded by nature.
+      maxmemory 448mb
+
+      # THE CHOICE THAT MAKES THIS DURABLE. noeviction is the shipped default and
+      # the right one here: "Keys are not evicted but the server will return an
+      # error when you try to execute commands that cache new data. ... Note that
+      # commands that only read existing data still work as normal."
+      # The client sees `OOM command not allowed when used memory > 'maxmemory'`.
+      #
+      # That is a loud failure, and it is the point. A queue that refuses to
+      # accept a job is a page and an alert; a queue that silently drops the job
+      # to make room is a customer order that never shipped. Reads keep working,
+      # so existing sessions and in-flight jobs are unaffected while you add
+      # memory or drain the backlog.
+      maxmemory-policy noeviction
+
+      # ------------------------------------------------------------- persistence
+      # AOF, because of the size of the loss window. The two mechanisms:
+      #
+      #   RDB snapshots - "you'll usually create an RDB snapshot every five
+      #   minutes or more, so in case of Redis stopping working without a correct
+      #   shutdown for any reason you should be prepared to lose the latest
+      #   minutes of data" and "Snapshotting is not very durable. If your computer
+      #   running Redis stops, your power line fails, or you accidentally kill -9
+      #   your instance, the latest data written to Redis will be lost."
+      #
+      #   AOF with appendfsync everysec - "Fast enough (since version 2.4 likely
+      #   to be as fast as snapshotting), and you may lose 1 second of data if
+      #   there is a disaster", and "fsync is performed using a background thread
+      #   and the main thread will try hard to perform writes when no fsync is in
+      #   progress, so you can only lose one second worth of writes."
+      # https://redis.io/docs/latest/operate/oss_and_stack/management/persistence/
+      #
+      # Stated plainly: this configuration can lose up to one second of writes on
+      # a power cut. `appendfsync always` closes that window ("Very very slow,
+      # very safe") at a cost most session and queue workloads will not accept.
+      # `appendfsync no` hands the decision to the kernel: "Normally Linux will
+      # flush data every 30 seconds with this configuration".
+      appendonly yes
+      appendfsync everysec
+      appendfilename "appendonly.aof"
+      appenddirname "appendonlydir"
+      # Do not fsync during a rewrite: the rewrite already saturates the disk, and
+      # fsyncing on top of it is the classic source of multi-second stalls.
+      no-appendfsync-on-rewrite yes
+      auto-aof-rewrite-percentage 100
+      auto-aof-rewrite-min-size 64mb
+
+      # RDB as well as AOF, which is what the docs recommend when the data
+      # matters: "The general indication you should use both persistence methods
+      # is if you want a degree of data safety comparable to what PostgreSQL can
+      # provide you", and RDB stays useful "for doing database backups, for
+      # faster restarts, and in the event of bugs in the AOF engine". On restart
+      # "the AOF file will be used to reconstruct the original dataset since it is
+      # guaranteed to be the most complete".
+      save 900 1
+      save 300 10
+      save 60 10000
+      # The opposite of the cache instance: if a snapshot cannot be written,
+      # refusing writes is the correct, visible failure.
+      stop-writes-on-bgsave-error yes
+      rdbcompression yes
+      rdbchecksum yes
+      dbfilename dump.rdb
+      dir /data
+
+      maxclients 10000
+      databases 16
+      # No lazy eviction here: nothing is evicted. Lazy expiry still helps, since
+      # a large expired key would otherwise block the server while it is freed.
+      lazyfree-lazy-expire yes
+  - path: docker-compose.redis.yml
+    content: |
+      # keel-generated: two Redis instances, because a cache and a session store
+      # want opposite settings. Full reasoning in .keel/redis/*.conf.
+      #
+      # Standalone: docker compose -f docker-compose.redis.yml up -d
+      # Or merged:  docker compose -f docker-compose.yml -f docker-compose.redis.yml up -d
+      services:
+        # Disposable. Evicts under pressure. Loses everything on restart.
+        redis:
+          image: redis:{{redis.version}}
+          restart: unless-stopped
+          # The image's documented config path.
+          # https://hub.docker.com/_/redis
+          command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+          volumes:
+            - ./.keel/redis/redis-cache.conf:/usr/local/etc/redis/redis.conf:ro
+          ports:
+            - "127.0.0.1:{{redis.localPort}}:6379"
+          healthcheck:
+            # PONG comes from the server, so this proves it is answering
+            # commands rather than that the port is open: while an AOF or RDB is
+            # being loaded the server replies with the documented
+            # `LOADING Redis is loading the dataset in memory` error instead.
+            # https://redis.io/docs/latest/develop/clients/error-handling/
+            # Grepping for PONG rather than trusting an exit code, because
+            # redis-cli's exit status on an error reply is not documented.
+            test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+            interval: 10s
+            timeout: 3s
+            retries: 10
+            start_period: 10s
+        # Durable. Never evicts. Survives a restart. Sessions, queues, locks.
+        redis-persistent:
+          image: redis:{{redis.version}}
+          restart: unless-stopped
+          command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+          volumes:
+            - ./.keel/redis/redis-persistent.conf:/usr/local/etc/redis/redis.conf:ro
+            # A named volume, because the whole point of this instance is that
+            # its data outlives the container.
+            - redis-persistent-data:/data
+          ports:
+            - "127.0.0.1:{{redis.persistentLocalPort}}:6379"
+          healthcheck:
+            test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+            interval: 10s
+            timeout: 3s
+            retries: 10
+            # Longer than the cache instance: this one replays its AOF at start,
+            # and until that finishes it answers LOADING rather than PONG.
+            start_period: 30s
+      volumes:
+        redis-persistent-data:
+  - path: REDIS.md
+    content: |
+      # Redis (scaffolded by keel)
+
+      Two instances, on purpose:
+
+      | Host | Port (host) | Policy | Persistence | Use it for |
+      |---|---|---|---|---|
+      | `{{redis.host}}` | 127.0.0.1:{{redis.localPort}} | `allkeys-lru` | none | caches, computed fragments, anything rebuildable |
+      | `{{redis.persistentHost}}` | 127.0.0.1:{{redis.persistentLocalPort}} | `noeviction` | AOF every second + RDB | sessions, queues, locks, rate limits, idempotency keys |
+
+      ## Why not one instance with different database numbers
+
+      The eviction policy is a property of the instance, not of the database
+      number. On a single `allkeys-lru` instance, Redis under memory pressure
+      evicts whichever key is least recently used, and it does not care that the
+      key happens to be a session in `db 2` or a queued job in `db 3`. The
+      symptom is users logged out at random during a traffic spike and jobs that
+      vanish without an error, and it disappears the moment traffic drops, which
+      is why it survives so long in production.
+
+      Redis's own guidance points the same way: the mixed-use `volatile-*`
+      policies "are mainly useful when you want to use a single Redis instance
+      for both caching and for a set of persistent keys. However, you should
+      consider running two separate Redis instances in a case like this, if
+      possible."
+      https://redis.io/docs/latest/develop/reference/eviction/
+
+      ## Wire it up
+
+      - **Laravel** - `REDIS_HOST={{redis.host}}` for `CACHE_STORE=redis`, and a
+        second connection on `{{redis.persistentHost}}` for
+        `QUEUE_CONNECTION=redis` and `SESSION_DRIVER=redis`.
+      - **Django** - `CACHES["default"]` at `{{redis.host}}`;
+        `SESSION_ENGINE`/Celery broker at `{{redis.persistentHost}}`.
+      - **Magento** - the installer points cache (db 0), page cache (db 1) and
+        sessions (db 2) at one host. Move the session store:
+
+            bin/magento setup:config:set --session-save=redis \
+              --session-save-redis-host={{redis.persistentHost}} \
+              --session-save-redis-port={{redis.persistentPort}} \
+              --session-save-redis-db=0
+
+      ## Host settings Redis warns about at start-up
+
+      Both are kernel settings, so they belong to the Docker host and cannot be
+      set from inside a container:
+
+          sysctl vm.overcommit_memory=1        # or the background save fails to fork
+          echo never > /sys/kernel/mm/transparent_hugepage/enabled
+
+      "if the overcommit_memory setting is set to zero the fork will fail unless
+      there is as much free RAM as required to really duplicate all the parent
+      memory pages."
+      https://redis.io/docs/latest/operate/oss_and_stack/management/admin/
+
+      ## No password
+
+      Neither instance sets `requirepass`, and both publish only on 127.0.0.1.
+      Add an ACL user before either is reachable from anywhere else.
+provision:
+  ddev:
+    files:
+      - path: .ddev/docker-compose.redis.yaml
+        content: |
+          # keel-generated: Redis {{redis.version}} for DDEV, as two instances.
+          # Rationale for every setting: .keel/redis/*.conf.
+          services:
+            redis:
+              container_name: ddev-${DDEV_SITENAME}-redis
+              image: redis:{{redis.version}}
+              hostname: redis
+              restart: "no"
+              command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+              labels:
+                com.ddev.site-name: ${DDEV_SITENAME}
+                com.ddev.approot: ${DDEV_APPROOT}
+              expose:
+                - "6379"
+              volumes:
+                # Relative to .ddev/, so these are the project-root copies.
+                - "../.keel/redis/redis-cache.conf:/usr/local/etc/redis/redis.conf:ro"
+              healthcheck:
+                test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+                interval: 10s
+                timeout: 3s
+                retries: 10
+                start_period: 10s
+            redis-persistent:
+              container_name: ddev-${DDEV_SITENAME}-redis-persistent
+              image: redis:{{redis.version}}
+              hostname: redis-persistent
+              restart: "no"
+              command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+              labels:
+                com.ddev.site-name: ${DDEV_SITENAME}
+                com.ddev.approot: ${DDEV_APPROOT}
+              expose:
+                - "6379"
+              volumes:
+                - "../.keel/redis/redis-persistent.conf:/usr/local/etc/redis/redis.conf:ro"
+                - "redis-persistent:/data"
+              healthcheck:
+                test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+                interval: 10s
+                timeout: 3s
+                retries: 10
+                start_period: 30s
+            web:
+              depends_on:
+                - redis
+                - redis-persistent
+          volumes:
+            redis-persistent:
+    install:
+      - "{{restart}}"
+  # The environment's stack may already declare a `redis` service; this file
+  # merges the tuned config into it and adds the durable instance beside it:
+  #   docker compose -f docker-compose.yml -f docker-compose.redis.yml up -d
+  compose: {}
+  sail: {}
+  local:
+    install:
+      - "docker compose -f docker-compose.redis.yml up -d"

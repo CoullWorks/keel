@@ -1,0 +1,534 @@
+id: symfony-php-fpm
+schema_version: 2
+kind: config
+label: Symfony production PHP-FPM image, php.ini and pool
+# The INDIVIDUAL PHP half for Symfony. The shared baseline
+# (recipes/frameworks/php/shared/php-production.yaml) supplies expose_php,
+# display_errors, the session hardening and the FPM [global] block, and is read
+# first; nothing from it is repeated here.
+#
+# Symfony is the framework that publishes exact php.ini numbers and no pool
+# numbers at all, which is the reverse of Magento. Everything in the [opcache]
+# section of docker/php/conf.d/10-symfony.ini is quoted from symfony.com; everything in
+# the pool file is keel's, and says so.
+#
+# Also owns compose.yaml: PHP and the database are the same whichever web
+# server you picked. The web server arrives as a compose override from the env.
+when:
+  framework: symfony
+  env: compose
+priority: -20
+updated: 2026-08-12
+# The PHP line chosen in the wizard, written where compose will read it.
+# It goes through .env rather than into the Dockerfile because the Dockerfile
+# is verbatim: it is full of ${...} that must reach Docker untouched.
+patch:
+  - file: .env
+    set:
+      PHP_VERSION: "{{pin.php_version}}"
+      # Your uid and gid, so the dev image can give its application user the
+      # same ones. Without this, FPM writes as uid 33 into a tree you own and
+      # neither side can write the other's files. Committed to .env rather than
+      # compose.yaml because they are specific to this machine.
+      APP_UID: "{{uid}}"
+      APP_GID: "{{gid}}"
+files:
+  - path: Dockerfile
+    verbatim: true
+    content: |
+      # syntax=docker/dockerfile:1
+      # keel-generated. Production Symfony image: PHP-FPM, never `symfony serve`.
+      #
+      # `symfony serve` (and `php -S`) is the Symfony CLI's development server. It
+      # is a development tool and appears nowhere in this file. Symfony's own web
+      # server page is explicit that both nginx and Apache "require PHP-FPM
+      # (install the php-fpm package)", which is what this image is.
+      #
+      # Build the deployable image explicitly:
+      #   docker build --target prod -t myapp:1.2.3 .
+
+      # 8.4, not 8.3. Symfony 8.1 (current stable) requires PHP >= 8.4; the 7.4
+      # LTS floor is 8.2 and 6.4 LTS is 8.1. Pinning 8.3 supports the LTS but not
+      # current stable, which is the version constraint people trip over most.
+      # Note that symfony.com's own nginx example still shows a php8.3-fpm socket.
+      # docs/infra/symfony.md, sources 1, 2 and 5.
+      ARG PHP_VERSION=8.4
+      ARG PHP_BASE=php:${PHP_VERSION}-fpm-bookworm
+
+      # ---------------------------------------------------------------- base ---
+      FROM ${PHP_BASE} AS base
+
+      # Symfony's framework-level requirement is only Ctype, iconv, PCRE, Session,
+      # SimpleXML and Tokenizer, all of which the official image already builds in.
+      # Everything below is component-driven: pdo_pgsql for Doctrine, intl for the
+      # Intl component, zip for Composer, redis for the Messenger and cache
+      # transports. docs/infra/symfony.md, source 2.
+      # libfcgi-bin supplies cgi-fcgi for the healthcheck.
+      RUN set -eux; \
+          apt-get update; \
+          apt-get install -y --no-install-recommends \
+            libicu-dev libpq-dev libzip-dev libfcgi-bin git unzip; \
+          docker-php-ext-install -j"$(nproc)" intl pdo_pgsql zip; \
+          pecl install redis; \
+          docker-php-ext-enable redis; \
+          # purge WITHOUT --auto-remove. The -dev packages are safe to drop, but
+          # --auto-remove also takes the runtime libraries they pulled in - libzip4,
+          # libicu and friends - which the extensions compiled a line earlier are
+          # dynamically linked against. The image still builds; PHP then warns
+          # "Unable to load dynamic library" on every start and FPM exits 78.
+          apt-get purge -y libicu-dev libzip-dev; \
+          rm -rf /var/lib/apt/lists/* /tmp/pear
+
+      RUN docker-php-ext-enable opcache
+
+      # The stock pool is a 5-child development pool. docker.conf and
+      # zz-docker.conf stay: they set listen = 9000, clear_env,
+      # catch_workers_output and daemonize = no.
+      RUN rm -f /usr/local/etc/php-fpm.d/www.conf /usr/local/etc/php-fpm.d/www.conf.default
+
+      # 00-php-production.ini (shared) then 10-symfony.ini (Symfony's numbers).
+      COPY docker/php/conf.d/ /usr/local/etc/php/conf.d/
+      # zz-global.conf (shared [global]) then zzz-symfony-pool.conf (our [www]).
+      COPY docker/php/php-fpm.d/ /usr/local/etc/php-fpm.d/
+
+      WORKDIR /var/www/html
+
+      # php-fpm.8: SIGQUIT is the graceful stop, SIGTERM and SIGINT terminate
+      # immediately. Docker sends SIGTERM by default.
+      STOPSIGNAL SIGQUIT
+
+      HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=3 \
+        CMD SCRIPT_NAME=/fpm-ping SCRIPT_FILENAME=/fpm-ping REQUEST_METHOD=GET \
+            cgi-fcgi -bind -connect 127.0.0.1:9000 || exit 1
+
+      EXPOSE 9000
+      CMD ["php-fpm"]
+
+      # -------------------------------------------------------------- vendor ---
+      FROM composer:2 AS vendor
+      WORKDIR /app
+      # APP_ENV must be set BEFORE composer runs. Symfony's deployment page warns
+      # that a "class not found" error during deployment is usually this: the
+      # post-install-cmd scripts ran in the wrong environment.
+      ENV APP_ENV=prod
+      ENV APP_DEBUG=0
+      COPY composer.json composer.lock symfony.lock ./
+      # Symfony's published flags, verbatim: --no-dev "ensures that development
+      # packages are not installed in the production environment" and
+      # --optimize-autoloader "improves Composer's autoloader performance by
+      # building a class map". docs/infra/symfony.md, source 3.
+      #
+      # Not --classmap-authoritative: Symfony's own docs do not ask for it, and it
+      # breaks any bundle that resolves classes outside the map (a lazy proxy, a
+      # generated container class that has not been dumped yet).
+      RUN composer install --no-dev --optimize-autoloader --no-scripts \
+            --no-interaction --prefer-dist --no-progress
+      COPY . .
+      RUN composer dump-autoload --no-dev --optimize --no-interaction
+
+      # ----------------------------------------------------------------- dev ---
+      # What compose.yaml builds. Root, deliberately: the project is
+      # bind-mounted from the host and var/ has to stay writable by your uid.
+      FROM base AS dev
+      # Development overrides, dev stage only: opcache timestamp validation back
+      # on, realpath cache short, errors on screen. Without the first of these,
+      # the bind-mounted code you are editing is not the code being run.
+      COPY docker/php/dev/95-dev.ini /usr/local/etc/php/conf.d/95-dev.ini
+      # The one thing the dev image must agree with the host about: who you are.
+      #
+      # The project is bind-mounted, so the tree inside the container is the tree
+      # in your editor, with your uid on every file. FPM's pool runs as www-data,
+      # which is uid 33 in this image, and uid 33 cannot write a file owned by
+      # uid 1000. The two then take turns losing: the application could not append
+      # to storage/logs/laravel.log, and once it had created that log itself,
+      # composer running as you could not append to it either. Both failures
+      # surface as something unrelated - a 500 with a tempnam() notice, or a
+      # composer post-install script exiting 1.
+      #
+      # So www-data adopts your uid here. This is what Laravel Sail does with
+      # WWWUSER, and it is confined to the dev stage: the prod image below has no
+      # bind mount and keeps the distribution's own uid 33.
+      #
+      # `|| true`: the numbers may already be taken in the base image, and on a
+      # rootless or Docker Desktop setup the host uid may already map to the
+      # container user, in which case there is nothing to change and nothing
+      # wrong. The chown afterwards catches the files the image itself created.
+      ARG APP_UID=1000
+      ARG APP_GID=1000
+      RUN if [ "$APP_UID" != "33" ]; then \
+            groupmod -o -g "$APP_GID" www-data || true; \
+            usermod -o -u "$APP_UID" -g "$APP_GID" www-data || true; \
+            chown -R "$APP_UID:$APP_GID" /var/www/html || true; \
+          fi
+      COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
+      ENV COMPOSER_ALLOW_SUPERUSER=1
+
+      # ---------------------------------------------------------------- prod ---
+      FROM base AS prod
+      ENV APP_ENV=prod
+      ENV APP_DEBUG=0
+      COPY --from=vendor /app /var/www/html
+      # The rest of Symfony's documented deployment sequence. dump-env compiles the
+      # .env files into a single optimised .env.local.php; --empty generates it
+      # without values so only real environment variables are used, which is what
+      # you want when the container gets its config from the orchestrator.
+      # docs/infra/symfony.md, source 3.
+      RUN set -eux; \
+          composer dump-env prod --empty || php bin/console dotenv:dump prod --empty; \
+          php bin/console cache:clear --no-warmup; \
+          php bin/console cache:warmup
+      # Only var/ needs to be writable, and only two subdirectories of it:
+      # "The var/log/ directory must exist and must be writable by both your web
+      # server user and the terminal user"; var/cache/ must be writable by the web
+      # server user "if you use a filesystem-based cache". Nothing under public/,
+      # config/, src/ or vendor/ does. docs/infra/symfony.md, source 8.
+      RUN chown -R www-data:www-data /var/www/html/var
+      USER www-data
+
+  - path: .dockerignore
+    verbatim: true
+    content: |
+      # keel-generated.
+      .git
+      .gitignore
+      .github
+      .keel
+      .idea
+      .vscode
+      .env.local
+      .env.*.local
+      docker-compose*.yml
+      Dockerfile
+      .dockerignore
+      vendor
+      node_modules
+      # The only directory Symfony writes to. A host cache in the image is a stale
+      # compiled container waiting to be served.
+      var
+      tests
+      phpunit.xml.dist
+      .phpunit.result.cache
+      README.md
+
+  - path: docker/php/dev/95-dev.ini
+    verbatim: true
+    content: |
+      ; keel-generated, and copied ONLY into the dev stage of the Dockerfile.
+      ;
+      ; The production baseline sets opcache.validate_timestamps = 0, which is
+      ; correct for an immutable image: the code cannot change under a running
+      ; container, so checking every file on every request is pure overhead.
+      ;
+      ; The dev stage bind-mounts your working tree, where the code changes
+      ; constantly, and there the same setting is a trap. PHP keeps serving the
+      ; version of every file it compiled when the container started: you edit a
+      ; controller, reload, and see the old page. Nothing errors and nothing in
+      ; the logs mentions it. It also hides new code entirely - a package
+      ; installed after boot stays invisible until the container is restarted,
+      ; which is how a freshly installed Telescope answered 404 on a route that
+      ; `artisan route:list` could see perfectly well.
+      ;
+      ; Read last (95- sorts after 00- and 10-), so it overrides the baseline.
+      opcache.validate_timestamps = 1
+      ; Check on every request. The stat() is cheap next to being served code
+      ; that is one edit out of date.
+      opcache.revalidate_freq = 0
+
+      ; The realpath cache has exactly the same problem: a stale entry means a
+      ; file you just created is reported as missing. 
+      realpath_cache_ttl = 10
+
+      ; Development display settings. The production baseline sends errors to the
+      ; log and shows the user nothing, which is right in production and useless
+      ; on your own machine.
+      display_errors = On
+      display_startup_errors = On
+      error_reporting = E_ALL
+  - path: docker/php/conf.d/10-symfony.ini
+    verbatim: true
+    content: |
+      ; keel-generated. Symfony's own PHP values.
+      ; Read after docker/php/conf.d/00-php-production.ini (shared baseline), so anything
+      ; here wins.
+      ;
+      ; The [opcache] section below is quoted from symfony.com/doc/current/performance
+      ; and the comments are Symfony's own reasoning. Symfony is unusual in
+      ; publishing exact numbers: Laravel, WordPress and WooCommerce publish none.
+      ; docs/infra/symfony.md, source 4.
+
+      [PHP]
+      ; Symfony documents NO memory_limit (docs/infra/symfony.md, open question 1).
+      ; php.ini-production ships 128M. 256M is keel's choice: Doctrine hydration of
+      ; a large result set and console commands that batch are what exceed 128M
+      ; first, and a fatal there is far more expensive than the reserved memory.
+      memory_limit = 256M
+
+      ; Symfony documents no max_execution_time either. php.ini-production's 30 is
+      ; kept: a web request that takes longer than 30 seconds belongs on a
+      ; Messenger transport. The pool's request_terminate_timeout is the backstop.
+      max_execution_time = 30
+
+      ; Symfony, verbatim: "maximum memory allocated to store the realpath results"
+      ; and "save the results for 10 minutes (600 seconds)", with the note that
+      ; "Applications that open many PHP files, such as Symfony projects, should
+      ; use at least these values". PHP's defaults are 4096K and 120.
+      ;
+      ; The trap Symfony records alongside them, and it is worth knowing before you
+      ; spend an afternoon on it: "PHP disables the realpath cache when the
+      ; open_basedir config option is enabled". Set open_basedir and every value
+      ; here does nothing.
+      realpath_cache_size = 4096K
+      realpath_cache_ttl = 600
+
+      [opcache]
+      ; "maximum memory that OPcache can use to store compiled PHP files"
+      ; (Symfony's own comment). PHP's default is 128.
+      opcache.memory_consumption = 256
+
+      ; "maximum number of files that can be stored in the cache". Note the number
+      ; is not round: 32531 is a prime from the set the PHP manual documents
+      ; ({223, 463, 983, 1979, 3907, 7963, 16229, 32531, 65407, ...}), and PHP
+      ; rounds any configured value up to the first of those that is >= it. Symfony
+      ; publishing the prime directly means the effective value is exactly the
+      ; stated one. PHP's default is 10000.
+      opcache.max_accelerated_files = 32531
+
+      ; The one nobody sets, with Symfony's own reason, verbatim: "memory (in MB)
+      ; for interned strings; the default value (8 MB) is too low for Symfony
+      ; applications, which use many fully-qualified class names". The PHP manual
+      ; caps this at 32767 on 64-bit builds (4095 before PHP 8.4).
+      opcache.interned_strings_buffer = 32
+
+      ; No timestamp check per request. Symfony states the consequence plainly:
+      ; "After each deployment, you must empty and regenerate the OPcache.
+      ; Otherwise you won't see the updates made in the application. Since PHP CLI
+      ; and web processes don't share the same OPcache, you cannot clear it via CLI
+      ; commands." The three documented remedies are restarting the web server,
+      ; calling opcache_reset() through the web server, or using cachetool.
+      ; Replacing the container does the first of those for you.
+      ; If you bind-mount code for development, set this back to 1.
+      opcache.validate_timestamps = 0
+
+      ; Class preloading. Symfony's framework-bundle recipe generates
+      ; config/preload.php; the path below assumes the app is at /var/www/html.
+      ; Preloading compiles the framework into shared memory once at FPM master
+      ; start, so every worker skips that work.
+      ;
+      ; If config/preload.php does not exist, PHP logs a preload failure at startup
+      ; and carries on serving. Comment both lines out rather than leaving a broken
+      ; path if you are on a skeleton without framework-bundle.
+      opcache.preload = /var/www/html/config/preload.php
+      ; Must be the user the pool runs as, or preloading is refused when the master
+      ; starts as root. As of PHP 8.3 the manual says this no longer needs setting
+      ; to allow preloading as root; it is set anyway because it is what Symfony
+      ; documents and it is explicit.
+      opcache.preload_user = www-data
+
+      ; PHP's default, restated deliberately. Doctrine is the first thing the PHP
+      ; manual names when it warns that disabling doc comments "may break
+      ; applications and frameworks that rely on comment parsing for annotations,
+      ; including Doctrine, Zend Framework 2 and PHPUnit". Symfony 8 favours
+      ; attributes over annotations, but a real application's dependencies do not
+      ; all agree, and the failure looks like a mapping bug rather than an ini one.
+      opcache.save_comments = 1
+
+      ; opcache.jit is not mentioned by Symfony's performance page at all, neither
+      ; recommended nor discouraged (docs/infra/symfony.md, open question 5), so it
+      ; is left at PHP's default rather than guessed at.
+
+  - path: docker/php/php-fpm.d/zzz-symfony-pool.conf
+    verbatim: true
+    content: |
+      ; keel-generated. Symfony's PHP-FPM pool.
+      ; Read after docker/php/php-fpm.d/zz-global.conf (shared [global]) and the
+      ; official image's docker.conf and zz-docker.conf.
+      ;
+      ; Symfony publishes NO pool guidance: no pm mode, no pm.max_children, no
+      ; pm.max_requests, no request_terminate_timeout. All it says is that both
+      ; nginx and Apache require the php-fpm package. docs/infra/symfony.md, open
+      ; question 2. Every number here is keel's, with its assumptions written down.
+
+      [www]
+      ; Set unconditionally, not commented out. The dev stage that compose builds
+      ; runs the FPM master as root so the bind-mounted host tree stays writable,
+      ; and a root master with no user in the pool refuses to start:
+      ;   ALERT: [pool www] user has not been defined
+      ;   ERROR: FPM initialization failed
+      ; The prod image runs the whole container as www-data, where FPM simply
+      ; ignores these with a NOTICE, so one setting is correct for both. Note the interaction with opcache.preload_user in
+      ; docker/php/conf.d/10-symfony.ini: the two must name the same user.
+      user = www-data
+      group = www-data
+
+      listen = 9000
+      ; listen.allowed_clients is deliberately not set, and 127.0.0.1 is the
+      ; wrong value for it here.
+      ;
+      ; It filters on the peer address, and in compose the peer is the web
+      ; server in its own container, arriving from an address on the bridge
+      ; network that Docker assigns at run time. 127.0.0.1 is the loopback
+      ; inside THIS container, so nothing that is not this container can match
+      ; it: FPM accepted every connection from nginx and reset it immediately,
+      ; and the site answered 502 Bad Gateway on every request.
+      ;
+      ; Unset means any peer, and the isolation comes from the network instead:
+      ; port 9000 is published to no one, so the only things that can reach it
+      ; are the services on the same compose network. On a VM where FPM and the
+      ; web server share a host, use a unix socket with listen.owner and
+      ; listen.group, which is a stronger boundary than an address list.
+
+      pm = dynamic
+
+      ; pm.max_children = RAM available to PHP / peak RSS of one worker.
+      ; Worked as 2048 MB (a 2 GB container) / 64 MB per worker = 32.
+      ;
+      ; MEASURE THE 64 BEFORE YOU TRUST IT. Under load:
+      ;   ps -o rss= -C php-fpm | sort -n | tail -5
+      ; Preloading (opcache.preload) lowers per-worker private memory, because the
+      ; framework's compiled classes live in shared memory instead of being
+      ; duplicated per worker, so a preloaded Symfony often supports a higher
+      ; number here than the same app without it.
+      pm.max_children = 32
+      pm.start_servers = 8
+      pm.min_spare_servers = 4
+      pm.max_spare_servers = 12
+
+      ; The manual's default is 0, meaning a worker never respawns and a leak in
+      ; any dependency grows until the OOM killer intervenes. 500 is keel's number.
+      pm.max_requests = 500
+
+      ; The backstop for when max_execution_time (30s) does not stop the script,
+      ; which is exactly what the manual says this directive is for. Set above
+      ; max_execution_time so PHP's own error fires first and is logged with a
+      ; stack trace, rather than the worker dying silently.
+      request_terminate_timeout = 60s
+      request_terminate_timeout_track_finished = yes
+
+      request_slowlog_timeout = 10s
+      slowlog = /proc/self/fd/2
+
+      pm.status_path = /fpm-status
+      ping.path = /fpm-ping
+      ping.response = pong
+
+      security.limit_extensions = .php
+
+  - path: docker/php/supervisor/messenger-worker.conf
+    verbatim: true
+    content: |
+      ; keel-generated. Symfony Messenger worker under Supervisor, for a VM or bare
+      ; metal deploy. This is Symfony's published block (docs/infra/symfony.md,
+      ; source 9) with the paths changed.
+      ;
+      ; There is deliberately NO worker container in compose.yaml: Symfony
+      ; requires no queue at all, and a container running `messenger:consume async`
+      ; against an app without Messenger installed would crash-loop. Add one once
+      ; you have a transport configured.
+      ;
+      ; Install to /etc/supervisor/conf.d/messenger-worker.conf, then:
+      ;   supervisorctl reread && supervisorctl update
+      ;   supervisorctl start messenger-consume:*
+      ; and on every deploy: supervisorctl restart messenger-consume:*
+
+      [program:messenger-consume]
+      command=php /var/www/html/bin/console messenger:consume async --time-limit=3600
+      user=www-data
+      numprocs=2
+      startsecs=0
+      autostart=true
+      autorestart=true
+      startretries=10
+      process_name=%(program_name)s_%(process_num)02d
+
+      ; The other documented recycling limits, for reference:
+      ;   --time-limit=3600   retire the worker after an hour
+      ;   --memory-limit=128M retire it when it has grown past a ceiling
+      ;   --limit=10          retire it after N messages
+      ;
+      ; On deploy, run `php bin/console messenger:stop-workers` after the cache
+      ; warmup. Symfony, verbatim: "This sets a cache flag telling each worker to
+      ; finish its current message and exit cleanly. The process manager then
+      ; restarts them against the new codebase." Restarting the process manager
+      ; without it kills messages mid-handler.
+
+  - path: compose.yaml
+    verbatim: true
+    content: |
+      # keel-generated. Symfony application stack: PHP-FPM and PostgreSQL.
+      #
+      # Deliberately small. Symfony itself requires no external service at all: no
+      # database, no cache server, no queue and no search engine are mandatory.
+      # docs/infra/symfony.md. PostgreSQL is here because Doctrine is the
+      # documented persistence layer and something has to answer DATABASE_URL; drop
+      # the service if your app does not use it.
+      #
+      # No web server here: that is the choice you make by selecting the nginx or
+      # apache service, which writes compose.override.yaml with the container and
+      # Symfony's own server block. Compose merges it over compose.yaml with no
+      # extra flags.
+      #
+      # A local stack: bind-mounts your working tree and builds the Dockerfile's
+      # `dev` target. The deployable image is `--target prod`.
+      services:
+        php:
+          build:
+            context: .
+            target: dev
+            args:
+              # The PHP line chosen in the wizard, written to .env by this
+              # recipe. The Dockerfile carries the same default, so a checkout
+              # without a .env still builds.
+              PHP_VERSION: "${PHP_VERSION:-8.4}"
+              APP_UID: "${APP_UID:-1000}"
+              APP_GID: "${APP_GID:-1000}"
+          volumes: [".:/var/www/html"]
+          # expose, never ports. A PHP-FPM pool speaks FastCGI, not HTTP, and it
+          # will execute whatever script path it is handed with no authentication
+          # of any kind. Publishing 9000 to the host is remote code execution
+          # waiting for a port scan.
+          expose: ["9000"]
+          environment:
+            APP_ENV: dev
+            # Flex recipes ship Docker configuration of their own, and it is not
+            # only the "docker" recipe that does: doctrine-bundle writes a
+            # compose.override.yaml with its own `database` service. keel already
+            # owns compose.yaml and compose.override.yaml, so the two collide on
+            # the same filenames and `keel new symfony --with nginx` dies with
+            # `open compose.override.yaml: permission denied`.
+            #
+            # Set on the service, not just on create-project: any later
+            # `composer require` that triggers a recipe would otherwise write the
+            # file again.
+            SYMFONY_DOCKER: "0"
+            # serverVersion is not decoration: Doctrine picks platform-specific SQL
+            # from it, and a value that does not match the server actually deployed
+            # generates wrong migrations. docs/infra/symfony.md, source 7.
+            DATABASE_URL: "postgresql://db:db@db:5432/db?serverVersion=16&charset=utf8"
+          depends_on:
+            db: { condition: service_healthy }
+
+        db:
+          # Symfony publishes no minimum PostgreSQL version of its own; that
+          # constraint belongs to Doctrine DBAL. docs/infra/symfony.md, open
+          # question 3. 16 matches the serverVersion in DATABASE_URL above, and the
+          # two must be changed together.
+          image: postgres:18-alpine
+          environment:
+            POSTGRES_DB: db
+            POSTGRES_USER: db
+            POSTGRES_PASSWORD: db
+          # The tuned configuration the db recipe writes. Mounted here because
+          # this compose file is verbatim and cannot substitute a var there;
+          # leaving it out means the file is generated and never read.
+          volumes:
+            - db:/var/lib/postgresql
+            - ./.keel/postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+          command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
+          healthcheck:
+            test: ["CMD-SHELL", "pg_isready -U db -d db"]
+            interval: 5s
+            timeout: 5s
+            retries: 20
+
+      volumes:
+        db:

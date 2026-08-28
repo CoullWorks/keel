@@ -1,0 +1,38 @@
+id: symfony-local
+schema_version: 2
+kind: env
+env_family: local
+label: Local (native, no Docker)
+appliesTo: [symfony]
+provides: [env]
+# Native: needs PHP + Composer on the host. Serve with the Symfony CLI
+# (`symfony serve`) or `php -S localhost:8000 -t public`.
+#
+# DEVELOPMENT ONLY. Both of those are development servers: `php -S` is PHP's
+# built-in single-process server and `symfony serve` wraps it. Symfony's own web
+# server page says production needs nginx or Apache and that both "require
+# PHP-FPM (install the php-fpm package)". For that stack, tuned, with the
+# opcache and preload values Symfony publishes:
+#   keel new symfony --env symfony-docker          (nginx + PHP-FPM)
+#   keel new symfony --env symfony-docker-apache   (Apache + PHP-FPM)
+commands:
+  start: ""
+  # How this environment tears itself down. Used when a build fails partway:
+  # keel removes the directory it created, and without this the containers,
+  # volumes and network it started stay behind holding a bind mount to a
+  # path that no longer exists. The next attempt then reuses that container
+  # and dies with "current working directory is outside of container mount
+  # namespace root".
+  # The only thing keel starts under a native env is the local database, which
+  # the database recipe brings up from docker-compose.db.yml. Nothing else here
+  # runs in a container, so this is the whole teardown - and without it nothing
+  # ever stopped that container: `keel delete` left it running and holding the
+  # fixed host port, so the next project that wanted a database could not start.
+  # Guarded on the file so an environment built with no database is a no-op.
+  down: "[ -f docker-compose.db.yml ] && docker compose -f docker-compose.db.yml down -v || true"
+  restart: ""
+  exec: ""
+  composer: "composer"
+  console: "php bin/console"
+smoke:
+  - "php --version"

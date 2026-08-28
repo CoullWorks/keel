@@ -1,0 +1,183 @@
+id: magento-hyva
+kind: frontend
+label: Hyvä theme (Tailwind on the monolith, recommended)
+appliesTo: [magento, magento-mageos]
+requires: [magento]
+provides: [frontend, hyva]
+default: true # Hyvä is free+OSS (Nov 2025) and the default front end for new Magento
+priority: 60 # after the Magento base is installed
+install:
+  # Hyvä is free & open source (AFL/OSL) since Nov 2025. Use the no-account
+  # GitHub-repositories method so no Hyvä portal key is needed.
+  # Every hyva-themes package the theme depends on needs its own git repository
+  # entry, because most of them are not on Packagist. Miss one and Composer
+  # blames the THEME - "hyva-themes/magento2-default-theme[1.3.21, ..., 1.5.2]
+  # require hyva-themes/magento2-email-module * -> could not be found in any
+  # version, there may be a typo in the package name" - which names the
+  # dependency, suggests a typo that does not exist, and never mentions the
+  # repository that was never configured.
+  #
+  # Four were listed here and 1.5.2 needs six. This list is the theme's own
+  # require block, read from
+  # https://github.com/hyva-themes/magento2-default-theme/blob/1.5.2/composer.json
+  # (2026-08-13). magento2-graphql-tokens and magento2-graphql-view-model are on
+  # Packagist and resolve unaided; these four are not.
+  # All ten, exactly as Hyvä's own README lists them for the GitHub install
+  # route, because the dependency chain is deeper than it looks and Composer
+  # blames the wrong package when a link is missing.
+  #
+  # Four were listed here. That fails, and the message names the theme:
+  #
+  #   hyva-themes/magento2-default-theme[1.3.21, ..., 1.5.2] require
+  #   hyva-themes/magento2-email-module * -> could not be found in any version,
+  #   there may be a typo in the package name
+  #
+  # Adding email-module then moved the failure one level deeper, to
+  # magento2-theme-module requiring magento2-mollie-theme-bundle. Chasing them
+  # one at a time is how you end up with a list that is right for one release
+  # and wrong for the next, so this is the vendor's list rather than a derived
+  # one.
+  #
+  # Source: https://github.com/hyva-themes/magento2-default-theme#option-2-installation-from-github
+  # (fetched 2026-08-13). Hyvä also offers a Private Packagist key, which serves
+  # these plus the compatibility modules from one repository; that is the
+  # recommended route for a licensed store and needs credentials keel does not
+  # ask for.
+  - "{{composer}} config repositories.hyva-themes/magento2-theme-module git https://github.com/hyva-themes/magento2-theme-module.git"
+  - "{{composer}} config repositories.hyva-themes/magento2-default-theme git https://github.com/hyva-themes/magento2-default-theme.git"
+  - "{{composer}} config repositories.hyva-themes/magento2-default-theme-csp git https://github.com/hyva-themes/magento2-default-theme-csp.git"
+  - "{{composer}} config repositories.hyva-themes/magento2-base-layout-reset git https://github.com/hyva-themes/magento2-base-layout-reset.git"
+  - "{{composer}} config repositories.hyva-themes/magento2-compat-module-fallback git https://github.com/hyva-themes/magento2-compat-module-fallback.git"
+  - "{{composer}} config repositories.hyva-themes/magento2-mollie-theme-bundle git https://github.com/hyva-themes/magento2-mollie-theme-bundle.git"
+  - "{{composer}} config repositories.hyva-themes/magento2-luma-checkout git https://github.com/hyva-themes/magento2-luma-checkout.git"
+  - "{{composer}} config repositories.hyva-themes/magento2-theme-fallback git https://github.com/hyva-themes/magento2-theme-fallback.git"
+  - "{{composer}} config repositories.hyva-themes/magento2-order-cancellation-webapi git https://github.com/hyva-themes/magento2-order-cancellation-webapi.git"
+  - "{{composer}} config repositories.hyva-themes/magento2-email-module git https://github.com/hyva-themes/magento2-email-module.git"
+  - "{{composer}} require hyva-themes/magento2-default-theme"
+  # setup:upgrade registers both Hyva/default and the keel child theme (Keel/hyva)
+  # dropped under app/design/frontend below, so it becomes selectable in Admin.
+  - "{{magento}} setup:upgrade"
+  - "{{magento}} setup:di:compile"
+  - "{{magento}} cache:flush"
+smoke:
+  - "{{magento}} cache:status"
+files:
+  # ---------------------------------------------------------------------------
+  # keel Hyvä child theme: Keel/hyva inherits Hyva/default and overrides the CMS
+  # home template so the storefront homepage is a keel-branded, Tailwind-styled
+  # hero the moment the theme is active — visible proof Hyvä + Tailwind are live.
+  # This is the documented Hyvä way to customise a storefront: a child theme +
+  # a template override, using Tailwind utility classes (Hyvä compiles Tailwind).
+  # ---------------------------------------------------------------------------
+  - path: app/design/frontend/Keel/hyva/registration.php
+    content: |
+      <?php
+      /**
+       * keel Hyvä child theme registration.
+       */
+      declare(strict_types=1);
+
+      use Magento\Framework\Component\ComponentRegistrar;
+
+      ComponentRegistrar::register(
+          ComponentRegistrar::THEME,
+          'frontend/Keel/hyva',
+          __DIR__
+      );
+  - path: app/design/frontend/Keel/hyva/theme.xml
+    content: |
+      <?xml version="1.0"?>
+      <!--
+        keel Hyvä child theme. Inherits Hyva/default so it gets the full Tailwind +
+        Alpine base, then overrides only the CMS home template (see
+        Magento_Cms/templates/index/home.phtml). Activate it once in Admin
+        (Content > Design > Configuration) or via CLI - see THEME-SETUP.md.
+      -->
+      <theme xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+             xsi:noNamespaceSchemaLocation="urn:magento:framework:Config/etc/theme.xsd">
+        <title>keel (Hyvä)</title>
+        <parent>Hyva/default</parent>
+      </theme>
+  - path: app/design/frontend/Keel/hyva/Magento_Cms/templates/index/home.phtml
+    content: |
+      <?php
+      /**
+       * keel homepage override for the Hyvä child theme.
+       *
+       * Overrides Magento_Cms/templates/index/home.phtml so the storefront
+       * homepage renders this keel hero instead of the default CMS placeholder.
+       * Everything below uses Tailwind utility classes only (no hardcoded CSS) -
+       * Hyvä's Tailwind build compiles them, so a styled hero is direct proof
+       * that Hyvä + Tailwind are active.
+       *
+       * @var \Magento\Cms\Block\Page $block
+       */
+      declare(strict_types=1);
+      ?>
+      <section class="mx-auto max-w-3xl px-6 py-20">
+        <span class="inline-flex items-center gap-2 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-700">
+          <span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>
+          Hyvä + Tailwind running
+        </span>
+        <h1 class="mt-6 text-4xl font-bold tracking-tight text-gray-900 sm:text-5xl">
+          Your Magento store is running
+        </h1>
+        <p class="mt-4 text-lg text-gray-600">
+          Styled with the Hyvä theme (Tailwind + Alpine on the Magento monolith),
+          scaffolded by keel. Edit this hero at
+          <code class="rounded bg-gray-100 px-1.5 py-0.5 text-sm text-gray-800">app/design/frontend/Keel/hyva/Magento_Cms/templates/index/home.phtml</code>
+          to make it yours.
+        </p>
+        <div class="mt-8 flex flex-wrap gap-3">
+          <a href="https://coullworks.com/tools/keel"
+             class="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-500">
+            keel docs
+          </a>
+          <a href="https://docs.hyva.io"
+             class="rounded-lg border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50">
+            Hyvä docs
+          </a>
+        </div>
+      </section>
+  - path: THEME-SETUP.md
+    content: |
+      # Hyvä theme (installed by keel)
+
+      Hyvä is a Tailwind + Alpine theme that runs **on the Magento monolith** - no
+      headless stack, no separate storefront to host. For most stores this is the
+      right call over PWA Studio / headless (see the composable-vs-monolith TCO
+      article). The default theme + base modules are free and open source.
+
+      keel installs two themes and registers them (via `setup:upgrade`):
+
+      - **Hyva/default** - the upstream Hyvä theme (Tailwind + Alpine base).
+      - **Keel/hyva** - a small child theme that inherits Hyva/default and
+        overrides the CMS home template with a keel-branded, Tailwind-styled hero
+        ("Your Magento store is running"). Activate this one to see the proof.
+
+      ## Activate the theme once (one booted-Magento step)
+      Selecting a storefront theme writes to the DB, so it needs a running Magento:
+
+      - **Admin:** Content → Design → Configuration → edit the store view →
+        Applied Theme → **keel (Hyvä)** → Save. Then `ddev magento cache:flush`.
+      - **Or CLI:** find the theme id and set it:
+        ```
+        ddev magento config:set --scope=stores --scope-code=default \
+          design/theme/theme_id <id-of-frontend/Keel/hyva>
+        ddev magento cache:flush
+        ```
+        (List theme ids with `ddev magento cache:flush` then check the
+        `theme` table, or pick **keel (Hyvä)** in Admin - simplest.)
+
+      Load the storefront home page and you should see the Tailwind hero. The
+      hero lives at
+      `app/design/frontend/Keel/hyva/Magento_Cms/templates/index/home.phtml` -
+      edit it (add any Tailwind utility classes; Hyvä recompiles) to make it yours.
+
+      ## Want a headless storefront instead?
+      keel does not scaffold PWA Studio (stalled) or a hand-rolled storefront. If
+      you genuinely need headless, use **GraphCommerce** (Next.js on Magento's
+      GraphQL) against this backend - a future `keel` frontend option.
+hooks:
+  post_build:
+    - message: "Hyvä installed with a keel child theme (Keel/hyva) that ships a Tailwind homepage hero. Activate it once: Admin > Content > Design > Configuration > Applied Theme > 'keel (Hyvä)' > Save, then `{{magento}} cache:flush`. See THEME-SETUP.md."

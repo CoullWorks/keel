@@ -1,0 +1,58 @@
+id: node-drizzle-seed
+kind: addon
+label: Realistic seed data (Drizzle + drizzle-seed)
+appliesTo: [express, fastify, hono, nuxt, astro, sveltekit]
+provides: [seed]
+# db as well as drizzle: the ORM needs a database, and naming db here keeps this
+# add-on resolvable on its own (the resolver does not chase a sibling's
+# transitive requires).
+requires: [drizzle, db]
+conflicts: [prisma]
+# Runs after node-drizzle so it reads the schema that add-on shipped.
+priority: 1
+updated: 2026-08-21
+# `keel db seed` for a Drizzle project runs `npm run db:seed` (see
+# internal/cli/db.go). Drizzle has no seed step of its own, so this add-on wires
+# that script to `drizzle-seed`, Drizzle's official deterministic seeding library.
+#
+# It reads the schema the node-drizzle add-on shipped (src/db/schema.ts, whose
+# starter `users` table it populates) and generates a realistic set of rows. Add
+# your own tables to that schema and pass them here as you grow.
+install:
+  - "{{exec}} npm install -D drizzle-seed"
+  - "{{exec}} npm install postgres"
+  - "{{exec}} npm pkg set scripts.db:seed=\"tsx src/db/seed.ts\""
+  # tsx runs the TypeScript seed without a build step.
+  - "{{exec}} npm install -D tsx"
+files:
+  - path: src/db/seed.ts
+    content: |
+      // keel-generated. Realistic seed data via drizzle-seed.
+      //
+      // Run with `keel db seed` (npm run db:seed). drizzle-seed generates
+      // deterministic, realistic data from the schema's column types, so a text
+      // "email" column gets emails and a "name" column gets names with no
+      // per-column config. Refine with .refine(...) as your schema grows.
+      import { drizzle } from "drizzle-orm/postgres-js";
+      import postgres from "postgres";
+      import { seed } from "drizzle-seed";
+
+      import * as schema from "./schema";
+
+      async function main() {
+        const client = postgres(process.env.DATABASE_URL!);
+        const db = drizzle(client, { schema });
+
+        // 25 rows per table in the schema. drizzle-seed is deterministic by
+        // default (same output each run); pass a different count or a seed for
+        // variety.
+        await seed(db, schema, { count: 25 });
+
+        console.log("Seeded the database with drizzle-seed.");
+        await client.end();
+      }
+
+      main().catch((e) => {
+        console.error(e);
+        process.exit(1);
+      });

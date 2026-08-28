@@ -1,0 +1,13 @@
+# Auth as a level:stack generator (Laravel Fortify, headless).
+#
+# A second Laravel auth option: Fortify is the headless backend for teams wiring
+# their own UI. Points at the laravel-fortify addon that already exists.
+id: gen-auth-fortify-laravel
+kind: generator
+level: stack
+label: "Authentication (Laravel Fortify - headless auth backend)"
+appliesTo: [laravel]
+provides: [auth-headless]
+apply: [laravel-fortify]
+schema_version: 2
+updated: 2026-08-21

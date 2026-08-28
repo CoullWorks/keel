@@ -1,0 +1,64 @@
+id: astro-bootstrap
+kind: addon
+label: Bootstrap 5
+category: UI kit
+appliesTo: [astro]
+requires: [astro]
+conflicts: [tailwind] # Bootstrap and Tailwind are alternative CSS frameworks
+provides: [bootstrap, css]
+priority: 40
+install:
+  - "{{exec}} npm install bootstrap"
+smoke:
+  - "{{exec}} npm run build"
+files:
+  - path: src/pages/index.astro
+    content: |
+      ---
+      // keel: a production-ready landing page built from Bootstrap 5.3 components.
+      import "bootstrap/dist/css/bootstrap.min.css";
+      const features = [
+        ["Bootstrap 5.3", "Battle-tested components and utilities, no build config."],
+        ["Astro islands", "Ships zero JS by default, hydrate only where you need it."],
+        ["keel-managed", "keel run dev · test · build, one vocabulary."],
+      ];
+      ---
+
+      <html lang="en">
+        <head>
+          <meta charset="utf-8" />
+          <meta name="viewport" content="width=device-width, initial-scale=1" />
+          <title>Astro + Bootstrap</title>
+        </head>
+        <body class="bg-body-tertiary">
+          <main class="container py-5" style="max-width: 48rem;">
+            <span class="badge rounded-pill text-bg-success">running</span>
+            <h1 class="display-5 fw-bold mt-3">Your Astro app is running</h1>
+            <p class="fs-5 text-secondary mt-2">
+              Built with Bootstrap, scaffolded by keel. Edit
+              <code>src/pages/index.astro</code>
+              to make it yours.
+            </p>
+            <div class="d-flex flex-wrap gap-2 mt-4">
+              <a href="https://coullworks.com/tools/keel" class="btn btn-primary">
+                keel docs
+              </a>
+              <a href="https://getbootstrap.com/docs/5.3/" class="btn btn-outline-secondary">
+                Bootstrap docs
+              </a>
+            </div>
+            <div class="row g-4 mt-4">
+              {features.map(([title, body]) => (
+                <div class="col-12 col-sm-4">
+                  <div class="card h-100">
+                    <div class="card-body">
+                      <h2 class="card-title h6">{title}</h2>
+                      <p class="card-text small text-secondary">{body}</p>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </main>
+        </body>
+      </html>

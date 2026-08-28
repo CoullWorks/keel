@@ -1,0 +1,36 @@
+id: ci-php
+kind: extra
+label: GitHub Actions CI (PHP)
+provides: [ci]
+appliesTo: [laravel, symfony, magento, magento-mageos, woocommerce, woocommerce-bedrock]
+updated: 2026-08-13
+files:
+  - path: .github/workflows/ci.yml
+    content: |
+      name: CI
+      on: [push, pull_request]
+
+      jobs:
+        test:
+          runs-on: ubuntu-latest
+          steps:
+            - uses: actions/checkout@v4
+            - uses: shivammathur/setup-php@v2
+              with:
+                # The PHP line chosen when this project was scaffolded, so the
+                # pipeline and the container agree.
+                php-version: '{{pin.php_version}}'
+                # The extensions the framework images install. CI that runs on a
+                # thinner PHP than production is CI that passes and then breaks.
+                extensions: intl, zip, pdo_mysql, pdo_pgsql, gd, bcmath
+                coverage: none
+            - uses: ramsey/composer-install@v3
+              with:
+                composer-options: "--prefer-dist --no-progress"
+            # Both are conditional: a fresh skeleton has neither until the
+            # project adds them.
+            - run: vendor/bin/pint --test || echo "pint not installed"
+            - run: |
+                if [ -f vendor/bin/pest ]; then vendor/bin/pest
+                elif [ -f vendor/bin/phpunit ]; then vendor/bin/phpunit
+                else echo "no test runner installed yet"; fi

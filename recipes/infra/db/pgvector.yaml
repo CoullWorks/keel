@@ -1,0 +1,118 @@
+id: pgvector
+schema_version: 2
+kind: service
+label: pgvector (the `vector` extension on your PostgreSQL)
+category: Database
+# pgvector is NOT a separate database. It is an extension that adds a `vector`
+# column type and ANN indexes (HNSW, IVFFlat) to a PostgreSQL you already run,
+# so a project keeps ONE database - its relational primary and its embeddings
+# live in the same Postgres, in the same transaction. Modelling it as its own
+# `kind: db` would have been wrong twice over: it would conflict with the very
+# Postgres it needs, and it would imply a second server that does not exist.
+#
+# So it is a service that REQUIRES postgres and layers onto it: the image gains
+# the extension's shared library and the database has `CREATE EXTENSION vector`
+# run against it. It sits happily beside Django, FastAPI and every Node
+# framework that can run Postgres.
+appliesTo: [django, fastapi, nextjs, express, fastify, hono, nestjs, adonisjs, nuxt, astro, sveltekit]
+# Requires the postgres capability specifically, not the generic `db`: the
+# extension exists only for PostgreSQL, so this must refuse to resolve against a
+# MySQL or Mongo plan rather than start a compose overlay that does nothing.
+requires: [postgres]
+provides: [vector, pgvector]
+# Conflicts, in two groups:
+#   - the non-Postgres primaries (db-mysql/db-mariadb/db-mongo/db-sqlite): the
+#     extension is PostgreSQL-only, so a plan whose database is one of those has
+#     nothing for pgvector to attach to. Requiring `postgres` already refuses
+#     those, but naming the conflict makes the message say which database is in
+#     the way, and lets a default database yield to an explicit --with pgvector
+#     (the native Node default is SQLite, which pgvector cannot extend).
+#   - the standalone vector stores (qdrant/chroma): one vector backend per
+#     project. It does NOT conflict with a search engine or with the Postgres it
+#     extends.
+conflicts: [db-mysql, db-mariadb, db-mongo, db-sqlite, qdrant, chroma]
+updated: 2026-08-22
+vars:
+  # The image is the official postgres image with the extension preinstalled,
+  # tagged by the SAME Postgres major the postgres recipe pinned, so local and
+  # production run the identical server plus one extension. `pg{{db.version}}`
+  # resolves to e.g. `pgvector/pgvector:pg18`.
+  # https://github.com/pgvector/pgvector#docker
+  pgvector.image: "pgvector/pgvector:pg{{db.version}}"
+files:
+  - path: PGVECTOR.md
+    content: |
+      # pgvector (scaffolded by keel)
+
+      Your PostgreSQL now carries the `vector` extension: it runs on the
+      `pgvector/pgvector:pg{{db.version}}` image (the official Postgres image
+      plus the extension's shared library) and keel has run
+
+          CREATE EXTENSION IF NOT EXISTS vector;
+
+      against the `{{db.name}}` database, so a `vector` column type and the HNSW
+      and IVFFlat index types are available immediately.
+
+      ## Store and query embeddings
+
+          CREATE TABLE items (id bigserial PRIMARY KEY, embedding vector(1536));
+          -- cosine distance is <=> ; L2 is <-> ; inner product is <#>
+          SELECT id FROM items ORDER BY embedding <=> '[...]' LIMIT 5;
+
+      Add an index once you have rows (build it AFTER a bulk load, not before):
+
+          CREATE INDEX ON items USING hnsw (embedding vector_cosine_ops);
+
+      Dimensions must match your embedding model (OpenAI text-embedding-3-small
+      is 1536). A column's dimension is fixed at declaration.
+
+      ## It is the same Postgres
+
+      Everything the `postgres` recipe tuned still applies - this only adds the
+      extension. Your relational tables and your embeddings share one database,
+      one connection and one transaction, which is the whole reason to use
+      pgvector rather than a separate vector store.
+provision:
+  # Under compose the postgres recipe already declares (and tunes) the `db`
+  # service; this overlay only swaps its image for the pgvector one and creates
+  # the extension once the server is healthy. Compose merges services of the same
+  # name across -f files, so `image:` here replaces the base image.
+  compose:
+    files:
+      - path: docker-compose.pgvector.yml
+        content: |
+          # keel-generated: give the db service the pgvector image so `CREATE
+          # EXTENSION vector` has the shared library to load.
+          # Merged:  docker compose -f docker-compose.yml -f docker-compose.postgres.yml -f docker-compose.pgvector.yml up -d
+          services:
+            db:
+              image: {{pgvector.image}}
+    install:
+      # The Postgres overlay already brought the db service up and healthy; run
+      # the extension creation against it. IF NOT EXISTS makes a re-run a no-op.
+      - "docker compose -f docker-compose.yml -f docker-compose.postgres.yml -f docker-compose.pgvector.yml up -d --wait"
+      - "docker compose exec -T db psql -U {{db.user}} -d {{db.name}} -c 'CREATE EXTENSION IF NOT EXISTS vector'"
+  # The native env runs Postgres in its own docker-compose.db.yml (service `db`),
+  # so the same two moves apply: point that service at the pgvector image and
+  # create the extension.
+  local:
+    files:
+      - path: docker-compose.pgvector.yml
+        content: |
+          # keel-generated: pgvector image for the local Postgres db service.
+          # Merged:  docker compose -f docker-compose.db.yml -f docker-compose.pgvector.yml up -d
+          services:
+            db:
+              image: {{pgvector.image}}
+    install:
+      - "docker compose -f docker-compose.db.yml -f docker-compose.pgvector.yml up -d --wait"
+      - "docker compose -f docker-compose.db.yml exec -T db psql -U {{db.user}} -d {{db.name}} -c 'CREATE EXTENSION IF NOT EXISTS vector'"
+  # DDEV runs its own Postgres; pgvector is available as an official DDEV add-on
+  # that swaps in the pgvector image. Install it, then create the extension in
+  # the running database.
+  # https://github.com/ddev/ddev-pgvector
+  ddev:
+    install:
+      - "ddev add-on get ddev/ddev-pgvector"
+      - "{{restart}}"
+      - "ddev exec -s db psql -U {{db.user}} -d {{db.name}} -c 'CREATE EXTENSION IF NOT EXISTS vector'"

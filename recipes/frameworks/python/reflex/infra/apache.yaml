@@ -1,0 +1,247 @@
+id: apache-reflex
+schema_version: 2
+kind: config
+label: Reflex VirtualHost for Apache
+updated: 2026-08-12
+# Written from docs/infra/reflex.md plus the Apache 2.4 module reference. Reflex
+# ships a Caddyfile and no Apache config, so this is a faithful translation of
+# it. The vendor file, verbatim:
+#
+#   {$DOMAIN}
+#
+#   encode gzip
+#
+#   @backend_routes path /_event/* /ping /_upload /_upload/*
+#   handle @backend_routes {
+#       reverse_proxy app:8000
+#   }
+#
+#   root * /srv
+#   route {
+#       try_files {path} {path}/ /404.html
+#       file_server
+#   }
+#
+# The translation, directive by directive:
+#
+#   Caddy                               Apache
+#   @backend_routes path /_event/* ...  ProxyPass rules for exactly those four;
+#                                         the root is simply never proxied
+#   reverse_proxy app:8000              ProxyPass + ProxyPassReverse
+#   (transparent websocket upgrade)     upgrade=websocket, or mod_proxy_wstunnel
+#                                         below Apache 2.4.47
+#   root * /srv                         DocumentRoot /srv
+#   try_files ... /404.html             FallbackResource /404.html
+#   encode gzip                         belongs to the shared apache service
+#
+# The 404.html fallback is not a detail. The vendor: "Most static hosts will
+# automatically use the /404.html file to handle 404 errors. This is essential
+# for dynamic routes to work correctly." A FallbackResource pointing at
+# index.html would break Reflex dynamic routes.
+#
+# The application server does not change between the nginx and the Apache
+# choice: `reflex run --env prod --backend-only` still listens on 8000 and the
+# frontend is still a static export.
+#
+# Division of labour. The shared Apache service (recipes/infra/web/apache.yaml)
+# owns .keel/apache/keel-tuning.conf: MPM event tuning, the LoadModule lines for the
+# proxy modules, global compression, mod_expires, ServerTokens Prod,
+# ServerSignature Off, TraceEnable Off, the global security headers, and the
+# `IncludeOptional conf.d/app-*.conf` that pulls this file in.
+when:
+  framework: reflex
+  uses: apache
+files:
+  - path: docker/apache/conf.d/app-reflex.conf
+    content: |
+      # Reflex: static frontend plus four backend routes. Translated from the
+      # vendor Caddyfile. Included by the shared keel-tuning.conf.
+      <VirtualHost *:80>
+          ServerName localhost
+
+          # No DocumentRoot, because nothing here is served from disk. The
+          # vendor's `root * /srv` describes production, where the frontend has
+          # already been compiled to static files. keel followed that shape and
+          # it could not work: the compose stack builds the Dockerfile's dev
+          # stage, and only the build stage runs `reflex export`, so those files
+          # never existed and every request for / met an empty directory.
+          #
+          # In dev the frontend is Reflex's own Vite dev server on 3000, proxied
+          # below. That is also the only shape in which editing a component
+          # means anything: a static export freezes the frontend at build time.
+          #
+          # For the production topology, restore `DocumentRoot /srv`, mount the
+          # exported client build there, and swap the catch-all ProxyPass below
+          # for the vendor's static form.
+
+          # Stated rather than assumed. Apache: "Do not enable proxying with
+          # ProxyRequests until you have secured your server. Open proxy servers
+          # are dangerous both to your network and to the Internet at large."
+          ProxyRequests Off
+          # So the backend sees the browser's Host. Apache defaults it Off.
+          ProxyPreserveHost On
+          # mod_proxy_http adds X-Forwarded-For, X-Forwarded-Host and
+          # X-Forwarded-Server itself, and warns they "will contain more than one
+          # (comma-separated) value if the original request already contained one
+          # of these headers". Clearing the client's copy makes Apache's the only
+          # value. mod_proxy_http does NOT add X-Forwarded-Proto; change it to
+          # "https" when TLS terminates here.
+          RequestHeader unset X-Forwarded-For
+          RequestHeader unset X-Forwarded-Host
+          RequestHeader unset X-Forwarded-Server
+          RequestHeader set X-Forwarded-Proto "http"
+
+          # ---- the vendor's four backend routes, and only those ----
+          # ProxyPass rules are "checked in the order of configuration, the first
+          # rule that matches wins", and Apache's own advice is to "sort
+          # conflicting ProxyPass rules starting with the longest URLs first".
+          # These four come first, and the root is never proxied at all, which is
+          # how "everything else is a static file" is expressed in Apache.
+          #
+          # Under the native env there is no `app` host: change every target to
+          # http://127.0.0.1:8000/... and set backend_host to 127.0.0.1 in
+          # rxconfig.py so the backend has no other route in.
+
+          # The event websocket. Caddy upgrades transparently, so the vendor file
+          # has no equivalent line to copy; this is keel's translation. Apache
+          # 2.4.47 and later tunnels the upgrade end to end through
+          # mod_proxy_http: "the connection will be upgraded and tunneled by
+          # mod_proxy_http only if the origin server accepts/initiates the
+          # upgrade (HTTP response 101 Switching Protocols)". The httpd:2.4-alpine
+          # image is well past that.
+          #
+          # timeout=3600 is keel's number, the Apache equivalent of nginx's
+          # proxy_read_timeout: the "number of seconds Apache httpd waits for
+          # data sent by / to the backend". Unset, it falls back to ProxyTimeout
+          # and then to Apache's Timeout of 300, so an idle session drops after
+          # five minutes. Reflex publishes none.
+          ProxyPass        /_event/ http://app:8000/_event/ upgrade=websocket connectiontimeout=5 timeout=3600
+          ProxyPassReverse /_event/ http://app:8000/_event/
+
+          # Uploads. The longer prefix first, per Apache's ordering rule.
+          ProxyPass        /_upload/ http://app:8000/_upload/ connectiontimeout=5 timeout=300
+          ProxyPassReverse /_upload/ http://app:8000/_upload/
+          # ProxyPassMatch with anchors, because Caddy's `path /_upload` is an
+          # exact match while a bare `ProxyPass /_upload` would also catch
+          # /_uploadanything.
+          ProxyPassMatch   "^/_upload$" http://app:8000/_upload connectiontimeout=5 timeout=300
+
+          # The documented health probe: /ping returns pong. Anchored for the
+          # same reason.
+          ProxyPassMatch   "^/ping$" http://app:8000/ping connectiontimeout=3 timeout=10
+
+          # If the app adds its own backend API routes, add them here too. The
+          # vendor's instruction for the Caddyfile applies verbatim: "those
+          # should be added to the @backend_routes path matcher to ensure they
+          # are forwarded to the backend".
+
+          # On Apache 2.4.46 and earlier, upgrade=websocket does not exist and
+          # mod_proxy_wstunnel must carry /_event/ instead. Apache's own
+          # documented form, placed above the ProxyPass rules:
+          #   RewriteCond %{HTTP:Upgrade} websocket [NC]
+          #   RewriteCond %{HTTP:Connection} upgrade [NC]
+          #   RewriteRule ^/?_event/(.*) "ws://app:8000/_event/$1" [P,L]
+
+          # ---- everything else: the frontend dev server ----
+          # This holds the vendor's static file_server position in the routing
+          # order, serving from Vite instead of from disk. It must be a
+          # catch-all: Vite serves the app, its own client at /@vite/, source
+          # modules at /@fs/ and /node_modules/, and the hashed assets, and none
+          # of those are worth enumerating when the rule is simply "not one of
+          # the four backend routes above".
+          #
+          # Last, because ProxyPass rules are "checked in the order of
+          # configuration, the first rule that matches wins" - so a catch-all
+          # placed any earlier would swallow the backend routes.
+          #
+          # upgrade=websocket because Vite's hot module reload is a websocket.
+          # timeout=3600 for the same reason as /_event/: an idle socket must not
+          # be dropped at Apache's 300s default.
+          ProxyPass        / http://app:3000/ upgrade=websocket connectiontimeout=5 timeout=3600
+          ProxyPassReverse / http://app:3000/
+
+          # No cache-control block for the compiled assets. Reflex's export
+          # output is content-hashed and could be served immutable for a year,
+          # but there is no export here: a dev server rebuilds on every edit, and
+          # caching its output is precisely what must not happen. For a
+          # production build, restore `DocumentRoot /srv` with:
+          #
+          #   <Directory "/srv">
+          #       Require all granted
+          #       Options -Indexes -ExecCGI
+          #       AllowOverride None
+          #       # The vendor's `try_files {path} {path}/ /404.html`. Pointing
+          #       # this at index.html instead would break dynamic routes.
+          #       FallbackResource /404.html
+          #   </Directory>
+
+          # LimitRequestBody alone does NOT cap a proxied request: the directive
+          # is enforced when Apache itself serves the request, not when
+          # mod_proxy_http streams the body through to a backend. The rewrite
+          # below is what actually rejects it, and it is the only thing standing
+          # between /_upload and an unbounded body. [R=413] aborts with that
+          # status rather than redirecting, because mod_rewrite treats any code
+          # outside 300-399 as an abort.
+          #
+          # Caveat: this reads the declared Content-Length, so a chunked upload
+          # that sends none is not caught.
+          RewriteEngine On
+          RewriteCond expr "%{HTTP:Content-Length} -gt 104857600"
+          RewriteRule ^ - [R=413,L]
+          # Apache's LimitRequestBody default is 0, meaning unlimited. Reflex
+          # publishes no figure; 100 MiB is keel's.
+          LimitRequestBody 104857600
+      </VirtualHost>
+
+      # Apache has no one-line equivalent of nginx's `return 200`, so there is no
+      # proxy-local health endpoint. The container health check probes the
+      # documented /ping through this vhost, which proves the whole proxy path
+      # including the backend.
+provision:
+  compose:
+    files:
+      - path: compose.override.yaml
+        content: |
+          # Compose merges compose.override.yaml over compose.yaml with no extra
+          # flags, so the app service written by the env recipe is untouched.
+          services:
+            apache:
+              image: httpd:2.4-alpine
+              # The stock httpd.conf is left in place: it loads mpm_event and the base
+              # module set. -c appends this directive after it is read, pulling in the
+              # shared tuning and this framework's VirtualHost. Without it the image
+              # starts on stock config and serves its default page - it does not fail.
+              command: ["httpd-foreground", "-c", "Include conf/keel-tuning.conf"]
+              restart: unless-stopped
+              depends_on:
+                app:
+                  condition: service_healthy
+              ports:
+                - "${HTTP_PORT:-8080}:80"
+              volumes:
+                # Shared, owned by recipes/infra/web/apache.yaml.
+                - ./.keel/apache/keel-tuning.conf:/usr/local/apache2/conf/keel-tuning.conf:ro
+                # This framework's VirtualHost, owned by this recipe.
+                - ./docker/apache/conf.d:/usr/local/apache2/conf.d:ro
+                # No /srv mount. The frontend is proxied from the dev server, not
+                # read from disk - see the DocumentRoot note in the VirtualHost.
+                # For the production topology, mount the exported client build
+                # here as `- frontend:/srv:ro`, which is the job the vendor's
+                # Caddy.Dockerfile does with
+                # `COPY --from=local/reflex-app /app/.web/build/client /srv`.
+              healthcheck:
+                # The documented probe, through the proxy: /ping returns pong.
+                test: ["CMD", "wget", "-qO-", "http://127.0.0.1/ping"]
+                interval: 15s
+                timeout: 5s
+                retries: 5
+                start_period: 15s
+              # Reflex's own STOPSIGNAL is SIGKILL because it "does not pass
+              # SIGTERM on backend", so there is nothing to drain and a long
+              # window would only slow every deploy down.
+              stop_grace_period: 10s
+  # Native env: no container to add. The VirtualHost above still applies, but
+  # change the backend ProxyPass targets to http://127.0.0.1:8000/... and the
+  # catch-all to http://127.0.0.1:3000/, and set backend_host to 127.0.0.1 in
+  # rxconfig.py.
+  local: {}

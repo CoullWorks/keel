@@ -1,0 +1,56 @@
+id: example-model
+schema_version: 2
+kind: generator
+level: code-block
+label: "Example model (demonstrates a generator with typed inputs + fields)"
+# A generator recipe teaches keel a new thing `keel gen` / the studio can create.
+# This one is a code-block generator — the smallest level (a single class/file) —
+# and its point is to show the TYPED INPUT vocabulary a real generator declares,
+# above all the `fields` table that is keel's mage2gen primitive.
+#
+# `appliesTo` scopes which frameworks offer it. A stack generator (level: stack)
+# would instead carry `apply: [some-addon]` to point at recipes it installs; a
+# code-block generator emits files/inputs directly.
+appliesTo: [laravel, django, nextjs]
+provides: [example-model]
+updated: 2026-08-22
+# The typed form keel collects before generating. ONE generation shell renders
+# this for every framework — only the catalogue differs — so a pack describes
+# its component's form as data here rather than in code.
+inputs:
+  - name: name
+    type: class
+    label: "Model name"
+    required: true
+    help: "PascalCase, e.g. Product"
+  - name: table
+    type: text
+    label: "Table name"
+    default: ""
+    help: "Defaults to the snake_case plural of the model name."
+  - name: timestamps
+    type: bool
+    label: "Add created_at / updated_at?"
+    default: "true"
+  # The mage2gen primitive: a typed column table. keel turns these into real DDL
+  # (a Laravel migration, a Django model, a Magento db_schema.xml) — the same
+  # field list feeding every framework's generator.
+  - name: fields
+    type: fields
+    label: "Columns"
+    help: "The typed columns this model owns (name, type, nullable, unique, index, default)."
+    repeatable: true
+files:
+  # Generators drop files the same way any recipe does. Tokens are flat
+  # {{key}} names (keel does literal substitution, not Go text/template) —
+  # {{name}} here is the "name" input above.
+  - path: "docs/models/{{name}}.md"
+    content: |
+      # {{name}}
+
+      <!-- keel-generated -->
+
+      Scaffolded by the example-pack `example-model` generator. Replace this
+      file's generator with one that emits your framework's real model +
+      migration from the `fields` table above — that is the whole exercise of
+      turning this template into a working generator pack.

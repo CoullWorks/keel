@@ -1,0 +1,7 @@
+id: livewire
+kind: addon
+label: Livewire
+appliesTo: [laravel]
+provides: [livewire]
+install:
+  - "{{composer}} require livewire/livewire"

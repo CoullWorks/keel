@@ -1,0 +1,235 @@
+id: nginx-wordpress
+schema_version: 2
+kind: config
+label: WordPress and WooCommerce server block for NGINX
+updated: 2026-08-12
+# Division of labour. The shared NGINX service (recipes/infra/web/nginx.yaml)
+# owns .keel/nginx/nginx.conf: worker and http-level tuning, the log format,
+# gzip and its type list, server_tokens off, the default security headers,
+# real_ip from the trusted proxy, the default client_max_body_size and the
+# default fastcgi buffer sizes. This recipe owns one server block and the compose
+# wiring.
+#
+# WordPress publishes several http-level directives of its own (the upstream php
+# block, client_max_body_size, index). Those belong to the shared config and are
+# not repeated here, with one deliberate exception: client_max_body_size is
+# overridden in the server block because WordPress couples it to PHP's upload
+# limit and this stack raises that to 64M.
+#
+# Sources: developer.wordpress.org/advanced-administration/server/web-server/nginx/
+# for the server, restrictions and hardened-PHP blocks;
+# .../security/hardening/ for the wp-config rule; and the WooCommerce caching
+# guidance for the cookie and page exclusion list.
+when:
+  # Both layouts: the docroot and content directory are variables the
+  # framework recipes set, so Bedrock reuses this tier rather than copying it.
+  frameworks: [woocommerce, woocommerce-bedrock]
+  uses: nginx
+provision:
+  compose:
+    files:
+      - path: docker/nginx/conf.d/app.conf
+        # Not verbatim: the document root and content directory arrive as
+        # {{wp.docroot}} and {{wp.content_dir}}, which is what lets classic
+        # WordPress and Bedrock share this file instead of keeping two copies
+        # of the same security rules. Nothing else here uses braces.
+        content: |
+          # keel-generated. WordPress and WooCommerce server block. Included by the shared
+          # nginx.conf from /etc/nginx/conf.d/*.conf.
+          #
+          # The shared half lives once in recipes/infra/web/nginx.yaml, which owns
+          # .keel/nginx/nginx.conf: worker_processes
+          # and worker_connections, sendfile / tcp_nopush / keepalive_timeout, the log
+          # format, gzip and its type list, server_tokens off, the default security
+          # headers, real_ip from the trusted proxy, the default client_max_body_size
+          # and the default fastcgi buffer sizes. WordPress's published nginx.conf
+          # includes several of those at http level; they are not repeated here.
+          #
+          # Source: developer.wordpress.org/advanced-administration/server/web-server/nginx/,
+          # which publishes a full recipe set: a server block, a global/restrictions.conf
+          # and a hardened PHP location. This file is those pieces assembled, because
+          # the restrictions half is the part most often dropped and it is the half
+          # that matters.
+          #
+          # WordPress has NO public/ front controller directory. The document root is
+          # the WordPress root itself, so wp-config.php, wp-admin/ and wp-includes/ all
+          # sit inside the served tree. Every deny below exists because of that, and
+          # none of them are optional.
+
+          server {
+              listen 80;
+              listen [::]:80;
+              server_name _;
+
+              ## Your only path reference.
+              root {{wp.docroot}};
+              index index.php;
+
+              # OVERRIDES the shared default client_max_body_size. WordPress's own
+              # nginx.conf sets `client_max_body_size 13m;` with the comment "php max
+              # upload limit cannot be larger than this", so the two are coupled: this
+              # must be at least upload_max_filesize (64M in
+              # docker/php/conf.d/10-wordpress.ini) or the upload is rejected before PHP sees
+              # it, and the user gets a blank failure with nothing in the PHP log.
+              client_max_body_size 64m;
+
+              location = /favicon.ico { log_not_found off; access_log off; }
+              location = /robots.txt  { allow all; log_not_found off; access_log off; }
+
+              location / {
+                  # This is cool because no php is touched for static content.
+                  # include the "?$args" part so non-default permalinks doesn't break
+                  # when using query string. That is WordPress's own comment and its
+                  # own form: ?$args, not $is_args$args.
+                  try_files $uri $uri/ /index.php?$args;
+              }
+
+              # --- global/restrictions.conf -----------------------------------------
+              # The security half of WordPress's published recipe, and the half that
+              # gets dropped. Placed before the PHP location so these regex locations
+              # win: nginx takes the FIRST matching regex location, in file order.
+
+              # Deny all attempts to access hidden files such as .htaccess, .htpasswd,
+              # .DS_Store (Mac). /.well-known is kept reachable for ACME, which is
+              # keel's amendment to the vendor rule.
+              location ~ /\.(?!well-known) {
+                  deny all;
+              }
+
+              # Deny access to any files with a .php extension in the uploads directory.
+              # Works in sub-directory installs and also in multisite network.
+              #
+              # THE most important line in this file. wp-content/uploads is writable by
+              # the web server by design, and WooCommerce writes even more into it:
+              # order exports, logs under wc-logs, and downloadable product files. If
+              # an upload filter is ever bypassed, this is what stops the uploaded file
+              # becoming remote code execution. security.limit_extensions in the FPM
+              # pool is the second line of defence behind it.
+              location ~* /(?:uploads|files)/.*\.php$ {
+                  deny all;
+              }
+
+              # Not in the vendor recipe. wp-config.php holds the database credentials
+              # and the authentication salts and it sits in the document root; the
+              # hardening guide gives the Apache form of this rule
+              # (<Files "wp-config.php"> Require all denied) but no nginx equivalent,
+              # so this is keel's translation of it.
+              location = /wp-config.php { deny all; }
+              location = /wp-config-sample.php { deny all; }
+              location = /readme.html { deny all; }
+              location = /license.txt { deny all; }
+
+              # xmlrpc.php is the classic brute-force and pingback-amplification
+              # target and almost nothing modern needs it. keel's addition: WordPress
+              # does not publish this rule. Remove the block if you use the Jetpack or
+              # the mobile app.
+              location = /xmlrpc.php { deny all; access_log off; log_not_found off; }
+
+              # --- PHP ---------------------------------------------------------------
+              # WordPress's hardened variant, which is the one to use. The if(!-f)
+              # guard is the vendor's own "robust solution for the path info security
+              # issue": without it, a request for /uploads/evil.jpg/x.php can be routed
+              # to the jpg by cgi.fix_pathinfo. The shared baseline also sets
+              # cgi.fix_pathinfo = 0, so this stack blocks it twice.
+              location ~ [^/]\.php(/|$) {
+                  fastcgi_split_path_info ^(.+?\.php)(/.*)$;
+                  if (!-f $document_root$fastcgi_script_name) {
+                      return 404;
+                  }
+                  fastcgi_pass php:9000;
+                  fastcgi_index index.php;
+                  fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+                  include fastcgi_params;
+                  fastcgi_intercept_errors on;
+                  fastcgi_hide_header X-Powered-By;
+              }
+
+              # FPM's status and ping pages, declared in the pool. keel's addition, and
+              # restricted: 172.16.0.0/12 is Docker's default bridge range.
+              location ~ ^/(fpm-status|fpm-ping)$ {
+                  allow 127.0.0.1;
+                  allow 172.16.0.0/12;
+                  deny all;
+                  fastcgi_pass php:9000;
+                  fastcgi_param SCRIPT_FILENAME $fastcgi_script_name;
+                  include fastcgi_params;
+                  access_log off;
+              }
+
+              # WordPress's own static rule.
+              location ~* \.(js|css|png|jpg|jpeg|gif|ico|webp|svg|woff2)$ {
+                  expires max;
+                  log_not_found off;
+                  access_log off;
+              }
+
+              # --- page caching, and the WooCommerce exclusions ----------------------
+              # Left OFF and written out in full, because turning it on without the
+              # exclusions below is an incident rather than an optimisation.
+              #
+              # WordPress documents an nginx fastcgi_cache with a bypass set of
+              # comment_author|wordpress_[a-f0-9]+|wp-postpass|wordpress_no_cache|wordpress_logged_in.
+              # That set contains NO WooCommerce cookie. A store deployed with the
+              # unmodified WordPress recipe will serve one shopper's cached cart page
+              # to another shopper.
+              #
+              # WooCommerce's caching guidance names the pages that must stay dynamic,
+              # Cart, My Account and Checkout, "because they display customer-specific
+              # information", and publishes the complete cookie list below.
+              # wp_woocommerce_session_ is a PREFIX, not a whole cookie name, so it must
+              # be matched as one. docs/infra/woocommerce.md, source 3.
+              #
+              # The zone declaration is http-level and belongs in the shared nginx
+              # config, not here:
+              #   fastcgi_cache_path /var/run/nginx-cache levels=1:2 keys_zone=WORDPRESS:500m inactive=60m;
+              #
+              # set $skip_cache 0;
+              # if ($request_method = POST) { set $skip_cache 1; }
+              # if ($query_string != "") { set $skip_cache 1; }
+              # if ($request_uri ~* "/wp-admin/|/xmlrpc.php|wp-.*.php|/feed/|index.php|sitemap(_index)?.xml") { set $skip_cache 1; }
+              # # WooCommerce pages that must never be cached.
+              # if ($request_uri ~* "/(cart|checkout|my-account)/*$") { set $skip_cache 1; }
+              # # WooCommerce and WordPress session cookies.
+              # if ($http_cookie ~* "comment_author|wordpress_[a-f0-9]+|wp-postpass|wordpress_no_cache|wordpress_logged_in|woocommerce_cart_hash|woocommerce_items_in_cart|wp_woocommerce_session_|woocommerce_recently_viewed|store_notice") { set $skip_cache 1; }
+              # # ...then inside the PHP location:
+              # #   fastcgi_cache_bypass $skip_cache;
+              # #   fastcgi_no_cache $skip_cache;
+              # #   fastcgi_cache WORDPRESS;
+              # #   fastcgi_cache_valid 200 60m;
+          }
+      - path: compose.override.yaml
+        verbatim: true
+        content: |
+          # keel-generated. Compose merges compose.override.yaml over compose.yaml with no
+          # extra flags.
+          services:
+            nginx:
+              # WordPress's hosting team handbook lists nginx 1.26 and 1.27 as the
+              # recommended lines.
+              image: nginx:1.27-alpine
+              restart: unless-stopped
+              depends_on:
+                php:
+                  condition: service_healthy
+              ports:
+                - "${HTTP_PORT:-8080}:80"
+              volumes:
+                # nginx serves wp-content directly, read-only: it must never be able to
+                # write into the WordPress tree.
+                - .:/var/www/html:ro
+                # Shared, owned by recipes/infra/web/nginx.yaml.
+                - ./.keel/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+                # This framework's server block, owned by this recipe.
+                - ./docker/nginx/conf.d:/etc/nginx/conf.d:ro
+              healthcheck:
+                # WordPress ships no health endpoint and documents no convention for one
+                # (docs/infra/wordpress.md, open question 5): there is a Site Health screen
+                # in the admin, but it is a UI page, not a machine-readable probe. So this
+                # checks the home page answers at all rather than 502.
+                test: ["CMD", "wget", "-qO-", "http://127.0.0.1/"]
+                interval: 15s
+                timeout: 5s
+                retries: 10
+                start_period: 60s
+  # DDEV already runs nginx-fpm with a WordPress-aware config.
+  ddev: {}

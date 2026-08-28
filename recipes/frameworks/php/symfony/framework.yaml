@@ -1,0 +1,83 @@
+id: symfony
+kind: framework
+label: Symfony
+lang: php
+provides: [php, symfony]
+default: false
+updated: 2026-08-07
+pins:
+  symfony: ">=7.2"
+  php: ">=8.2"
+# The PHP line is a choice, not a constraint: this framework supports more
+# than one, so keel recommends the one it would pick and offers the rest.
+# The compose build arg reads the answer; the Dockerfile carries the same
+# default so a checkout without a .env still builds.
+versions:
+  # php_version, not php: the pin above is a Composer constraint, this is
+  # the concrete runtime the image is built on.
+  php_version:
+    label: PHP version
+    recommended: "8.4"
+    options:
+      - value: "8.2"
+        label: "PHP 8.2"
+        note: "security fixes only, ends Dec 2026"
+      - value: "8.3"
+        label: "PHP 8.3"
+        note: "active support ended Dec 2025, security to Dec 2027"
+      - value: "8.4"
+        label: "PHP 8.4"
+        note: "current, widest extension support"
+      - value: "8.5"
+        label: "PHP 8.5"
+        note: "newest; check your extensions have builds"
+# Created per env (DDEV's `composer create-project` handles the non-empty .ddev
+# dir). skeleton = minimal; add `composer require webapp` for a full-stack app
+# (Twig, forms, asset-mapper).
+create:
+  # Built in keeltmp and moved in: by the time the framework runs, keel has
+  # already written config under .keel/, and `ddev composer create-project`
+  # refuses a project root holding anything but public/. ddev exec runs composer
+  # inside the web container without that wrapper. Same as the other envs here.
+  symfony-ddev: "ddev exec 'rm -rf keeltmp && composer create-project symfony/skeleton keeltmp && cp -a keeltmp/. . && rm -rf keeltmp'"
+  # Built in keeltmp and moved in, not created in place: `composer
+  # create-project` refuses a target that is not empty, and the database recipe
+  # (priority -5) has already written .keel/<engine>/*.conf into the project by
+  # the time the framework runs. Same shape as the Docker create below.
+  symfony-local: "rm -rf keeltmp && composer create-project symfony/skeleton keeltmp && cp -a keeltmp/. . && rm -rf keeltmp"
+  # Compose: create inside the project's OWN php image rather than a stray
+  # composer container, so the skeleton is resolved against the PHP version that
+  # will actually run it (Symfony 8.1 requires PHP >= 8.4, and a composer image on
+  # an older PHP would resolve to an older Symfony without saying so). Into /tmp
+  # first because create-project refuses a non-empty target and the compose files
+  # are already there. `run --rm` starts the container on demand, so this works
+  # before anything has been brought up.
+  #
+  # --user: the dev stage runs as root so it can write to the bind-mounted host
+  # tree. Without this every file the skeleton writes is owned by root on the
+  # host, so keel's own next step fails with `open .env: permission denied` and
+  # the project cannot be edited without sudo. COMPOSER_HOME and HOME move to
+  # /tmp because an arbitrary uid has no home directory in the image.
+  #
+  # SYMFONY_DOCKER=0: Flex ships its own Docker recipe and, left alone, writes
+  # its own compose.yaml and compose.override.yaml on top of keel's. They then
+  # fight over the same two filenames, and the web server recipe fails outright
+  # with `open compose.override.yaml: permission denied`. keel owns the compose
+  # files here, so Flex is told not to generate them.
+  symfony-docker: "docker compose build php && docker compose run --rm -T --user \"$(id -u):$(id -g)\" -e COMPOSER_HOME=/tmp -e HOME=/tmp -e SYMFONY_DOCKER=0 php sh -c 'composer create-project symfony/skeleton /tmp/s && cp -a /tmp/s/. /var/www/html/ && rm -rf /tmp/s'"
+install:
+  - "{{create}}"
+  - "{{start}}"
+smoke:
+  - "{{console}} about"
+# No files: here — `composer create-project` refuses a non-empty dir, and keel
+# writes recipe files before install. Guidance goes in a post_build hook instead.
+hooks:
+  post_build:
+    - message: "Symfony ready. Try `keel run console`, `keel run cache`, or `keel run test`. Add more with `keel new symfony --with symfony-api-platform,symfony-security`."
+tasks:
+  test: "{{exec}} vendor/bin/phpunit"
+  lint: "{{console}} lint:yaml config && {{console}} lint:container"
+  dev: "{{start}}"
+  console: "{{console}}"
+  cache: "{{console}} cache:clear"

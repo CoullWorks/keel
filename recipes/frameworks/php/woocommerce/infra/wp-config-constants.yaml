@@ -1,0 +1,60 @@
+id: wordpress-wp-config-constants
+schema_version: 2
+kind: config
+label: Production wp-config.php constants (classic WordPress)
+updated: 2026-08-13
+# Classic WordPress only, and that is the whole reason this file exists apart
+# from the PHP-FPM recipe it was split out of.
+#
+# Every hook below runs `wp config set`, which edits wp-config.php. Bedrock has
+# no wp-config.php at all: its configuration is .env plus config/application.php
+# and config/environments/*.php, which is the point of the layout. Running these
+# against a Bedrock project fails with
+#
+#   Error: Could not process the 'wp-config.php' transformation.
+#   Reason: Unable to locate placement anchor.
+#
+# after an otherwise complete and working build - the store installed, the
+# plugins activated, and then the last hook killed it.
+#
+# Bedrock needs no equivalent: WP_DEBUG is already set per environment in
+# config/environments/development.php and production.php, and DISABLE_WP_CRON
+# and the rest belong in .env, where `keel run` can edit them as ordinary
+# dotenv keys.
+when:
+  framework: woocommerce
+  env: compose
+priority: -20
+hooks:
+  post_build:
+    # The production wp-config.php constants, all documented on the
+    # Editing wp-config.php page. Set after the build because `wp config create`
+    # runs during it. docs/infra/wordpress.md, source 3.
+    - run: "{{wp}} config set WP_DEBUG false --raw --type=constant"
+      when: "{{wp}}"
+    # 256M, from WooCommerce's server requirements: "WordPress memory limit of
+    # 256 MB or greater". WordPress core only attempts 40M for single site and
+    # 64M for multisite, which is nowhere near enough for a store. The constant
+    # can only ask PHP for memory it is already allowed, which is why php.ini
+    # sets 256M as well. docs/infra/woocommerce.md, source 1.
+    - run: "{{wp}} config set WP_MEMORY_LIMIT 256M --type=constant"
+      when: "{{wp}}"
+    # Removes the admin plugin and theme editor, so a stolen admin session cannot
+    # be turned into arbitrary PHP execution with two clicks.
+    - run: "{{wp}} config set DISALLOW_FILE_EDIT true --raw --type=constant"
+      when: "{{wp}}"
+    # Stops WordPress prompting for FTP credentials during updates. Documented
+    # values are 'direct', 'ssh2', 'ftpext' and 'ftpsockets'.
+    - run: "{{wp}} config set FS_METHOD direct --type=constant"
+      when: "{{wp}}"
+    # The important one for a store. WP-Cron is not cron: it fires on page loads,
+    # and WordPress says so plainly, "WP-Cron does not run continuously, which
+    # can be an issue if there are critical tasks that must run on time". A
+    # low-traffic WooCommerce store therefore does not process its background
+    # queue: orders sit in pending, emails do not send, stock does not sync,
+    # because Action Scheduler rides on WP-Cron. Disabling it here is only half
+    # the fix; the `cron` container is the other half.
+    # docs/infra/wordpress.md source 8, docs/infra/woocommerce.md source 6.
+    - run: "{{wp}} config set DISABLE_WP_CRON true --raw --type=constant"
+      when: "{{wp}}"
+    - message: "FORCE_SSL_ADMIN is NOT set: this local stack answers on plain HTTP. Set it (and session.cookie_secure = 1) before the site takes real traffic."

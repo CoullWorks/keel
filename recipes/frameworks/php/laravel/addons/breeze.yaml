@@ -1,0 +1,17 @@
+id: laravel-breeze
+kind: addon
+label: Breeze (full auth scaffold - login, register, reset, verify)
+appliesTo: [laravel]
+requires: [db]
+provides: [auth]
+schema_version: 2
+# Breeze needs a stack argument and we pass --no-interaction, so it must have a
+# value: blade is Breeze's own default and the one that needs no extra toolchain.
+vars:
+  stack: blade
+install:
+  - "{{composer}} require laravel/breeze --dev"
+  - "{{artisan}} breeze:install {{stack}} --no-interaction"
+  - "{{artisan}} migrate --force"
+smoke:
+  - "curl -fsS http://localhost/login"

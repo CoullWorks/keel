@@ -1,0 +1,159 @@
+id: nginx-nextjs
+schema_version: 2
+kind: config
+label: Next.js server block for NGINX
+updated: 2026-08-12
+# Written from docs/infra/nextjs.md. Next.js recommends a reverse proxy
+# explicitly: "When self-hosting, it's recommended to use a reverse proxy (like
+# nginx) in front of your Next.js server rather than exposing it directly to the
+# internet."
+#
+# Two things here are Next.js-specific and appear in none of the other eight
+# blocks: buffering has to be off or streaming breaks, and the immutable
+# caching for /_next/static must NOT be written by the proxy because the
+# framework already sets it and says it cannot be overridden.
+#
+# Division of labour. The shared NGINX service (recipes/infra/web/nginx.yaml)
+# owns .keel/nginx/nginx.conf: worker and http-level tuning, the log format,
+# gzip and its type list, server_tokens off, the default security headers,
+# real_ip from the trusted proxy, and the default client_max_body_size and
+# proxy timeouts. This recipe owns one server block and the compose wiring.
+when:
+  framework: nextjs
+  uses: nginx
+files:
+  - path: docker/nginx/conf.d/app.conf
+    content: |
+      # Next.js in output: 'standalone' mode, proxied. Included by the shared
+      # nginx.conf from /etc/nginx/conf.d/*.conf; http-level config lives there.
+      server {
+        listen 80;
+        server_name _;
+
+        # Restates the shared default rather than overriding it. Next.js
+        # publishes no proxy body-size guidance at all, so 1m is keel's number.
+        # If the app raises next.config's Server Actions body size limit, raise
+        # this to match or nginx rejects first with a 413 the app never sees.
+        client_max_body_size 1m;
+
+        location / {
+          proxy_pass http://app:3000;
+
+          # Next.js names no required forwarded header anywhere in its
+          # self-hosting guide, which is a real gap rather than an oversight on
+          # keel's part: unlike SvelteKit there is no published contract. These
+          # are the conventional four plus Host, and apps that read headers()
+          # will misbehave without them. Do not present this set as vendor
+          # guidance.
+          proxy_set_header Host              $host;
+          proxy_set_header X-Real-IP         $remote_addr;
+          proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+
+          # Append, not overwrite: nginx adds the real peer to whatever the
+          # client sent, and the framework walks the list from the right
+          # discarding trusted hops, so a client-supplied prefix is dropped
+          # before it can become the client IP. That holds while the real client
+          # is outside the trusted ranges, which is the internet-facing case. If
+          # this app only ever serves traffic that is itself inside those ranges,
+          # switch to `$remote_addr` here so the header is true by construction,
+          # which is what the Hono recipe has to do because Hono has no walk at
+          # all. Keep the append form if a CDN or load balancer sits in front and
+          # you need its hop preserved, and widen the trusted set to match.
+
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header X-Forwarded-Host  $host;
+
+          # Streaming. The App Router streams responses when self-hosted, and
+          # the guide is explicit: "If you are using nginx or a similar proxy,
+          # you will need to configure it to disable buffering to enable
+          # streaming." The documented route is the application emitting
+          # X-Accel-Buffering: no from next.config's headers(), which nginx
+          # honours natively ("Buffering can also be enabled or disabled by
+          # passing yes or no in the X-Accel-Buffering response header field").
+          #
+          # This overrides the shared default (nginx documents proxy_buffering
+          # on) because the header only helps if the app was configured to send
+          # it, and a scaffold that has not added the headers() block would
+          # stream nothing with no error anywhere. Turning it off here is the
+          # setting that does not depend on the app.
+          #
+          # Whatever the shared nginx.conf does, it must not list
+          # X-Accel-Buffering in proxy_ignore_headers, or the app-side route
+          # stops working too.
+          proxy_buffering off;
+
+          # Dev-mode Fast Refresh uses a WebSocket. Next.js documents nothing
+          # about proxying it, so this is inference from how upgrades work, not
+          # a quoted directive. Harmless in production, where nothing upgrades.
+          proxy_set_header Upgrade    $http_upgrade;
+          proxy_set_header Connection "upgrade";
+        }
+
+        # /_next/static is the fingerprinted asset path, and this block
+        # deliberately adds no caching header. Next.js "sets the Cache-Control
+        # header of public, max-age=31536000, immutable to truly immutable
+        # assets. It cannot be overridden." Adding add_header here would emit a
+        # second Cache-Control alongside the framework's, and would also stop
+        # the shared http-level add_header security headers being inherited into
+        # this location, because nginx inherits those "if and only if there are
+        # no add_header directives defined on the current level".
+        #
+        # The block exists so that boundary is written down: these URLs are
+        # immutable and the HTML around them is not. Dynamically rendered pages
+        # already receive private, no-cache, no-store, max-age=0,
+        # must-revalidate from the framework, and nothing in this file may
+        # widen that.
+        location /_next/static/ {
+          proxy_pass http://app:3000;
+          proxy_set_header Host              $host;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          # Buffering back on for static assets: they do not stream and
+          # buffering frees the upstream connection sooner.
+          proxy_buffering on;
+        }
+
+        # Answered by nginx, so the web tier's liveness does not depend on the
+        # app or on a rendering path. add_header at this level stops the shared
+        # http-level add_header directives being inherited into it, which is
+        # nginx's documented behaviour and is harmless for a health endpoint.
+        location = /healthz {
+          access_log off;
+          add_header Content-Type text/plain;
+          return 200 "ok\n";
+        }
+      }
+provision:
+  compose:
+    files:
+      - path: compose.override.yaml
+        content: |
+          # Compose merges compose.override.yaml over compose.yaml with no extra
+          # flags, so the app service written by the env recipe is untouched.
+          services:
+            nginx:
+              image: nginx:1.27-alpine
+              restart: unless-stopped
+              depends_on:
+                app:
+                  condition: service_healthy
+              ports:
+                - "${HTTP_PORT:-8080}:80"
+              volumes:
+                # Shared, owned by recipes/infra/web/nginx.yaml.
+                - ./.keel/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+                # This framework's server block, owned by this recipe.
+                - ./docker/nginx/conf.d:/etc/nginx/conf.d:ro
+              healthcheck:
+                test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+                interval: 15s
+                timeout: 5s
+                retries: 5
+                start_period: 10s
+              # Next.js asks platforms to "allow a configurable drain period
+              # (10-30 seconds is recommended)" for the app; the proxy in front
+              # of it gets the same, so it is not killed while the app is still
+              # finishing requests it forwarded.
+              stop_grace_period: 30s
+  # Native env: no container to add. The server block above still applies, but
+  # change proxy_pass to http://127.0.0.1:3000 because there is no `app` host.
+  local: {}

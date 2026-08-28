@@ -1,0 +1,59 @@
+id: node-drizzle
+schema_version: 2
+kind: addon
+label: Drizzle ORM (typed schema and migrations)
+appliesTo: [express, fastify, hono, nuxt, astro, sveltekit]
+provides: [orm, drizzle]
+conflicts: [prisma]
+requires: [db]
+updated: 2026-08-13
+# The dialect and the client package come from whichever database recipe is in
+# the plan. This used to install the `postgres` driver unconditionally, so a
+# MySQL project got a PostgreSQL client and no MySQL one, and there was no
+# drizzle.config.ts at all - which meant every drizzle-kit command failed
+# before it could report anything useful.
+#
+# Drizzle has no MongoDB dialect, so the MongoDB recipe defines no db.drizzle
+# and this add-on is not offered alongside it.
+install:
+  - "{{exec}} npm install drizzle-orm {{db.drizzle_driver}}"
+  - "{{exec}} npm install -D drizzle-kit"
+  - "{{exec}} npm pkg set scripts.db:generate=\"drizzle-kit generate\" scripts.db:migrate=\"drizzle-kit migrate\" scripts.db:studio=\"drizzle-kit studio\""
+smoke:
+  # Reads drizzle.config.ts and the schema: proves both exist and parse.
+  - "{{exec}} npx drizzle-kit generate --help"
+files:
+  - path: drizzle.config.ts
+    content: |
+      // keel-generated.
+      import { defineConfig } from "drizzle-kit";
+
+      export default defineConfig({
+        dialect: "{{db.drizzle}}",
+        schema: "./src/db/schema.ts",
+        out: "./drizzle",
+        dbCredentials: {
+          // From the environment, never inline: this file is committed and the
+          // connection string carries the password.
+          url: process.env.DATABASE_URL!,
+        },
+      });
+  - path: src/db/schema.ts
+    content: |
+      // keel-generated starting point. Replace this table with your own; it is
+      // here so `npm run db:generate` produces a migration on the first run
+      // rather than failing on an empty schema.
+      import { pgTable, serial, text, timestamp } from "drizzle-orm/pg-core";
+
+      export const users = pgTable("users", {
+        id: serial("id").primaryKey(),
+        email: text("email").notNull().unique(),
+        createdAt: timestamp("created_at").defaultNow().notNull(),
+      });
+
+      // On MySQL or MariaDB, import from "drizzle-orm/mysql-core" instead and
+      // use mysqlTable / int().autoincrement() / varchar().
+  - path: .env.example
+    content: |
+      # keel-generated. drizzle.config.ts reads this.
+      DATABASE_URL={{db.url}}

@@ -1,0 +1,61 @@
+id: woocommerce
+kind: framework
+label: WooCommerce (WordPress)
+lang: php
+provides: [php, wordpress, woocommerce]
+default: false
+family: woocommerce
+variant: Classic (WP-CLI)
+updated: 2026-08-07
+vars:
+  # Where the served tree begins, and what the content directory inside it is
+  # called. Classic WordPress serves from the project root, so wp-config.php,
+  # wp-admin/ and wp-includes/ all sit inside it - which is why the deny rules
+  # in the nginx and Apache recipes are not optional.
+  #
+  # Bedrock overrides all three (see variant-bedrock.yaml). Keeping them as
+  # variables is what lets both layouts share one web and PHP-FPM tier instead
+  # of a second copy of 1,500 lines of security-critical config.
+  wp.docroot: /var/www/html
+  wp.content_dir: wp-content
+  wp.uploads: wp-content/uploads
+pins:
+  wordpress: "6.8"
+  woocommerce: ">=9.0"
+  php: ">=8.2"
+# The PHP line is a choice, not a constraint: this framework supports more
+# than one, so keel recommends the one it would pick and offers the rest.
+# The compose build arg reads the answer; the Dockerfile carries the same
+# default so a checkout without a .env still builds.
+versions:
+  # php_version, not php: the pin above is a Composer constraint, this is
+  # the concrete runtime the image is built on.
+  php_version:
+    label: PHP version
+    recommended: "8.3"
+    options:
+      - value: "8.2"
+        label: "PHP 8.2"
+        note: "security fixes only, ends Dec 2026"
+      - value: "8.3"
+        label: "PHP 8.3"
+        note: "active support ended Dec 2025, security to Dec 2027"
+      - value: "8.4"
+        label: "PHP 8.4"
+        note: "current, widest extension support"
+# WordPress via DDEV's documented quickstart: download core, write the config
+# against DDEV's db service, install, then activate WooCommerce + Storefront.
+# (DDEV is already started by the env recipe, which runs first.)
+install:
+  - "{{wp}} core download"
+  - "{{wp}} config create --dbname=db --dbuser=db --dbpass=db --dbhost=db --force"
+  - '{{wp}} core install --url={{site_url}} --title="{{project}}" --admin_user=admin --admin_password=admin --admin_email=admin@example.com --skip-email'
+  - "{{wp}} plugin install woocommerce --activate"
+  - "{{wp}} theme install storefront --activate"
+  - "{{restart}}"
+smoke:
+  - "{{wp}} plugin is-active woocommerce"
+tasks:
+  dev: "{{start}}"
+  plugins: "{{wp}} plugin list"
+  flush: "{{wp}} cache flush"

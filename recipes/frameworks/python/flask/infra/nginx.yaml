@@ -1,0 +1,156 @@
+id: nginx-flask
+schema_version: 2
+kind: config
+label: Flask server block for NGINX
+updated: 2026-08-12
+# Written from docs/infra/flask.md. Flask is the one framework in this set that
+# publishes its own nginx config, so the location block below is close to vendor
+# text. Flask's version, verbatim:
+#
+#   server {
+#       listen 80;
+#       server_name _;
+#       location / {
+#           proxy_pass http://127.0.0.1:8000/;
+#           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+#           proxy_set_header X-Forwarded-Proto $scheme;
+#           proxy_set_header X-Forwarded-Host $host;
+#           proxy_set_header X-Forwarded-Prefix /;
+#       }
+#   }
+#
+# Added to it: the upstream, the body-size cap and the timeouts from gunicorn's
+# own nginx block, plus a /static/ location. Flask does not document offloading
+# /static to the web server, so that block is convention and is labelled as such.
+#
+# There are no websocket upgrade headers here, and that is correct: a plain
+# Flask app speaks request and response. Flask-SocketIO needs a different proxy
+# config and a different worker class, and Flask documents neither.
+#
+# Division of labour. The shared NGINX service (recipes/infra/web/nginx.yaml)
+# owns .keel/nginx/nginx.conf: worker and http-level tuning, the log format,
+# gzip and its type list, server_tokens off, the default security headers,
+# real_ip from the trusted proxy, and the default client_max_body_size and proxy
+# timeouts. This recipe owns one server block and the compose wiring.
+when:
+  framework: flask
+  uses: nginx
+files:
+  - path: docker/nginx/conf.d/app.conf
+    content: |
+      # Flask behind gunicorn, proxied. Included by the shared nginx.conf from
+      # /etc/nginx/conf.d/*.conf; http-level config lives there.
+
+      upstream flask_app {
+        # The compose service name. Under the native env there is no `app` host:
+        # change this to 127.0.0.1:8000, which is the exact shape Flask's own
+        # nginx page assumes ("the WSGI server is listening locally at
+        # http://127.0.0.1:8000") and where gunicorn should be bound on a host,
+        # because binding it externally behind a proxy makes it "possible to
+        # bypass the proxy".
+        #
+        # fail_timeout=0 is gunicorn's own documented value: it stops nginx
+        # taking the app out of rotation while it is merely restarting.
+        server app:8000 fail_timeout=0;
+      }
+
+      server {
+        listen 80;
+        server_name _;
+
+        # Overrides the shared default. gunicorn's documented block uses
+        # client_max_body_size 4G; nginx's own default is 1m, which rejects an
+        # upload before Flask ever sees it. A denial-of-service ceiling, not a
+        # target.
+        client_max_body_size 25m;
+
+        # keel's convention, not Flask's. Flask serves /static from the
+        # application by default and no Flask page discusses offloading it, but a
+        # stylesheet should not occupy a gunicorn sync worker for the length of a
+        # slow client's download. Delete this block to hand /static back to
+        # Flask, and point the alias at the real directory under the native env.
+        location /static/ {
+          alias /var/www/static/;
+          access_log off;
+          expires 7d;
+          add_header Cache-Control "public";
+        }
+
+        location / {
+          # Flask's own block, with the upstream named instead of inlined.
+          # X-Forwarded-Prefix is Flask's, and pairs with ProxyFix's x_prefix.
+          proxy_pass http://flask_app;
+          proxy_redirect off;
+          proxy_set_header Host              $http_host;
+          proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header X-Forwarded-Host  $host;
+          proxy_set_header X-Forwarded-Prefix /;
+
+          # Buffering stays on, which is nginx's default and the entire point of
+          # the proxy here: gunicorn's sync worker "Requires a buffering proxy
+          # (nginx, HAProxy) for production", because otherwise one slow client
+          # occupies one worker.
+          proxy_connect_timeout 5s;
+          proxy_send_timeout    60s;
+          # 60s is nginx's own default, restated so it sits next to the gunicorn
+          # --timeout of 60 it has to agree with. If gunicorn kills a worker at
+          # 60s and nginx waits 300s, a slow request becomes a 502 five minutes
+          # later instead of promptly.
+          proxy_read_timeout    60s;
+        }
+
+        # Answered by nginx, so the web tier's liveness does not depend on the
+        # app. add_header at this level stops the shared http-level add_header
+        # directives being inherited into it, which is nginx's documented
+        # behaviour and is harmless for a health endpoint.
+        location = /healthz {
+          access_log off;
+          add_header Content-Type text/plain;
+          return 200 "ok\n";
+        }
+      }
+
+      # None of the above is enough on its own. Flask's ProxyFix has to be
+      # applied in the application, sized to the real chain:
+      #
+      #   from werkzeug.middleware.proxy_fix import ProxyFix
+      #   app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+      #
+      # The counts must match reality. One nginx in front means 1. A CDN plus
+      # nginx means 2. Flask: "It can be a security issue if you get this
+      # configuration wrong."
+provision:
+  compose:
+    files:
+      - path: compose.override.yaml
+        content: |
+          # Compose merges compose.override.yaml over compose.yaml with no extra
+          # flags, so the app service written by the env recipe is untouched.
+          services:
+            nginx:
+              image: nginx:1.27-alpine
+              restart: unless-stopped
+              depends_on:
+                app:
+                  condition: service_healthy
+              ports:
+                - "${HTTP_PORT:-8080}:80"
+              volumes:
+                # Shared, owned by recipes/infra/web/nginx.yaml.
+                - ./.keel/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+                # This framework's server block, owned by this recipe.
+                - ./docker/nginx/conf.d:/etc/nginx/conf.d:ro
+              healthcheck:
+                test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+                interval: 15s
+                timeout: 5s
+                retries: 5
+                start_period: 10s
+              # Matches the app's stop_grace_period, so the proxy is not killed
+              # while gunicorn is still draining requests it forwarded.
+              stop_grace_period: 45s
+  # Native env: no container to add. The server block above still applies, but
+  # change the upstream to 127.0.0.1:8000 and point the /static/ alias at the
+  # real directory on the host.
+  local: {}

@@ -1,0 +1,14 @@
+id: filament
+kind: addon
+label: Filament (admin panel)
+appliesTo: [laravel]
+requires: [db]
+provides: [admin-panel]
+schema_version: 2
+vars:
+  panelPath: /admin # Filament's default panel path; the smoke check curls it
+install:
+  - "{{composer}} require filament/filament"
+  - "{{artisan}} filament:install --panels --no-interaction"
+smoke:
+  - "curl -fsS http://localhost{{panelPath}}/login"

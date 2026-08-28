@@ -1,0 +1,41 @@
+id: node-vitest
+schema_version: 2
+kind: addon
+label: Vitest (unit and integration tests)
+appliesTo: [express, fastify, hono, nestjs, nuxt, astro, sveltekit]
+provides: [tests]
+default: true
+updated: 2026-08-13
+# This used to install vitest and nothing else, and the old smoke check asked it
+# for its version number - which passes whether or not the runner can actually
+# run. `keel run test` did not:
+#
+#   No test files found, exiting with code 1
+#
+# Four of these frameworks run `npx vitest run` for their test task, so a fresh
+# project failed its own test command. The three that run `npm test` had a
+# different half of the same problem: the script they ran was whatever the
+# framework happened to declare, so the runner keel had just installed was never
+# invoked at all.
+install:
+  - "{{exec}} npm install -D vitest"
+  # One runner, named in one place. Without this, `npm test` runs whatever the
+  # framework's package.json shipped with and vitest sits there unused.
+  - "{{exec}} npm pkg set scripts.test=\"vitest run\" scripts.test:watch=\"vitest\""
+smoke:
+  # Runs the suite for real. `vitest --version` was the old check and it would
+  # have passed happily on the broken setup this replaces.
+  - "{{exec}} npx vitest run"
+files:
+  # .mjs, because nestjs has no "type": "module" and this file uses import.
+  # Vitest's default include pattern already covers the .mjs extension.
+  - path: tests/example.test.mjs
+    content: |
+      // keel-generated. This exists so `keel run test` has something to run:
+      // green here means the runner, the config and the project layout agree.
+      // Delete it as soon as you have a real test.
+      import { expect, test } from "vitest";
+
+      test("the test runner is wired up", () => {
+        expect(1 + 1).toBe(2);
+      });

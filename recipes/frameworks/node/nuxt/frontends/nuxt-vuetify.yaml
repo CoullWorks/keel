@@ -1,0 +1,75 @@
+id: nuxt-vuetify
+kind: addon
+label: Vuetify (Material Design Vue components)
+category: UI kit
+appliesTo: [nuxt]
+requires: [nuxt]
+provides: [vuetify, ui-library]
+priority: 42
+# Vuetify 3 is a standalone Material Design component library (own styling —
+# an alternative to Tailwind). Wired via vuetify-nuxt-module.
+install:
+  - "{{exec}} npm install vuetify vuetify-nuxt-module"
+smoke:
+  - "{{exec}} npm run build"
+files:
+  - path: nuxt.config.ts
+    content: |
+      // https://nuxt.com/docs/api/configuration/nuxt-config
+      export default defineNuxtConfig({
+        devtools: { enabled: true },
+        modules: ["vuetify-nuxt-module"],
+        vuetify: {
+          moduleOptions: {},
+          vuetifyOptions: {},
+        },
+      });
+  - path: app.vue
+    content: |
+      <script setup lang="ts">
+      // keel: a production-ready landing page built from Vuetify components.
+      // vuetify-nuxt-module auto-imports the v-* components and loads styles.
+      const features: [string, string][] = [
+        ["Vuetify", "A complete Material Design component framework."],
+        ["Auto-imports", "The Nuxt module registers v-* components for you."],
+        ["keel-managed", "keel run dev · test · build, one vocabulary."],
+      ];
+      </script>
+
+      <template>
+        <v-app>
+          <v-main>
+            <v-container class="py-16" style="max-width: 48rem">
+              <v-chip color="success" variant="tonal" size="small">running</v-chip>
+              <h1 class="text-h3 font-weight-bold mt-6">Your Nuxt app is running</h1>
+              <p class="text-medium-emphasis mt-4">
+                Built with Vuetify, scaffolded by keel. Edit
+                <code>app.vue</code> to make it yours.
+              </p>
+              <div class="d-flex flex-wrap ga-3 mt-8">
+                <v-btn
+                  color="primary"
+                  href="https://coullworks.com/tools/keel"
+                  target="_blank"
+                  rel="noopener"
+                >
+                  keel docs
+                </v-btn>
+                <v-btn
+                  variant="outlined"
+                  href="https://vuetifyjs.com"
+                  target="_blank"
+                  rel="noopener"
+                >
+                  Vuetify docs
+                </v-btn>
+              </div>
+              <v-row class="mt-8">
+                <v-col v-for="[title, body] in features" :key="title" cols="12" md="4">
+                  <v-card :title="title" :text="body" variant="tonal" />
+                </v-col>
+              </v-row>
+            </v-container>
+          </v-main>
+        </v-app>
+      </template>

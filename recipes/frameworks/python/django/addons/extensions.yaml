@@ -1,0 +1,14 @@
+id: django-extensions
+kind: addon
+label: django-extensions (shell_plus, etc.)
+appliesTo: [django]
+provides: [extensions]
+default: true
+install:
+  - "{{exec}} uv add --dev django-extensions"
+files:
+  - path: config/settings.d/90-django-extensions.py
+    content: |
+      # django-extensions is a set of management commands (shell_plus,
+      # show_urls, graph_models) and they only exist once the app is installed.
+      INSTALLED_APPS += ["django_extensions"]

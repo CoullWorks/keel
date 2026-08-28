@@ -1,0 +1,12 @@
+# Test suite as a level: stack generator (Next.js Vitest + Playwright). Applies
+# both halves: nextjs-vitest for units/integration and nextjs-playwright for the
+# real-browser end-to-end pass, in that order.
+id: gen-tests-nextjs
+kind: generator
+level: stack
+label: "Test suite (Vitest units + Playwright end-to-end)"
+appliesTo: [nextjs]
+provides: [tests]
+apply: [nextjs-vitest, nextjs-playwright]
+schema_version: 2
+updated: 2026-08-22

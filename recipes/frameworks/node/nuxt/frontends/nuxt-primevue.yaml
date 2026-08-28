@@ -1,0 +1,118 @@
+id: nuxt-primevue
+kind: addon
+label: PrimeVue (Vue component library)
+category: UI kit
+appliesTo: [nuxt]
+requires: [nuxt]
+provides: [primevue, ui-library]
+priority: 42
+# PrimeVue v4 is a standalone Vue component library (its own theming — an
+# alternative to Tailwind, not layered on it). Wired via its Nuxt module.
+install:
+  - "{{exec}} npm install primevue @primeuix/themes @primevue/nuxt-module"
+smoke:
+  - "{{exec}} npm run build"
+files:
+  - path: nuxt.config.ts
+    content: |
+      import Aura from "@primeuix/themes/aura";
+
+      // https://nuxt.com/docs/api/configuration/nuxt-config
+      export default defineNuxtConfig({
+        devtools: { enabled: true },
+        modules: ["@primevue/nuxt-module"],
+        primevue: {
+          options: {
+            theme: { preset: Aura },
+          },
+        },
+      });
+  - path: app.vue
+    content: |
+      <script setup lang="ts">
+      // keel: a production-ready landing page built from PrimeVue components.
+      // The Nuxt module auto-imports Button, Card and Tag, no imports needed.
+      const features: [string, string][] = [
+        ["PrimeVue", "A rich Vue component suite with its own theming."],
+        ["Auto-imports", "Nuxt registers PrimeVue components for you."],
+        ["keel-managed", "keel run dev · test · build, one vocabulary."],
+      ];
+      </script>
+
+      <template>
+        <main class="p-page">
+          <div class="p-wrap">
+            <Tag value="running" severity="success" rounded />
+            <h1 class="p-title">Your Nuxt app is running</h1>
+            <p class="p-lead">
+              Built with PrimeVue, scaffolded by keel. Edit
+              <code>app.vue</code> to make it yours.
+            </p>
+            <div class="p-actions">
+              <Button
+                as="a"
+                href="https://coullworks.com/tools/keel"
+                target="_blank"
+                rel="noopener"
+                label="keel docs"
+              />
+              <Button
+                as="a"
+                href="https://primevue.org"
+                target="_blank"
+                rel="noopener"
+                label="PrimeVue docs"
+                severity="secondary"
+                outlined
+              />
+            </div>
+            <div class="p-grid">
+              <Card v-for="[title, body] in features" :key="title">
+                <template #title>{{ title }}</template>
+                <template #content>
+                  <p>{{ body }}</p>
+                </template>
+              </Card>
+            </div>
+          </div>
+        </main>
+      </template>
+
+      <style scoped>
+      /* Layout only, colours, borders and typography come from the PrimeVue theme. */
+      .p-page {
+        min-height: 100vh;
+        padding: 5rem 1.5rem;
+        background: var(--p-content-background);
+        color: var(--p-text-color);
+      }
+      .p-wrap {
+        max-width: 48rem;
+        margin: 0 auto;
+      }
+      .p-title {
+        margin: 1.5rem 0 0;
+        font-size: 2.25rem;
+        font-weight: 700;
+      }
+      .p-lead {
+        margin-top: 1rem;
+        color: var(--p-text-muted-color);
+      }
+      .p-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+        margin-top: 2rem;
+      }
+      .p-grid {
+        display: grid;
+        gap: 1rem;
+        margin-top: 3rem;
+      }
+      @media (min-width: 640px) {
+        .p-grid {
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+      }
+      </style>

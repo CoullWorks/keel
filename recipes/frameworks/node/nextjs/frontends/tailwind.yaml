@@ -1,0 +1,194 @@
+id: nextjs-tailwind
+kind: addon
+label: Tailwind CSS v4
+category: UI kit
+appliesTo: [nextjs]
+requires: [nextjs]
+provides: [tailwind, css]
+priority: 40
+# Next.js uses PostCSS (not the Vite plugin): Tailwind v4 via @tailwindcss/postcss.
+# globals.css ships a default keel brand @theme block (wrapped in the keel:brand
+# markers) so brand/neutral utilities work out of the box AND `keel brand <colour>`
+# replaces the block in place. The starter page uses those tokens, so branding
+# recolours the running app instead of leaving a hardcoded palette untouched.
+install:
+  - "{{exec}} npm install tailwindcss @tailwindcss/postcss"
+smoke:
+  - "{{exec}} npm run build"
+files:
+  - path: postcss.config.mjs
+    content: |
+      export default {
+        plugins: { "@tailwindcss/postcss": {} },
+      };
+  - path: app/globals.css
+    content: |
+      @import "tailwindcss";
+
+      /* keel:brand start */
+      @theme {
+        --color-brand-50: #f7f7fe;
+        --color-brand-100: #ecedfd;
+        --color-brand-200: #d3d4fb;
+        --color-brand-300: #b1b3f8;
+        --color-brand-400: #8f91f5;
+        --color-brand-500: #6366f1;
+        --color-brand-600: #5457cd;
+        --color-brand-700: #4345a4;
+        --color-brand-800: #323379;
+        --color-brand-900: #20214d;
+        --color-brand-950: #141430;
+        --color-accent-50: #f5f6f7;
+        --color-accent-100: #e7e8eb;
+        --color-accent-200: #c6cacf;
+        --color-accent-300: #99a0aa;
+        --color-accent-400: #6c7685;
+        --color-accent-500: #334155;
+        --color-accent-600: #2b3748;
+        --color-accent-700: #232c3a;
+        --color-accent-800: #1a212b;
+        --color-accent-900: #10151b;
+        --color-accent-950: #0a0d11;
+        --color-neutral-50: #f7f8f9;
+        --color-neutral-100: #eceef1;
+        --color-neutral-200: #d4d8df;
+        --color-neutral-300: #b2bac5;
+        --color-neutral-400: #8f9bab;
+        --color-neutral-500: #64748b;
+        --color-neutral-600: #556376;
+        --color-neutral-700: #444f5f;
+        --color-neutral-800: #323a46;
+        --color-neutral-900: #20252c;
+        --color-neutral-950: #14171c;
+        --color-muted-50: #f7f8f9;
+        --color-muted-100: #eceef1;
+        --color-muted-200: #d4d8df;
+        --color-muted-300: #b2bac5;
+        --color-muted-400: #8f9bab;
+        --color-muted-500: #64748b;
+        --color-muted-600: #556376;
+        --color-muted-700: #444f5f;
+        --color-muted-800: #323a46;
+        --color-muted-900: #20252c;
+        --color-muted-950: #14171c;
+        --color-success-50: #f4fcf7;
+        --color-success-100: #e4f8ec;
+        --color-success-200: #c1efd2;
+        --color-success-300: #91e2af;
+        --color-success-400: #60d58b;
+        --color-success-500: #22c55e;
+        --color-success-600: #1da750;
+        --color-success-700: #178640;
+        --color-success-800: #11632f;
+        --color-success-900: #0b3f1e;
+        --color-success-950: #072713;
+        --color-warning-50: #fffaf3;
+        --color-warning-100: #fef3e2;
+        --color-warning-200: #fce4bb;
+        --color-warning-300: #facf85;
+        --color-warning-400: #f8b94f;
+        --color-warning-500: #f59e0b;
+        --color-warning-600: #d08609;
+        --color-warning-700: #a76b07;
+        --color-warning-800: #7b4f06;
+        --color-warning-900: #4e3304;
+        --color-warning-950: #312002;
+        --color-destructive-50: #fef6f6;
+        --color-destructive-100: #fde9e9;
+        --color-destructive-200: #fbcbcb;
+        --color-destructive-300: #f7a2a2;
+        --color-destructive-400: #f37878;
+        --color-destructive-500: #ef4444;
+        --color-destructive-600: #cb3a3a;
+        --color-destructive-700: #a32e2e;
+        --color-destructive-800: #782222;
+        --color-destructive-900: #4c1616;
+        --color-destructive-950: #300e0e;
+        --color-background: #ffffff;
+        --color-foreground: #14171c;
+        --color-card: #ffffff;
+        --color-card-foreground: #14171c;
+        --color-border: #d4d8df;
+        --color-ring: #6366f1;
+        --radius: 0.5rem;
+        --font-sans: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+        --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      }
+      .dark {
+        --color-background: #14171c;
+        --color-foreground: #f7f8f9;
+        --color-card: #20252c;
+        --color-card-foreground: #f7f8f9;
+        --color-border: #323a46;
+        --color-ring: #8f91f5;
+      }
+      /* keel:brand end */
+  - path: app/layout.tsx
+    content: |
+      import "./globals.css";
+
+      export const metadata = { title: "app", description: "Next.js + Tailwind (keel)" };
+
+      export default function RootLayout({ children }: { children: React.ReactNode }) {
+        return (
+          <html lang="en">
+            <body>{children}</body>
+          </html>
+        );
+      }
+  - path: app/page.tsx
+    content: |
+      // keel: a production-ready landing page that proves Tailwind + your brand are wired.
+      // Colours come from the keel brand tokens in globals.css (brand / neutral), so
+      // `keel brand <colour>` recolours this page. No hardcoded palette.
+      const features = [
+        ["Tailwind CSS v4", "Utility-first styling, compiled via PostCSS."],
+        ["App Router", "React Server Components, ready to build on."],
+        ["keel-managed", "keel run dev, test, build, one vocabulary."],
+      ];
+
+      export default function Home() {
+        return (
+          <main className="min-h-screen bg-neutral-950 text-neutral-100">
+            <div className="mx-auto max-w-3xl px-6 py-20">
+              <span className="inline-flex items-center gap-2 rounded-full border border-brand-500/30 bg-brand-500/10 px-3 py-1 text-xs font-medium text-brand-300">
+                <span className="size-1.5 rounded-full bg-brand-400" /> running
+              </span>
+              <h1 className="mt-6 text-4xl font-bold tracking-tight sm:text-5xl">
+                Your Next.js app is running
+              </h1>
+              <p className="mt-4 text-lg text-neutral-400">
+                Styled with Tailwind CSS, scaffolded by keel. Run{" "}
+                <code className="rounded bg-neutral-800 px-1.5 py-0.5 text-sm">keel brand #hex</code> to
+                paint it in your colour, then edit{" "}
+                <code className="rounded bg-neutral-800 px-1.5 py-0.5 text-sm">app/page.tsx</code>.
+              </p>
+              <div className="mt-8 flex flex-wrap gap-3">
+                <a
+                  href="https://coullworks.com/tools/keel"
+                  className="rounded-lg bg-brand-500 px-4 py-2 text-sm font-semibold text-white hover:bg-brand-400"
+                >
+                  keel docs
+                </a>
+                <a
+                  href="https://nextjs.org/docs"
+                  className="rounded-lg border border-neutral-700 px-4 py-2 text-sm font-semibold hover:bg-neutral-900"
+                >
+                  Next.js docs
+                </a>
+              </div>
+              <div className="mt-12 grid gap-4 sm:grid-cols-3">
+                {features.map(([title, body]) => (
+                  <div
+                    key={title}
+                    className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-5"
+                  >
+                    <h2 className="font-semibold">{title}</h2>
+                    <p className="mt-1 text-sm text-neutral-400">{body}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </main>
+        );
+      }

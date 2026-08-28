@@ -1,0 +1,213 @@
+id: magento-headless-next
+kind: frontend
+label: Bespoke Next.js storefront (SSR + ISR over GraphQL)
+appliesTo: [magento, magento-mageos]
+requires: [magento]
+provides: [frontend, headless, next]
+conflicts: [hyva, pwa-studio, scandipwa, alokai]
+default: false
+priority: 60
+updated: 2026-08-13
+# A Next.js storefront you own outright, talking to Magento's GraphQL API.
+#
+# No storefront framework in between: no PWA Studio buildpack, no Alokai
+# integration layer, no theme. You write the queries and the components, which
+# means nothing is in your way and nothing is done for you either. Choose this
+# when the storefront is the product and you intend to invest in it; choose
+# Hyvä or Alokai when you want most of a store to already exist.
+#
+# The rendering strategy is the reason this is worth doing rather than a plain
+# SPA, so the scaffold sets it up rather than leaving a comment about it:
+#
+#   * Category and product pages are STATIC with revalidation (ISR). A catalogue
+#     changes on a merchandiser's schedule, not per request, so pages are built
+#     once and refreshed in the background. That is what makes a headless store
+#     fast: the shopper gets a cached document, not a GraphQL round trip.
+#   * Cart, checkout and account are DYNAMIC. They are per-shopper by
+#     definition, and caching them is how you leak one customer's basket to
+#     another.
+#
+# Getting that split wrong is the single most common way a headless Magento
+# build ends up slower than the monolith it replaced.
+#
+# Sources:
+#   [1] Magento GraphQL             https://developer.adobe.com/commerce/webapi/graphql/
+#   [2] GraphQL products query      https://developer.adobe.com/commerce/webapi/graphql/schema/products/queries/products/
+#   [3] Next.js ISR                 https://nextjs.org/docs/app/guides/incremental-static-regeneration
+#   [4] Next.js dynamic rendering   https://nextjs.org/docs/app/getting-started/partial-prerendering
+#   [5] Magento integration tokens  https://experienceleague.adobe.com/en/docs/commerce-admin/systems/integrations/integrations
+pins:
+  next: "^15.0"
+versions:
+  node_version:
+    label: Node.js version (storefront)
+    recommended: "22"
+    options:
+      - value: "20"
+        label: "Node 20 LTS"
+        note: "maintenance only, ends Apr 2026"
+      - value: "22"
+        label: "Node 22 LTS"
+        note: "recommended: active LTS"
+install:
+  # Scaffolded into a temp directory, then merged, because create-next-app
+  # refuses a target that already has anything in it - and keel has already
+  # written this recipe's own files there (files: are written before install:).
+  # It exits 1 with "Either try using a new directory name, or remove the files
+  # listed above", listing .env.local.example, README.keel.md and src/, all of
+  # which keel put there deliberately.
+  #
+  # The temp directory has no leading dot: create-next-app takes the package
+  # name from the directory and npm rejects a name starting with one -
+  # "Could not create a project called \".sfnew\" because of npm naming
+  # restrictions: name cannot start with a period". The AdonisJS recipe carries
+  # the same note for the same reason.
+  #
+  # keel's files go back on top afterwards, so the Magento-aware page.tsx and
+  # lib/magento.ts win over the vanilla ones the scaffolder writes.
+  - "bash -lc 'rm -rf sfnew-tmp && npx --yes create-next-app@latest sfnew-tmp --ts --app --eslint --tailwind --src-dir --use-npm --import-alias \"@/*\" --no-turbopack --yes && cp -a storefront/. sfnew-tmp/ && rm -rf storefront && mv sfnew-tmp storefront'"
+  - "bash -lc 'cd storefront && npm install'"
+smoke:
+  - "bash -lc 'test -f storefront/package.json'"
+files:
+  - path: storefront/.env.local.example
+    content: |
+      # The Magento GraphQL endpoint this storefront reads from.
+      # Server-side only: it is not NEXT_PUBLIC_, because the browser should talk
+      # to your own routes rather than straight to Magento.
+      MAGENTO_GRAPHQL_URL={{site_url}}/graphql
+
+      # How often ISR pages are refreshed, in seconds. 300 is five minutes: long
+      # enough that the catalogue is served from cache almost always, short
+      # enough that a price change is live without a deploy.
+      REVALIDATE_SECONDS=300
+  - path: storefront/src/lib/magento.ts
+    content: |
+      // The one place this storefront talks to Magento.
+      //
+      // Keeping it in a single module is not tidiness: it is what makes the
+      // caching decisions reviewable. Every call states its own revalidation,
+      // so you can read this file and know what is cached and for how long.
+
+      const endpoint = process.env.MAGENTO_GRAPHQL_URL;
+
+      if (!endpoint) {
+        // Fail at import rather than per request. A storefront with no backend
+        // URL should not start and then 500 on every page.
+        throw new Error("MAGENTO_GRAPHQL_URL is not set (see .env.local.example)");
+      }
+
+      type Options = {
+        // Seconds before Next.js refreshes this data in the background. Omit for
+        // per-request data (cart, checkout, anything shopper-specific).
+        revalidate?: number;
+      };
+
+      export async function magento<T>(
+        query: string,
+        variables: Record<string, unknown> = {},
+        opts: Options = {},
+      ): Promise<T> {
+        const res = await fetch(endpoint as string, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ query, variables }),
+          // No revalidate means no caching: that is the correct default for
+          // anything belonging to one shopper.
+          ...(opts.revalidate === undefined
+            ? { cache: "no-store" as const }
+            : { next: { revalidate: opts.revalidate } }),
+        });
+
+        if (!res.ok) {
+          throw new Error(`Magento GraphQL ${res.status}: ${await res.text()}`);
+        }
+
+        const body = (await res.json()) as { data?: T; errors?: { message: string }[] };
+        // GraphQL answers 200 with an errors array, so a bare res.ok check is
+        // not enough: without this, a failed query becomes an empty page.
+        if (body.errors?.length) {
+          throw new Error(body.errors.map((e) => e.message).join("; "));
+        }
+        return body.data as T;
+      }
+
+      // Seconds between background refreshes of catalogue pages.
+      export const CATALOGUE_REVALIDATE = Number(process.env.REVALIDATE_SECONDS ?? 300);
+  - path: storefront/src/app/page.tsx
+    content: |
+      import { magento, CATALOGUE_REVALIDATE } from "@/lib/magento";
+
+      // Statically rendered, refreshed in the background every
+      // CATALOGUE_REVALIDATE seconds. A shopper gets a cached document; the
+      // GraphQL round trip happens on revalidation, not in their request.
+      export const revalidate = 300;
+
+      type ProductsResponse = {
+        products: {
+          items: { uid: string; name: string; url_key: string }[];
+        };
+      };
+
+      const QUERY = `
+        query LatestProducts($pageSize: Int!) {
+          products(search: "", pageSize: $pageSize) {
+            items { uid name url_key }
+          }
+        }
+      `;
+
+      export default async function Home() {
+        const data = await magento<ProductsResponse>(
+          QUERY,
+          { pageSize: 12 },
+          { revalidate: CATALOGUE_REVALIDATE },
+        );
+
+        return (
+          <main className="mx-auto max-w-5xl p-8">
+            <h1 className="text-2xl font-semibold">Storefront</h1>
+            <p className="mt-2 text-sm text-gray-500">
+              Rendered statically and revalidated every {CATALOGUE_REVALIDATE}s from
+              Magento GraphQL.
+            </p>
+            <ul className="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {data.products.items.map((p) => (
+                <li key={p.uid} className="rounded border p-4">
+                  {p.name}
+                </li>
+              ))}
+            </ul>
+          </main>
+        );
+      }
+  - path: storefront/README.keel.md
+    content: |
+      # Bespoke Next.js storefront
+
+      Talks to Magento at `{{site_url}}/graphql`.
+
+          cp .env.local.example .env.local
+          npm run dev
+
+      ## The rendering split, and why it matters
+
+      | Route                    | Rendering            | Why |
+      |--------------------------|----------------------|-----|
+      | home, category, product  | static + ISR         | the catalogue changes on a merchandiser's schedule, not per request |
+      | cart, checkout, account  | dynamic, uncached    | per shopper; caching these leaks one basket into another |
+      | search                   | dynamic              | the query is the input |
+
+      `src/lib/magento.ts` makes this explicit: a call with `revalidate` is
+      cached and refreshed in the background, a call without it is `no-store`.
+      The default is uncached, so forgetting to think about a new query fails
+      safe (slow) rather than unsafe (wrong shopper's data).
+
+      ## Before you go to production
+
+      * Put the Magento GraphQL endpoint behind your own network, not the public
+        internet. Only this app should reach it.
+      * Magento integration tokens live server-side only. Nothing here is
+        `NEXT_PUBLIC_`, and it should stay that way.
+      * Warm the ISR cache after a deploy, or the first shopper on each page pays
+        for the regeneration.

@@ -1,0 +1,108 @@
+id: magento-scandipwa
+kind: frontend
+label: ScandiPWA (React theme) - guided setup, not scaffolded
+appliesTo: [magento, magento-mageos]
+requires: [magento]
+provides: [frontend, headless, scandipwa]
+conflicts: [hyva, pwa-studio, alokai, magento-headless-next]
+default: false
+priority: 60
+updated: 2026-08-13
+# A fully headless React storefront that installs as a Magento theme.
+#
+# That combination is what makes it different from the others here: the React
+# app lives under app/design/frontend/<Vendor>/<Theme> and is selected in Admin
+# like any theme, so Magento still owns routing, the admin and deployment. There
+# is no second application to host, which is why it suits teams who want a PWA
+# without also taking on a separate front-end deployment.
+#
+# The trade-off is the inverse of Alokai's: you gain operational simplicity and
+# give up the freedom to put the storefront on its own release cycle or its own
+# infrastructure.
+#
+# Sources:
+#   [1] Install on an existing M2  https://github.com/scandipwa/docs/blob/master/setup/on-existing-m2.md
+#   [2] scandipwa/installer        https://github.com/scandipwa/installer
+#   [3] Packagist                  https://packagist.org/packages/scandipwa/installer
+#   [4] Vendor overview            https://scandiweb.com/scandipwa
+#   [5] Magento GraphQL            https://developer.adobe.com/commerce/webapi/graphql/
+pins:
+  scandipwa: "^5.0"
+install:
+  # Nothing is scaffolded, and this is a finding rather than a shortcut.
+  #
+  # The three steps that used to be here were checked against a real build on
+  # Mage-OS 3.4.0 (Magento 2.4.9) and two of them do not work:
+  #
+  #   1. `setup:config:set --pq-host ... --pq-scheme=redis` fails outright with
+  #      'The "--pq-host" option does not exist.' Those options come from
+  #      scandipwa/persisted-query, a package this recipe never required, so
+  #      they were never going to exist.
+  #
+  #   2. `scandipwa:theme:bootstrap Keel/scandipwa` fails with 'There are no
+  #      commands defined in the "scandipwa:theme" namespace.' scandipwa/installer
+  #      4.0.1 installs and enables (ScandiPWA_Installer : Module is enabled) but
+  #      its src/etc/di.xml registers no console command at all. The README in
+  #      the package still documents the 2.0.0 command; the package no longer
+  #      ships it.
+  #
+  # So on the Magento keel builds, ScandiPWA cannot be bootstrapped by CLI.
+  # Rather than leave three commands that fail in sequence, keel installs
+  # nothing and writes what was verified, so the choice is informed. If you
+  # need ScandiPWA, check its current status before committing to it: the
+  # storefront has seen little activity and this is what that looks like from
+  # the outside.
+  - "true"
+smoke:
+  # The note, not a theme directory: nothing was scaffolded.
+  - "{{exec}} test -f .keel/SCANDIPWA.md"
+files:
+  - path: .keel/SCANDIPWA.md
+    content: |
+      > **Checked on Mage-OS 3.4.0 (Magento 2.4.9), 2026-08-13.** keel did not
+      > scaffold this theme, because the documented route does not work on this
+      > Magento:
+      >
+      > - `bin/magento scandipwa:theme:bootstrap Vendor/theme` fails with
+      >   "There are no commands defined in the scandipwa:theme namespace".
+      >   `scandipwa/installer` 4.0.1 installs and its module enables, but it
+      >   registers no console command; its bundled README still describes the
+      >   2.0.0 command the package no longer ships.
+      > - `setup:config:set --pq-host ...` fails with "The --pq-host option does
+      >   not exist". Those options belong to `scandipwa/persisted-query`, a
+      >   separate package.
+      >
+      > Check the project's current state before building on it, and if the
+      > bootstrap command returns, the three commands keel used to run were:
+      >
+      >     composer require scandipwa/installer
+      >     bin/magento scandipwa:theme:bootstrap Keel/scandipwa
+      >     cd app/design/frontend/Keel/scandipwa && npm ci && npm run build
+
+      # ScandiPWA storefront
+
+      A React storefront living at `app/design/frontend/Keel/scandipwa`, served
+      by Magento as a theme.
+
+      ## Activating it
+
+      Admin → Content → Design → Configuration, edit the store view and choose
+      the `Keel/scandipwa` theme, then:
+
+          keel run magento -- cache:flush
+
+      ## Working on it
+
+          cd app/design/frontend/Keel/scandipwa
+          npm run watch      # rebuild on change
+          npm run build      # production bundle
+
+      Magento serves whatever is in the theme's build output, so a change is not
+      live until it has been rebuilt.
+
+      ## Persisted queries
+
+      keel points the persisted-query cache at this stack's Redis
+      (`--pq-host=redis --pq-database=4`), on its own database number so it
+      cannot collide with the session, cache or page caches Magento already uses
+      there.

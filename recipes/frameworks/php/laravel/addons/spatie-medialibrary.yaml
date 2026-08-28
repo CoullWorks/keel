@@ -1,0 +1,9 @@
+id: laravel-spatie-medialibrary
+kind: addon
+label: Spatie Media Library (file attachments)
+appliesTo: [laravel]
+provides: [medialibrary]
+install:
+  - "{{composer}} require spatie/laravel-medialibrary"
+  - "{{artisan}} vendor:publish --tag=medialibrary-migrations"
+  - "{{artisan}} migrate --force"

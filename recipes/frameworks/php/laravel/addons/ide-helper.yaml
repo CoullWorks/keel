@@ -1,0 +1,10 @@
+id: laravel-ide-helper
+kind: addon
+label: IDE Helper (autocompletion stubs)
+appliesTo: [laravel]
+provides: [ide-helper]
+default: true
+install:
+  - "{{composer}} require barryvdh/laravel-ide-helper --dev"
+  - "{{artisan}} ide-helper:generate"
+  - "{{artisan}} ide-helper:meta"

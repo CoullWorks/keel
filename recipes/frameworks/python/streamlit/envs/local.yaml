@@ -1,0 +1,55 @@
+id: streamlit-local
+schema_version: 2
+kind: env
+env_family: local
+label: Local (native, no Docker)
+appliesTo: [streamlit]
+provides: [env]
+default: true
+updated: 2026-08-12
+# Native Python via uv: no daemon, no containers. `keel run dev` runs
+# `streamlit run streamlit_app.py`, which is also the production command, since
+# Streamlit has only one.
+#
+# There is no Dockerfile here by definition, so the container requirements the
+# Docker env carries have no place to live. What still applies on a bare host:
+#
+#   - Streamlit's whole deployment list is three items: install dependencies,
+#     "securely handle your secrets and private information", and "remote start
+#     your app (streamlit run)". There is no build step, no migration step and
+#     no static-collection step.
+#   - Pin Python inside the supported 3.10 to 3.14 range and match development
+#     to deployment, because "dependencies may rely on a specific version of
+#     Python".
+#   - Start with `streamlit run app.py --server.port=8501
+#     --server.address=0.0.0.0`, add --server.headless=true so it does not try
+#     to open a browser.
+#   - Probe /_stcore/health. It is the documented endpoint.
+#   - Put a proxy in front carrying the websocket upgrade, and enable session
+#     affinity in it the moment there is more than one instance.
+#   - Reconcile the proxy body-size limit with server.maxUploadSize, which
+#     defaults to 200 MB, or uploads fail at the proxy before Streamlit sees
+#     them.
+#   - Set server.baseUrlPath if serving from a subfolder.
+#
+# Selecting nginx or apache writes the matching server block or VirtualHost to
+# .keel/, pointed at 127.0.0.1:8501. See docs/infra/streamlit.md.
+commands:
+  start: ""
+  # How this environment tears itself down. Used when a build fails partway:
+  # keel removes the directory it created, and without this the containers,
+  # volumes and network it started stay behind holding a bind mount to a
+  # path that no longer exists. The next attempt then reuses that container
+  # and dies with "current working directory is outside of container mount
+  # namespace root".
+  # The only thing keel starts under a native env is the local database, which
+  # the database recipe brings up from docker-compose.db.yml. Nothing else here
+  # runs in a container, so this is the whole teardown - and without it nothing
+  # ever stopped that container: `keel delete` left it running and holding the
+  # fixed host port, so the next project that wanted a database could not start.
+  # Guarded on the file so an environment built with no database is a no-op.
+  down: "[ -f docker-compose.db.yml ] && docker compose -f docker-compose.db.yml down -v || true"
+  restart: ""
+  exec: ""
+smoke:
+  - "uv --version"

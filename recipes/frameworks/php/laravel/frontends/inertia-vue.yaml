@@ -1,0 +1,144 @@
+id: laravel-inertia-vue
+kind: frontend
+label: Inertia 2 + Vue 3 (SPA feel, one Laravel codebase)
+appliesTo: [laravel]
+requires: [php]
+provides: [frontend, inertia, vue]
+priority: 60 # after backend + env + db + services
+# Inertia gives an SPA feel with no separate API/host: Vue pages, Laravel routing.
+install:
+  - "{{start}}"
+  - "{{composer}} require inertiajs/inertia-laravel"
+  - "{{exec}} bash -lc 'php artisan inertia:middleware'"
+  - "{{exec}} bash -lc 'npm install @inertiajs/vue3 vue @vitejs/plugin-vue'"
+  - "{{exec}} bash -lc 'npm install -D tailwindcss @tailwindcss/vite'"
+  - "{{restart}}"
+smoke:
+  - "{{exec}} bash -lc 'npm run build'"
+files:
+  - path: resources/views/app.blade.php
+    content: |
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          @vite(['resources/css/app.css', 'resources/js/app.js'])
+          @inertiaHead
+      </head>
+      <body>
+          @inertia
+      </body>
+      </html>
+  - path: vite.config.js
+    content: |
+      import { defineConfig } from 'vite';
+      import laravel from 'laravel-vite-plugin';
+      import vue from '@vitejs/plugin-vue';
+      import tailwindcss from '@tailwindcss/vite';
+
+      export default defineConfig({
+          plugins: [
+              laravel({ input: ['resources/css/app.css', 'resources/js/app.js'], refresh: true }),
+              vue({ template: { transformAssetUrls: { base: null, includeAbsolute: false } } }),
+              tailwindcss(),
+          ],
+      });
+  - path: resources/css/app.css
+    content: |
+      @import "tailwindcss";
+  - path: resources/js/app.js
+    content: |
+      import { createApp, h } from 'vue';
+      import { createInertiaApp } from '@inertiajs/vue3';
+
+      createInertiaApp({
+          resolve: (name) => {
+              const pages = import.meta.glob('./Pages/**/*.vue', { eager: true });
+              return pages[`./Pages/${name}.vue`];
+          },
+          setup({ el, App, props, plugin }) {
+              createApp({ render: () => h(App, props) }).use(plugin).mount(el);
+          },
+      });
+  - path: resources/js/Pages/Home.vue
+    content: |
+      <script setup>
+      // keel: a production-ready landing page that proves Inertia + Vue + Tailwind are wired.
+      const features = [
+        ['Inertia + Vue', 'Vue 3 pages driven by Laravel routing, no separate API.'],
+        ['Blade + Eloquent', 'Server-side routing and ORM behind the SPA feel.'],
+        ['keel-managed', 'keel run dev · test · build, one vocabulary.'],
+      ];
+      </script>
+
+      <template>
+        <main class="min-h-screen bg-slate-950 text-slate-100">
+          <div class="mx-auto max-w-3xl px-6 py-20">
+            <span class="inline-flex items-center gap-2 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-300">
+              <span class="size-1.5 rounded-full bg-emerald-400" /> running
+            </span>
+            <h1 class="mt-6 text-4xl font-bold tracking-tight sm:text-5xl">
+              Your Laravel app is running
+            </h1>
+            <p class="mt-4 text-lg text-slate-400">
+              Built with Inertia + Vue, scaffolded by keel. Edit
+              <code class="rounded bg-slate-800 px-1.5 py-0.5 text-sm">resources/js/Pages/Home.vue</code>
+              to make it yours.
+            </p>
+            <div class="mt-8 flex flex-wrap gap-3">
+              <a
+                href="https://coullworks.com/tools/keel"
+                class="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-emerald-400"
+              >
+                keel docs
+              </a>
+              <a
+                href="https://inertiajs.com"
+                class="rounded-lg border border-slate-700 px-4 py-2 text-sm font-semibold hover:bg-slate-900"
+              >
+                Inertia docs
+              </a>
+            </div>
+            <div class="mt-12 grid gap-4 sm:grid-cols-3">
+              <div
+                v-for="[title, body] in features"
+                :key="title"
+                class="rounded-xl border border-slate-800 bg-slate-900/50 p-5"
+              >
+                <h2 class="font-semibold">{{ title }}</h2>
+                <p class="mt-1 text-sm text-slate-400">{{ body }}</p>
+              </div>
+            </div>
+          </div>
+        </main>
+      </template>
+  - path: FRONTEND-SETUP.md
+    content: |
+      # Frontend: Inertia 2 + Vue 3 (installed by keel)
+
+      keel installed `inertiajs/inertia-laravel`, generated the Inertia middleware,
+      installed the Vue client + Vite plugin, wired Tailwind CSS (v4, via the Vite
+      plugin), and set up `resources/views/app.blade.php`, `vite.config.js`,
+      `resources/js/app.js`, `resources/css/app.css` and a Tailwind-styled
+      `Pages/Home.vue` landing page.
+
+      ## Two manual steps (Laravel 11+)
+      1. Register the middleware in `bootstrap/app.php`:
+         ```php
+         ->withMiddleware(function (Middleware $middleware) {
+             $middleware->web(append: [
+                 \App\Http\Middleware\HandleInertiaRequests::class,
+             ]);
+         })
+         ```
+      2. Point a route at a page in `routes/web.php`:
+         ```php
+         use Inertia\Inertia;
+
+         Route::get('/', fn () => Inertia::render('Home'));
+         ```
+
+      Run `npm run dev` (or the DDEV Vite daemon) and visit `/`. Add pages under
+      `resources/js/Pages`. Tailwind is already wired (`resources/css/app.css`);
+      pair with a Vue component library (PrimeVue/Vuetify) when you need one.

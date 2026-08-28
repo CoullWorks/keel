@@ -1,0 +1,148 @@
+id: apache-nextjs
+schema_version: 2
+kind: config
+label: Next.js VirtualHost for Apache
+updated: 2026-08-12
+# Written from docs/infra/nextjs.md plus the Apache 2.4 module reference.
+# Next.js publishes an nginx configuration for static export and names nginx in
+# its self-hosting guide; it publishes nothing for Apache, so this is keel's
+# translation and the streaming section below is the honest part of it.
+#
+# Streaming under Apache. Next.js's documented fix is the application emitting
+# X-Accel-Buffering: no, which is an nginx-specific header. Apache implements no
+# equivalent and honours no such header, so there is no directive here that
+# corresponds to `proxy_buffering off`. mod_proxy_http forwards the response as
+# it reads it rather than accumulating the whole body, so App Router streaming
+# does work through this vhost, but that is keel's reading of how the module
+# behaves and not a statement either vendor makes. The header is stripped on the
+# way out so it does not reach browsers as a meaningless response header.
+#
+# Division of labour. The shared Apache service (recipes/infra/web/apache.yaml)
+# owns .keel/apache/keel-tuning.conf: MPM event tuning, the LoadModule lines for the
+# proxy modules, global compression, mod_expires, ServerTokens Prod,
+# ServerSignature Off, TraceEnable Off, the global security headers, and the
+# `IncludeOptional conf.d/app-*.conf` that pulls this file in.
+when:
+  framework: nextjs
+  uses: apache
+files:
+  - path: docker/apache/conf.d/app-nextjs.conf
+    content: |
+      # Next.js in output: 'standalone' mode, proxied. Included by the shared
+      # httpd.conf.
+      <VirtualHost *:80>
+          ServerName localhost
+
+          ProxyRequests Off
+
+          # mod_proxy_http adds X-Forwarded-For, X-Forwarded-Host and
+          # X-Forwarded-Server itself, and warns they "will contain more than
+          # one (comma-separated) value if the original request already
+          # contained one of these headers". Next.js names no required
+          # forwarded header at all, so nothing in the framework validates
+          # these; clearing the client's copy first is what makes the value
+          # Apache computes the only one the app can read.
+          RequestHeader unset X-Forwarded-For
+          RequestHeader unset X-Forwarded-Host
+          RequestHeader unset X-Forwarded-Server
+          # mod_proxy_http does NOT add X-Forwarded-Proto; the documented list
+          # is For, Host and Server only. Change to "https" when TLS terminates
+          # at this vhost.
+          RequestHeader set X-Forwarded-Proto "http"
+
+          ProxyPreserveHost On
+
+          # upgrade=websocket rather than mod_proxy_wstunnel, which the vendor
+          # marks Deprecated: "Since Apache HTTP Server 2.4.47, protocol Upgrade
+          # (tunneling) can be better handled by mod_proxy_http." The
+          # httpd:2.4-alpine image is 2.4.68. In production nothing upgrades;
+          # this is for dev-mode Fast Refresh, which Next.js does not document
+          # proxying, so it is inference rather than a quoted requirement.
+          ProxyPass        / http://app:3000/ upgrade=websocket connectiontimeout=5 timeout=60
+          ProxyPassReverse / http://app:3000/
+
+          # X-Accel-Buffering is an nginx control header. Apache neither honours
+          # nor understands it, so if the app emits it from next.config's
+          # headers() block it would otherwise be forwarded to the browser as
+          # noise. Removed on the way out. `always` is used because the header
+          # can arrive on non-2xx responses too, and mod_headers documents that
+          # "always" is the table whose contents "are added to the response even
+          # on error".
+          Header always unset X-Accel-Buffering
+
+          # /_next/static is the fingerprinted asset path and this vhost
+          # deliberately sets no Cache-Control on it. Next.js "sets the
+          # Cache-Control header of public, max-age=31536000, immutable to truly
+          # immutable assets. It cannot be overridden." A Header set here would
+          # fight the framework for no gain. The boundary still matters: those
+          # URLs are immutable, the HTML around them is not, and dynamically
+          # rendered pages already receive private, no-cache, no-store,
+          # max-age=0, must-revalidate from the framework. Nothing in this file
+          # may widen that, which is why there is no global ExpiresDefault here.
+
+          # LimitRequestBody alone does NOT cap a proxied request, and this is
+          # not a guess: it was tested against httpd 2.4.68 in this exact
+          # topology. With LimitRequestBody set on the vhost, a POST an order of
+          # magnitude over the limit still reached the backend with a 200. The
+          # directive is enforced when Apache itself serves the request, not
+          # when mod_proxy_http streams the body through to a backend. So the
+          # rewrite below is what actually rejects it. [R=413] aborts with that
+          # status rather than redirecting, because mod_rewrite treats any code
+          # outside 300-399 as an abort.
+          #
+          # Caveat worth knowing: this reads the declared Content-Length, so a
+          # chunked upload that sends none is not caught. nginx's
+          # client_max_body_size covers both cases. Keep the application's own
+          # body limit as the backstop either way.
+          RewriteEngine On
+          RewriteCond expr "%{HTTP:Content-Length} -gt 1048576"
+          RewriteRule ^ - [R=413,L]
+          # LimitRequestBody defaults to 0, unlimited. Next.js publishes no
+          # proxy body-size guidance, so 1048576 is keel's number. If the app
+          # raises next.config's Server Actions body size limit, raise this to
+          # match.
+          LimitRequestBody 1048576
+      </VirtualHost>
+
+      # Apache has no one-line equivalent of nginx's `return 200`, so there is
+      # no proxy-local health endpoint. The container health check probes the
+      # app's /api/health through this vhost, which proves the whole proxy path.
+provision:
+  compose:
+    files:
+      - path: compose.override.yaml
+        content: |
+          # Compose merges compose.override.yaml over compose.yaml with no extra
+          # flags, so the app service written by the env recipe is untouched.
+          services:
+            apache:
+              image: httpd:2.4-alpine
+              # The stock httpd.conf is left in place: it loads mpm_event and the base
+              # module set. -c appends this directive after it is read, pulling in the
+              # shared tuning and this framework's VirtualHost. Without it the image
+              # starts on stock config and serves its default page - it does not fail.
+              command: ["httpd-foreground", "-c", "Include conf/keel-tuning.conf"]
+              restart: unless-stopped
+              depends_on:
+                app:
+                  condition: service_healthy
+              ports:
+                - "${HTTP_PORT:-8080}:80"
+              volumes:
+                # Shared, owned by recipes/infra/web/apache.yaml.
+                - ./.keel/apache/keel-tuning.conf:/usr/local/apache2/conf/keel-tuning.conf:ro
+                # This framework's VirtualHost, owned by this recipe.
+                - ./docker/apache/conf.d:/usr/local/apache2/conf.d:ro
+              healthcheck:
+                test: ["CMD", "wget", "-qO-", "http://127.0.0.1/api/health"]
+                interval: 15s
+                timeout: 5s
+                retries: 5
+                start_period: 10s
+              # Next.js asks platforms to "allow a configurable drain period
+              # (10-30 seconds is recommended)" for the app; the proxy gets the
+              # same so it is not killed mid-drain.
+              stop_grace_period: 30s
+  # Native env: no container to add. The VirtualHost above still applies, but
+  # change the ProxyPass target to http://127.0.0.1:3000/.
+  local: {}

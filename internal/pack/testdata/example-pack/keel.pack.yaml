@@ -1,0 +1,52 @@
+# keel.pack.yaml — the pack manifest. keel reads this to identify a pack WITHOUT
+# running any of its recipes. This file documents every field the manifest
+# supports (see internal/pack/pack.go for the struct).
+
+# schema_version — the recipe/pack schema this pack targets. A pack declaring a
+# version newer than the running keel is refused with an upgrade message, rather
+# than half-understood. This keel supports schema 2.
+schema_version: 2
+
+# name — the pack's identity. It becomes the provenance stamp on every recipe the
+# pack ships (Source: "pack:example-pack") and the key in packs.yaml. Required.
+name: example-pack
+
+# version — the pack's own version, recorded in packs.yaml at install time so
+# `keel recipes list` can show it and a future update can tell it moved. Required.
+version: 0.1.0
+
+# keel_version_constraint — the minimum keel this pack needs. Only ">= x.y.z" is
+# supported (no external semver dependency); empty means "any keel". keel refuses
+# to install/validate a pack whose constraint the running keel does not satisfy.
+keel_version_constraint: ">= 0.1.0"
+
+# author — who to blame/thank. Shown in listings. Required for a good listing.
+author: "COULLWORKS <hello@coullworks.com>"
+
+# description — one paragraph shown in listings. Required for a good listing.
+description: >-
+  The keel recipe-pack template. Fork it to teach keel new stacks, services,
+  databases, environments, addons, config wiring and generators as DATA, no Go
+  code. Every recipe kind and every lifecycle hook a pack can carry is
+  demonstrated here. Install with `keel recipes add <git-url>`.
+
+# recipes — the list of recipe files this pack ships. keel actually WALKS the pack
+# directory at load time (every *.yaml/*.yml except this manifest is a recipe), so
+# this list is not strictly required for loading — but `keel recipes validate`
+# reads it to confirm every file exists and parses, and it documents the pack's
+# surface at a glance. Keep it in step with recipes/.
+#
+# TRUST / PROVENANCE: there are no trust or signature fields in the manifest.
+# Trust is decided at INSTALL time, not declared by the pack (a pack cannot vouch
+# for itself). keel records `trusted: false` for a freshly added pack in
+# packs.yaml; its recipes are stamped `pack:example-pack` and run only after you
+# consent, on the first `keel new` that uses them, when keel prints the exact
+# commands and asks. That is the whole trust model — the pack ships data, the user
+# grants trust.
+recipes:
+  - recipes/example-env.yaml       # kind: env       — a local-dev environment
+  - recipes/example-db.yaml        # kind: db        — a database (provides a db.* contract)
+  - recipes/example-config.yaml    # kind: config    — auto-injected wiring (has a when:)
+  - recipes/example-service.yaml   # kind: service   — a backing service (Adminer)
+  - recipes/example-addon.yaml     # kind: addon     — an extra file + the hook demo
+  - recipes/example-generator.yaml # kind: generator — a new thing `keel gen` can create

@@ -1,0 +1,152 @@
+id: apache-dash
+schema_version: 2
+kind: config
+label: Dash VirtualHost for Apache
+updated: 2026-08-12
+# Written from docs/infra/dash.md plus the Apache 2.4 module reference. Dash
+# publishes no reverse-proxy configuration for any web server, so this is keel's
+# translation of the Flask and gunicorn nginx blocks it inherits.
+#
+# The application server does not change between the nginx and the Apache
+# choice: gunicorn still runs `app:app` on 8000, which is exactly what Dash asks
+# for ("the app should be run with `gunicorn` on the `server = app.server`
+# instance").
+#
+# Division of labour. The shared Apache service (recipes/infra/web/apache.yaml)
+# owns .keel/apache/keel-tuning.conf: MPM event tuning, the LoadModule lines for the
+# proxy modules, global compression, mod_expires, ServerTokens Prod,
+# ServerSignature Off, TraceEnable Off, the global security headers, and the
+# `IncludeOptional conf.d/app-*.conf` that pulls this file in.
+when:
+  framework: dash
+  uses: apache
+files:
+  - path: docker/apache/conf.d/app-dash.conf
+    content: |
+      # Dash behind gunicorn, proxied. Included by the shared keel-tuning.conf.
+      <VirtualHost *:80>
+          ServerName localhost
+
+          # Stated rather than assumed. Apache: "Do not enable proxying with
+          # ProxyRequests until you have secured your server. Open proxy servers
+          # are dangerous both to your network and to the Internet at large."
+          ProxyRequests Off
+
+          # On, so Dash sees the browser's Host. Apache defaults it Off and would
+          # send the upstream name instead.
+          ProxyPreserveHost On
+
+          # mod_proxy_http adds X-Forwarded-For, X-Forwarded-Host and
+          # X-Forwarded-Server itself, and warns they "will contain more than one
+          # (comma-separated) value if the original request already contained one
+          # of these headers". ProxyFix counts hops, so an unexpected extra value
+          # shifts which entry it trusts. Clearing the client's copy makes
+          # Apache's the only one.
+          RequestHeader unset X-Forwarded-For
+          RequestHeader unset X-Forwarded-Host
+          RequestHeader unset X-Forwarded-Server
+          # mod_proxy_http adds neither X-Forwarded-Proto nor X-Forwarded-Prefix,
+          # and Flask's nginx config, which Dash inherits, sets both. Change
+          # -Proto to "https" when TLS terminates here.
+          RequestHeader set X-Forwarded-Proto "http"
+          RequestHeader set X-Forwarded-Prefix "/"
+
+          # Everything to gunicorn. There is no static Alias here, because Dash
+          # serves its own component bundles from the Flask app and documents no
+          # offload; the browser cache header below is keel's convention and the
+          # only concession to that.
+          #
+          # This is the last ProxyPass on purpose: rules are "checked in the
+          # order of configuration, the first rule that matches wins", so
+          # anything that needs to bypass the proxy must be declared above it
+          # with a `!`.
+          #
+          # Under the native env there is no `app` host: change these to
+          # http://127.0.0.1:8000/.
+          #
+          # connectiontimeout is the wait for the TCP connect, timeout the wait
+          # for data. 120 matches the gunicorn --timeout this stack runs; left
+          # unset, timeout falls back to ProxyTimeout and then to Apache's
+          # Timeout of 300, so a hung callback holds the connection for five
+          # minutes. retry=5 shortens Apache's 60s default.
+          ProxyPass        / http://app:8000/ connectiontimeout=5 timeout=120 retry=5
+          ProxyPassReverse / http://app:8000/
+
+          # Dash's component bundles carry the Dash version in the URL, so a long
+          # browser cache is safe. keel's convention: Dash documents no
+          # asset-caching strategy.
+          <LocationMatch "^/_dash-component-suites/">
+              <IfModule mod_expires.c>
+                  ExpiresActive On
+                  ExpiresDefault "access plus 7 days"
+              </IfModule>
+          </LocationMatch>
+
+          # LimitRequestBody alone does NOT cap a proxied request: the directive
+          # is enforced when Apache itself serves the request, not when
+          # mod_proxy_http streams the body through to a backend. The rewrite
+          # below is what actually rejects it, and it matters more for Dash than
+          # for most because dcc.Upload pushes whole file bodies through here.
+          # [R=413] aborts with that status rather than redirecting, because
+          # mod_rewrite treats any code outside 300-399 as an abort.
+          #
+          # Caveat: this reads the declared Content-Length, so a chunked upload
+          # that sends none is not caught. nginx's client_max_body_size covers
+          # both cases.
+          RewriteEngine On
+          RewriteCond expr "%{HTTP:Content-Length} -gt 26214400"
+          RewriteRule ^ - [R=413,L]
+          # Apache's LimitRequestBody default is 0, meaning unlimited. 25 MiB,
+          # matching the nginx block; raise it to whatever dcc.Upload is actually
+          # expected to carry.
+          LimitRequestBody 26214400
+      </VirtualHost>
+
+      # None of the above is enough on its own. Whether Dash applies Werkzeug's
+      # ProxyFix to its internal Flask server is undocumented, so assume it does
+      # not and apply it to app.server, sized to the real chain:
+      #
+      #   from werkzeug.middleware.proxy_fix import ProxyFix
+      #   app.server.wsgi_app = ProxyFix(app.server.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+      #
+      # Apache has no one-line equivalent of nginx's `return 200`, so there is no
+      # proxy-local health endpoint. The container health check probes
+      # /_dash-layout through this vhost, which proves the whole proxy path.
+provision:
+  compose:
+    files:
+      - path: compose.override.yaml
+        content: |
+          # Compose merges compose.override.yaml over compose.yaml with no extra
+          # flags, so the app service written by the env recipe is untouched.
+          services:
+            apache:
+              image: httpd:2.4-alpine
+              # The stock httpd.conf is left in place: it loads mpm_event and the base
+              # module set. -c appends this directive after it is read, pulling in the
+              # shared tuning and this framework's VirtualHost. Without it the image
+              # starts on stock config and serves its default page - it does not fail.
+              command: ["httpd-foreground", "-c", "Include conf/keel-tuning.conf"]
+              restart: unless-stopped
+              depends_on:
+                app:
+                  condition: service_healthy
+              ports:
+                - "${HTTP_PORT:-8080}:80"
+              volumes:
+                # Shared, owned by recipes/infra/web/apache.yaml.
+                - ./.keel/apache/keel-tuning.conf:/usr/local/apache2/conf/keel-tuning.conf:ro
+                # This framework's VirtualHost, owned by this recipe.
+                - ./docker/apache/conf.d:/usr/local/apache2/conf.d:ro
+              healthcheck:
+                test: ["CMD", "wget", "-qO-", "http://127.0.0.1/_dash-layout"]
+                interval: 15s
+                timeout: 5s
+                retries: 5
+                start_period: 20s
+              # Matches the app's stop_grace_period, so the proxy is not killed
+              # while gunicorn is still draining a callback it forwarded.
+              stop_grace_period: 45s
+  # Native env: no container to add. The VirtualHost above still applies, but
+  # change the ProxyPass target to http://127.0.0.1:8000/.
+  local: {}

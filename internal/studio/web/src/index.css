@@ -1,0 +1,68 @@
+@import "tailwindcss";
+
+/* keel design tokens, exposed to Tailwind v4 utilities (bg-panel, text-orange,
+   rounded-lg, …). @theme emits these as :root CSS vars too, so the ported
+   component CSS can keep referencing var(--color-*) as well. */
+@theme {
+  --color-bg: #0d0f14;
+  --color-bg2: #0a0c11;
+  --color-panel: #151922;
+  --color-panel2: #11141b;
+  --color-panel3: #1a1f2b;
+  --color-line: #222734;
+  --color-line2: #2c3342;
+  --color-line3: #39435a;
+  --color-dim: #7f8798;
+  --color-dim2: #5b6474;
+  --color-head: #e8ecf4;
+  --color-headsoft: #c3cad7;
+  --color-orange: #ff6a2c;
+  --color-green: #4ade80;
+  --color-red: #f87171;
+  --color-blue: #5aa2f5;
+  --color-yellow: #eab34a;
+
+  --radius-sm: 6px;
+  --radius: 10px;
+  --radius-lg: 14px;
+
+  --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+/* The full bespoke token set, verbatim from the original studio :root — the
+   ported component CSS references these (composite rgba, spacing/type/motion
+   scales). This is the single source of truth for pixel-identical values. */
+:root {
+  --bg: #0d0f14; --bg2: #0a0c11; --panel: #151922; --panel2: #11141b; --panel3: #1a1f2b;
+  --line: #222734; --line2: #2c3342; --line3: #39435a;
+  --dim: #7f8798; --dim2: #5b6474; --head: #e8ecf4; --headSoft: #c3cad7;
+  --orange: #ff6a2c; --orangeSoft: rgba(255, 106, 44, .13); --orangeLine: rgba(255, 106, 44, .42);
+  --green: #4ade80; --red: #f87171; --blue: #5aa2f5; --yellow: #eab34a;
+  --termH: 24%;
+  --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 36px;
+  --r-sm: 6px; --r: 10px; --r-lg: 14px; --r-pill: 999px;
+  --radius: var(--r);
+  --t-xs: 11px; --t-sm: 12.5px; --t-md: 14px; --t-lg: 16px; --t-xl: 21px;
+  --dur: .13s; --dur-lg: .28s; --ease: cubic-bezier(.4, 0, .2, 1);
+}
+
+* { box-sizing: border-box; }
+/* Neutralise Tailwind v4 preflight's html-level font-feature/variation settings
+   (the `font` shorthand below does not reset them) so glyph metrics — and thus
+   text wrapping — match the original studio exactly on every surface. */
+html, body { font-feature-settings: normal; font-variation-settings: normal; }
+html, body { height: 100%; margin: 0; }
+body {
+  font: 14.5px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  background: radial-gradient(1200px 700px at 78% -12%, #141a26 0%, var(--bg) 60%);
+  color: var(--head);
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+#root { height: 100vh; }
+a { color: inherit; }
+button { font: inherit; cursor: pointer; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: #20263200; border: 3px solid transparent; background-clip: padding-box; }
+*:hover::-webkit-scrollbar-thumb { background: #2a3140; border: 3px solid transparent; background-clip: padding-box; border-radius: 8px; }
+.hidden { display: none !important; }

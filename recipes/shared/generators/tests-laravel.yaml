@@ -1,0 +1,15 @@
+# Test suite as a level: stack generator (Laravel Pest).
+#
+# Mirrors the auth-as-stack primitive: a thin, framework-scoped pointer (apply:)
+# at the Pest extra that already exists — it does not re-describe how Pest
+# installs. Exposing it here lets Generatables("laravel") offer "add the test
+# suite for this framework" post-creation, alongside the auth stack.
+id: gen-tests-laravel
+kind: generator
+level: stack
+label: "Test suite (Pest on PHPUnit - unit + feature tests)"
+appliesTo: [laravel]
+provides: [tests]
+apply: [pest]
+schema_version: 2
+updated: 2026-08-22

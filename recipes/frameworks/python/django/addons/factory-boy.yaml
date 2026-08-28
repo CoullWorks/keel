@@ -1,0 +1,7 @@
+id: django-factory-boy
+kind: addon
+label: factory_boy + Faker (test fixtures)
+appliesTo: [django]
+provides: [factory-boy]
+install:
+  - "{{exec}} uv add --dev factory-boy"

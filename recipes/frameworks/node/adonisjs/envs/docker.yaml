@@ -1,0 +1,204 @@
+id: adonisjs-docker
+      # node:24, not the 22 the other Node recipes use. AdonisJS declares
+      # node_version ">=24" in its framework recipe and means it: on 22 the
+      # hot-hook loader throws inside read-pkg before the app ever listens, and
+      # the container is simply unhealthy with no mention of the version.
+schema_version: 2
+kind: env
+env_family: compose
+label: Docker (compose)
+appliesTo: [adonisjs]
+provides: [env, docker]
+priority: -10
+# Written from docs/infra/adonisjs.md.
+#
+# AdonisJS is the only one of these that solves the build-versus-prune problem
+# structurally, and its shape is worth understanding because it is the model the
+# NestJS and Hono recipes work around rather than with.
+#
+# `node ace build` emits a self-contained build/ directory carrying its own
+# package.json and lockfile. So `npm ci --omit=dev` runs INSIDE the artefact,
+# after the compiler has already done its work, and there is no separate prune
+# stage and no risk of pruning something the build still needed.
+#
+# Its published Dockerfile is the right shape but has three real defects, none
+# of which are copied here: it runs as root, it uses a floating node:lts-* tag
+# that can cross a major on rebuild, and it ships no .dockerignore.
+#
+# Shutdown hooks are always on, unlike NestJS. The named hook is the `shutdown`
+# method on a service provider, run during the documented termination phase.
+# There is no drain timeout and no force-close knob, so stop_grace_period is the
+# only bound.
+commands:
+  start: "docker compose up -d --build"
+  # Where the project can be opened once the build finishes.
+  site_url: "http://localhost:{{http_port}}"
+  # How this environment tears itself down. Used when a build fails partway:
+  # keel removes the directory it created, and without this the containers,
+  # volumes and network it started stay behind holding a bind mount to a
+  # path that no longer exists. The next attempt then reuses that container
+  # and dies with "current working directory is outside of container mount
+  # namespace root".
+  down: "docker compose down -v --remove-orphans"
+  restart: "docker compose restart"
+  exec: "docker compose exec -T app"
+  create: "docker compose build"
+smoke:
+  - "docker compose ps"
+files:
+  - path: Dockerfile
+    content: |
+      # Two kinds of image, and the distinction is not cosmetic.
+      #
+      # `dev` is what compose builds. It carries no application code and no
+      # dependencies, because the project is bind-mounted from the host: `npm
+      # install` run through keel writes node_modules and package-lock.json to
+      # your working tree where they belong, and an edit is live without a
+      # rebuild.
+      #
+      # The stages after it build the production image. Build it explicitly
+      # with `docker build --target runtime .`.
+      #
+      # Pointing compose at the production stage instead would look like it
+      # works and would not: with no bind mount, every file npm writes lands in
+      # a layer that the next `--build` discards.
+      FROM node:{{pin.node_version}}-slim AS dev
+      WORKDIR /app
+      # uid 1000 in the node image, which matches the default first user on a
+      # Linux or WSL host, so files created in the bind mount are owned by you
+      # rather than by root.
+      USER node
+      EXPOSE 3333
+      # The bind mount is empty of dependencies on a first run, and most dev
+      # servers are themselves a dependency: `nest start` or `vite` simply is
+      # not there yet, the process exits, and `restart: unless-stopped` turns
+      # that into a restart loop that `docker compose exec` cannot attach to.
+      # So wait for the install keel is about to run, then exec into the real
+      # server so it still receives SIGTERM as PID 1.
+      #
+      # The marker is node_modules/.package-lock.json, not the node_modules
+      # directory: npm creates the directory at the START of an install, so
+      # testing for it starts the dev server mid-install and the binary it
+      # needs is not there yet. npm writes the hidden lockfile only once the
+      # tree is fully reified.
+      CMD ["sh", "-c", "until [ -f node_modules/.package-lock.json ]; do echo \"waiting for dependencies\"; sleep 2; done; exec npm run dev"]
+
+      FROM node:{{pin.node_version}}-slim AS deps
+      WORKDIR /app
+      # package-lock.json* (glob) so a freshly scaffolded project, which has no
+      # lockfile yet, still builds. Commit the lock and npm ci becomes a real
+      # guarantee rather than a formality.
+      COPY package.json package-lock.json* ./
+      RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
+
+      FROM node:{{pin.node_version}}-slim AS build
+      WORKDIR /app
+      COPY --from=deps /app/node_modules ./node_modules
+      COPY . .
+      RUN node ace build
+
+      FROM node:{{pin.node_version}}-slim AS runtime
+      ENV NODE_ENV=production
+      WORKDIR /app
+      # build/ carries its own package.json and lockfile, so the production
+      # install happens inside the artefact rather than being pruned back to it.
+      COPY --from=build --chown=node:node /app/build ./
+      RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev; fi \
+          && npm cache clean --force
+      USER node
+      EXPOSE 3333
+      CMD ["node", "bin/server.js"]
+  - path: compose.yaml
+    content: |
+      services:
+        app:
+          build:
+            context: .
+            # dev, not a production stage. See the note at the top of the
+            # Dockerfile: without the bind mount below, anything installed into
+            # this container is discarded by the next build.
+            target: dev
+          volumes:
+            # The project itself, so npm writes node_modules and the lockfile to
+            # the host and an edit takes effect without a rebuild.
+            - .:/app
+          restart: unless-stopped
+          env_file:
+            # required: false so a fresh scaffold comes up before anyone has written
+            # a .env. The short form (env_file: [.env]) is a hard compose error when
+            # the file is absent, and these recipes ship .env.example, not .env.
+            - path: .env
+              required: false
+          environment:
+            HOST: "0.0.0.0"
+            PORT: "3333"
+            # AdonisJS ships the conservative default already:
+            # `trustProxy: proxyAddr.compile(['loopback', 'uniquelocal'])`, with
+            # the vendor's own comment that it "is safe for most deployment
+            # scenarios where your proxy runs on the same machine or private
+            # network". A sibling proxy container on the compose bridge network
+            # is that private network, so unlike Express and Nest nothing has to
+            # change when a proxy is added. Read from .env so the value is one
+            # place, and never `() => true`, which the vendor labels "not
+            # recommended for production".
+            TRUST_PROXY: "${TRUST_PROXY:-loopback,uniquelocal}"
+            # AdonisJS documents the keep-alive mismatch that produces
+            # intermittent 502s: Node closes idle connections after 5 seconds
+            # while the proxy may keep them for far longer. Its prescribed
+            # 55000 ms was computed against a 50 s nginx proxy_read_timeout, but
+            # nginx documents that default as 60 s, so 55000 is below it and
+            # does not close the gap. 65000 does.
+            KEEP_ALIVE_TIMEOUT: "${KEEP_ALIVE_TIMEOUT:-65000}"
+          expose: ["3333"]
+          healthcheck:
+            # / rather than /health. Unlike the other Node recipes, this one does
+            # not write application files: `npm init adonisjs --kit=api`
+            # scaffolds them, and the vendor kit ships a route at / and none at
+            # /health. Probing a route that does not exist leaves the container
+            # permanently unhealthy, and any web server that depends on
+            # `condition: service_healthy` then refuses to start.
+            test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3333/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+            interval: 15s
+            timeout: 5s
+            retries: 5
+            start_period: 20s
+          stop_grace_period: 30s
+
+        # The database, when one is selected.
+        #
+        # Every field that differs between Postgres, MySQL and MariaDB comes from
+        # the chosen db recipe as a var, so this one definition serves all three.
+        # Writing it per engine is what left the Node frameworks with no database
+        # service at all: the compose file only ever had `app`, the db recipe's
+        # overlay had no image, and compose does not auto-merge that overlay, so
+        # picking a database silently produced nothing.
+        db:
+          image: {{db.type}}:{{db.version}}
+          restart: unless-stopped
+          environment: {{db.compose_env}}
+          volumes:
+            - dbdata:{{db.data_dir}}
+            # The tuned configuration the db recipe wrote. Mounted here rather
+            # than left in an overlay file compose never reads.
+            - {{db.config_mount}}
+          {{db.command}}
+          healthcheck:
+            # The app waits on this, so it must answer only once the server
+            # really accepts connections rather than when the port opens.
+            test: {{db.healthcheck}}
+            interval: 10s
+            timeout: 5s
+            retries: 12
+            start_period: 30s
+
+      volumes:
+        dbdata:
+  - path: .dockerignore
+    content: |
+      node_modules
+      build
+      .git
+      .env
+      npm-debug.log
+      coverage
+      tests

@@ -1,0 +1,26 @@
+id: flask-pytest
+schema_version: 2
+kind: addon
+label: pytest (unit and integration tests)
+appliesTo: [flask]
+provides: [tests]
+updated: 2026-08-24
+# The Flask base declares `test: uv run pytest` but ships no runner and no test,
+# so `keel run test` had nothing to run and pytest exited non-zero. This adds
+# pytest and a first test that drives the base's /health route through Flask's
+# own test client, so the suite passes out of the box. uv add is idempotent.
+install:
+  - "{{exec}} uv add --dev pytest"
+files:
+  - path: tests/test_app.py
+    content: |
+      from app import app
+
+
+      def test_health():
+          resp = app.test_client().get("/health")
+          assert resp.status_code == 200
+          assert resp.get_json() == {"status": "healthy"}
+smoke:
+  # Runs the suite against tests/test_app.py, the same command `keel run test` uses.
+  - "{{exec}} uv run pytest"

@@ -1,0 +1,11 @@
+# Auth as a level:stack generator (Auth.js v5). Points at the nextjs-authjs addon
+# that already exists.
+id: gen-auth-nextjs
+kind: generator
+level: stack
+label: "Authentication (Auth.js v5 - login, register, reset, protected routes)"
+appliesTo: [nextjs]
+provides: [auth]
+apply: [nextjs-authjs]
+schema_version: 2
+updated: 2026-08-21

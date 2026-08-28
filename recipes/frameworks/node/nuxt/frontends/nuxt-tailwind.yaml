@@ -1,0 +1,79 @@
+id: nuxt-tailwind
+kind: addon
+label: Tailwind CSS v4
+category: UI kit
+appliesTo: [nuxt]
+requires: [nuxt]
+provides: [tailwind, css]
+priority: 40
+install:
+  - "{{exec}} npm install tailwindcss @tailwindcss/vite"
+smoke:
+  - "{{exec}} npm run build"
+files:
+  - path: nuxt.config.ts
+    content: |
+      import tailwindcss from "@tailwindcss/vite";
+
+      // https://nuxt.com/docs/api/configuration/nuxt-config
+      export default defineNuxtConfig({
+        devtools: { enabled: true },
+        css: ["~/assets/css/main.css"],
+        vite: { plugins: [tailwindcss()] },
+      });
+  - path: assets/css/main.css
+    content: |
+      @import "tailwindcss";
+  - path: app.vue
+    content: |
+      <script setup lang="ts">
+      // keel: a production-ready landing page that proves Tailwind is wired.
+      const features: [string, string][] = [
+        ["Tailwind CSS", "Utility-first styling, compiled by the Vite plugin."],
+        ["Auto-imports", "Components and composables, no import boilerplate."],
+        ["keel-managed", "keel run dev · test · build, one vocabulary."],
+      ];
+      </script>
+
+      <template>
+        <main class="min-h-screen bg-slate-950 text-slate-100">
+          <div class="mx-auto max-w-3xl px-6 py-20">
+            <span
+              class="inline-flex items-center gap-2 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-300"
+            >
+              <span class="size-1.5 rounded-full bg-emerald-400" /> running
+            </span>
+            <h1 class="mt-6 text-4xl font-bold tracking-tight sm:text-5xl">
+              Your Nuxt app is running
+            </h1>
+            <p class="mt-4 text-lg text-slate-400">
+              Built with Tailwind CSS, scaffolded by keel. Edit
+              <code class="rounded bg-slate-800 px-1.5 py-0.5 text-sm">app.vue</code> to make it yours.
+            </p>
+            <div class="mt-8 flex flex-wrap gap-3">
+              <a
+                href="https://coullworks.com/tools/keel"
+                class="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-emerald-400"
+              >
+                keel docs
+              </a>
+              <a
+                href="https://tailwindcss.com"
+                class="rounded-lg border border-slate-700 px-4 py-2 text-sm font-semibold hover:bg-slate-900"
+              >
+                Tailwind CSS docs
+              </a>
+            </div>
+            <div class="mt-12 grid gap-4 sm:grid-cols-3">
+              <div
+                v-for="[title, body] in features"
+                :key="title"
+                class="rounded-xl border border-slate-800 bg-slate-900/50 p-5"
+              >
+                <h2 class="font-semibold">{{ title }}</h2>
+                <p class="mt-1 text-sm text-slate-400">{{ body }}</p>
+              </div>
+            </div>
+          </div>
+        </main>
+      </template>

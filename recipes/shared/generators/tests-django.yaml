@@ -1,0 +1,11 @@
+# Test suite as a level: stack generator (Django pytest). Points at the
+# django-pytest addon (pytest + pytest-django + coverage).
+id: gen-tests-django
+kind: generator
+level: stack
+label: "Test suite (pytest + pytest-django + coverage)"
+appliesTo: [django]
+provides: [tests]
+apply: [django-pytest]
+schema_version: 2
+updated: 2026-08-22

@@ -1,0 +1,11 @@
+# Auth as a level:stack generator (django-allauth). Points at the django-allauth
+# addon that already exists.
+id: gen-auth-django
+kind: generator
+level: stack
+label: "Authentication (django-allauth - social + local auth)"
+appliesTo: [django]
+provides: [auth]
+apply: [django-allauth]
+schema_version: 2
+updated: 2026-08-21

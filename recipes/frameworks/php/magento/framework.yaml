@@ -1,0 +1,214 @@
+id: magento
+kind: framework
+label: Magento / Adobe Commerce
+lang: php
+provides: [php, magento]
+default: false
+updated: 2026-08-13
+# One family, two distributions. This is Adobe's Magento Open Source, which is
+# the one most people mean and the one that needs Marketplace keys; the Mage-OS
+# variant beside it is the same codebase from a repository that needs none.
+#
+# They are variants rather than separate frameworks because everything except
+# the Composer repository is identical - the install sequence lives in
+# install.yaml and is shared, and every environment, web server, add-on and
+# storefront applies to both.
+family: magento
+variant: Adobe Magento Open Source (Marketplace keys required)
+pins:
+  magento: 2.4.8
+  # Magento constrains PHP per minor, not per major. composer.json on
+  # 2.4-develop is "~8.3.0||~8.4.0||~8.5.0", so ">=8.3" would claim support for
+  # PHP 9 that Magento refuses to install on. Adobe's own matrix is tighter
+  # again and moves per patch release: 2.4.7-p10 takes 8.3 or 8.2, 2.4.8-p5
+  # takes 8.4 or 8.3, 2.4.9 takes 8.5 only. See docs/infra/magento.md.
+  php: "~8.3.0 || ~8.4.0 || ~8.5.0"
+# The PHP line is a choice, not a constraint: this framework supports more
+# than one, so keel recommends the one it would pick and offers the rest.
+# The compose build arg reads the answer; the Dockerfile carries the same
+# default so a checkout without a .env still builds.
+versions:
+  # php_version, not php: the pin above is a Composer constraint, this is
+  # the concrete runtime the image is built on.
+  php_version:
+    label: PHP version
+    recommended: "8.3"
+    options:
+      - value: "8.3"
+        label: "PHP 8.3"
+        note: "active support ended Dec 2025, security to Dec 2027"
+      - value: "8.4"
+        label: "PHP 8.4"
+        note: "current, widest extension support"
+schema_version: 2
+# Magento cannot be installed without these: repo.magento.com refuses anonymous
+# Composer requests. keel asks for them before the build and writes them where
+# the chosen environment's Composer reads them.
+credentials:
+  - id: repo.magento.com
+    kind: composer
+    label: Adobe Marketplace keys
+    help: "https://commercemarketplace.adobe.com/customer/account/login/ (My Profile -> Access Keys). Public key is the username, private key the password."
+    required: true
+# Extension vendors sell through their own private Composer repositories, so a
+# real Magento build usually needs more than one set of keys. These are offered,
+# never demanded.
+  - id: repo.amasty.com
+    kind: composer
+    label: Amasty extensions (optional)
+    help: "https://amasty.com/customer/account/ - Composer keys for purchased extensions."
+  - id: composer.mageplaza.com
+    kind: composer
+    label: Mageplaza extensions (optional)
+    help: "https://www.mageplaza.com/dashboard/ - Composer keys for purchased extensions."
+# How the Magento app is created per env (keyed by env id). keel's guided key
+# flow writes auth.json before this runs. Mage-OS (credential-free) swaps the
+# repository for https://repo.mage-os.org/ mage-os/project-community-edition.
+# The distribution, as variables rather than a string repeated in every create
+# command. Adobe's Magento Open Source is the default and needs Marketplace
+# keys; Mage-OS is the community fork of the same codebase and needs none, which
+# is the difference between a build anyone can run and one only a customer can.
+#
+# Overriding these is a one-line change today:
+#
+#   composer config repositories.0 composer https://repo.mage-os.org/
+#   composer require mage-os/project-community-edition
+#
+# keel does not yet offer the choice in the wizard - see the note in
+# MAGENTO-README.md, which used to claim a `--base mage-os` flag that has never
+# existed.
+vars:
+  magento.repo: "https://repo.magento.com/"
+  magento.package: "magento/project-community-edition"
+create:
+  # Built in keeltmp and moved in: by the time the framework runs, keel has
+  # already written config under .keel/, and `ddev composer create-project`
+  # refuses a project root holding anything but public/. ddev exec runs composer
+  # inside the web container without that wrapper. Same as the other envs here.
+  magento-ddev: "ddev exec 'rm -rf keeltmp && composer create-project --repository {{magento.repo}} {{magento.package}} keeltmp && cp -a keeltmp/. . && rm -rf keeltmp'"
+  # Docker: create into a temp dir (create-project needs an empty target) then
+  # move it onto the mounted webroot. auth.json (written by keel's key flow) is
+  # in the project root, which is the composer working dir.
+  # Created inside the project's own php image so the dependency tree resolves
+  # against the PHP version that will run it, and via `run --rm` so it works
+  # before anything has been brought up - which matters here, because this is
+  # the first step of the build and there is no stack yet.
+  #
+  # `build php` first: the dev stage COPYs no application files, so it builds
+  # happily before composer.json exists. Into /tmp because create-project
+  # refuses a non-empty target and the compose files are already written.
+  magento-docker: "docker compose build php && docker compose run --rm -T --user \"$(id -u):$(id -g)\" -e COMPOSER_HOME=/tmp -e HOME=/tmp php sh -c 'composer create-project --repository={{magento.repo}} {{magento.package}} /tmp/m && cp -a /tmp/m/. /var/www/html/ && rm -rf /tmp/m'"
+install:
+  - "{{create}}"
+  # The stack has to be up before anything can exec into it, and nothing else
+  # brings it up: every step below is a `docker compose exec`. Without this the
+  # build's first command failed with `service "php" is not running` - and it
+  # failed the same way with Adobe's distribution, so Magento could not be built
+  # by anyone, keys or not.
+  - "{{start}}"
+  - "{{exec}} rm -f app/etc/env.php"
+  - >-
+    {{magento}} setup:install
+    --base-url="{{site_url}}/"
+    --cleanup-database
+    --db-host=db --db-name=db --db-user=db --db-password=db
+    --search-engine=opensearch --opensearch-host=opensearch --opensearch-port=9200
+    --opensearch-index-prefix=magento --opensearch-timeout=15
+    --session-save=redis --session-save-redis-host=redis --session-save-redis-port=6379 --session-save-redis-db=2
+    --cache-backend=redis --cache-backend-redis-server=redis --cache-backend-redis-port=6379 --cache-backend-redis-db=0
+    --page-cache=redis --page-cache-redis-server=redis --page-cache-redis-port=6379 --page-cache-redis-db=1
+    --admin-firstname=Magento --admin-lastname=User --admin-email=admin@example.com
+    --admin-user=admin --admin-password=Password123
+    --language=en_GB --currency=GBP --timezone=Europe/London --use-rewrites=1
+  - "{{magento}} deploy:mode:set developer"
+  - "{{magento}} module:disable Magento_AdminAdobeImsTwoFactorAuth Magento_TwoFactorAuth || true"
+  - "{{settings_reenable}}"
+  - "{{magento}} setup:config:set --backend-frontname=admin --no-interaction"
+  # Apply the module state changed two steps up. `module:disable` writes
+  # app/etc/config.php; the schema and data those modules own are only removed
+  # once setup:upgrade runs, and until then the admin reports the setup version
+  # as out of date on every page load.
+  #
+  # Note that setup:upgrade is deliberately absent from Adobe's documented
+  # deployment flow (docs/infra/magento.md, open question 3). That flow is for
+  # deploying code to a store that already exists; this is a fresh install whose
+  # enabled-module set has just changed, which is the case it does cover.
+  - "{{magento}} setup:upgrade"
+  # Update by Schedule, not Update on Save.
+  #
+  # Update on Save is the default and reindexes inside the request that saved
+  # the entity, so saving one product can block for minutes on a real catalogue.
+  # Update by Schedule moves that to cron, which is exactly what the cron
+  # container in this stack exists to run.
+  - "{{magento}} indexer:set-mode schedule"
+  # A fresh install leaves every index invalid, and an invalid index means the
+  # storefront renders no products and no category pages: the store looks empty
+  # rather than broken, which is worse. Building them here is the difference
+  # between a store you can open and a store you have to debug.
+  - "{{magento}} indexer:reindex"
+  # Last, because everything above changed configuration or schema.
+  - "{{magento}} cache:flush"
+  # Cron starts only now the store exists, which is both Adobe's order and the
+  # only way the steps above can run without a second bin/magento writing into
+  # generated/ underneath them. See the cron service in magento/infra/php-fpm.yaml.
+  - "{{cron_start}}"
+files:
+  # Composer auth.json holds real purchased-extension credentials. Under compose
+  # and Sail it lives in the project root, so it must never be committable.
+  - path: .gitignore
+    content: |
+      # keel-generated
+      /auth.json
+      /.ddev/homeadditions/.composer/auth.json
+      /app/etc/env.php
+      /pub/static/
+      /pub/media/
+      /var/
+      /vendor/
+      /generated/
+      .env
+  - path: MAGENTO-README.md
+    content: |
+      # Magento Open Source (scaffolded by keel)
+
+      Local URL: **https://{{project}}.ddev.site/** · Admin: **/admin**
+      (user `admin`, password `Password123` - dev only, change it).
+
+      - Env: DDEV, PHP 8.3, OpenSearch (`opensearch:9200`), Redis (`redis:6379`,
+        cache DB 0 / page DB 1 / session DB 2). Developer mode. 2FA disabled locally.
+      - Common tasks: `ddev magento <cmd>`, `ddev magento cache:flush`,
+        `ddev magento indexer:reindex`, `ddev composer require <pkg>`.
+
+      ## Base distribution
+      This used the real **Magento Open Source** distribution (`repo.magento.com`),
+      installed with the Adobe Marketplace auth keys keel helped you fetch.
+
+      **Mage-OS** is the community fork of the same codebase and needs no keys at
+      all. keel does not offer it as a wizard choice yet, so switch by hand:
+
+          composer config repositories.0 composer https://repo.mage-os.org/
+          composer require mage-os/project-community-edition
+
+      ## Add-ons
+      keel can install free / open-source modules for you (`keel new magento --with
+      mageplaza-seo,magefan-blog,yireo-webp2` or tick them in the wizard), plus dev
+      tooling (magento-coding-standard, phpstan-magento, n98-magerun2).
+
+      Paid vendor extensions (Amasty, Mageplaza Pro/Ultimate, Aheadworks, Mirasvit)
+      are NOT auto-installed - they need a purchased licence, a private Composer
+      repository and your own auth keys. Add them yourself:
+
+          composer config repositories.<vendor> composer https://<vendor-repo>
+          composer require <vendor>/<module>   # keys in auth.json
+
+      Note: ReCaptcha, 2FA and MFTF ship with Magento core, so they are not add-ons.
+tasks:
+  lint: "{{exec}} vendor/bin/phpcs --standard=Magento2 app/code"
+  dev: "{{start}}"
+  test: "{{magento}} dev:tests:run unit"
+  flush: "{{magento}} cache:flush"
+  reindex: "{{magento}} indexer:reindex"
+  build: "{{magento}} setup:static-content:deploy -f"
+smoke:
+  # Proves the database the install just built is reachable and current.
+  - "{{magento}} setup:db:status"

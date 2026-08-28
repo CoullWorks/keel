@@ -1,0 +1,49 @@
+id: laravel-seed
+kind: addon
+label: Realistic seed data (factories + Faker)
+appliesTo: [laravel]
+provides: [seed]
+updated: 2026-08-21
+# `keel db seed` runs `artisan db:seed`, which runs DatabaseSeeder. A fresh
+# Laravel ships a DatabaseSeeder that creates exactly one hardcoded user
+# (test@example.com) and nothing else, so the command "succeeds" and leaves you
+# with a database that has one row and no realistic shape to develop against.
+#
+# This add-on replaces that seeder with one that drives Laravel's own factories
+# (which use Faker, already in the dev dependencies of every laravel/laravel) to
+# generate a realistic set of users. It is a starting point: add your own
+# models' factories and a line here to seed them.
+#
+# No install steps: Laravel's UserFactory and the fakerphp/faker package are
+# both present in a stock skeleton, so this is purely the seeder file.
+files:
+  - path: database/seeders/DatabaseSeeder.php
+    content: |
+      <?php
+      // keel-generated. Realistic seed data via Laravel factories + Faker.
+      //
+      // Run with `keel db seed` (artisan db:seed) or `keel db reset`
+      // (migrate:fresh --seed). Replace/extend the factory calls below with your
+      // own models as you add them.
+
+      namespace Database\Seeders;
+
+      use App\Models\User;
+      use Illuminate\Database\Seeder;
+
+      class DatabaseSeeder extends Seeder
+      {
+          public function run(): void
+          {
+              // A known account you can always log in with in development.
+              User::factory()->create([
+                  'name' => 'Test User',
+                  'email' => 'test@example.com',
+              ]);
+
+              // A realistic population. UserFactory uses Faker for names and
+              // emails, so every run is different but plausible. Bump the count
+              // or add ->state(...) for variety.
+              User::factory()->count(25)->create();
+          }
+      }

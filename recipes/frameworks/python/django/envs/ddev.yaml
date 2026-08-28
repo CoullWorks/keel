@@ -1,0 +1,114 @@
+id: django-ddev
+schema_version: 2
+kind: env
+env_family: ddev
+label: DDEV
+bin: ddev
+appliesTo: [django]
+provides: [env, docker]
+default: true
+priority: -10 # provision the DDEV env before the app is created
+updated: 2026-08-12
+# A development environment, and it says so. DDEV runs `manage.py runserver`,
+# which Django's deployment index calls "not suitable for production" and its
+# checklist tells you to switch away from. Nothing here is a deployment shape.
+#
+# The production shape for this framework lives in envs/docker.yaml (gunicorn,
+# multi-stage image, non-root) and in infra/nginx.yaml or infra/apache.yaml
+# (the server block or VirtualHost). Selecting nginx or apache alongside this
+# env still writes those files, so the deployment configuration is
+# version-controlled next to the code even while local work happens over
+# runserver. See docs/infra/django.md.
+commands:
+  start: "ddev start"
+  # Where the project can be opened once the build finishes.
+  site_url: "https://{{project}}.ddev.site"
+  # How this environment tears itself down. Used when a build fails partway:
+  # keel removes the directory it created, and without this the containers,
+  # volumes and network it started stay behind holding a bind mount to a
+  # path that no longer exists. The next attempt then reuses that container
+  # and dies with "current working directory is outside of container mount
+  # namespace root".
+  down: "ddev delete -Oy"
+  restart: "ddev restart"
+  exec: "ddev exec"
+  composer: "ddev composer"
+  artisan: "ddev exec php artisan"
+  magento: "ddev magento"
+  manage: "ddev exec python manage.py"
+  opensearch_addon: "ddev add-on get ddev/ddev-opensearch"
+  elasticsearch_addon: "ddev add-on get ddev/ddev-elasticsearch"
+  meilisearch_addon: "ddev add-on get ddev/ddev-meilisearch"
+  minio_addon: "ddev add-on get ddev/ddev-minio"
+  rabbitmq_addon: "ddev add-on get ddev/ddev-rabbitmq"
+  memcached_addon: "ddev add-on get ddev/ddev-memcached"
+  mongo_addon: "ddev add-on get ddev/ddev-mongo"
+  solr_addon: "ddev add-on get ddev/ddev-solr"
+  redis_addon: "ddev add-on get ddev/ddev-redis"
+install:
+  # DDEV removed the native django/python type (v1.24); the blessed route is a
+  # generic project + generic webserver, with Django running as an extra daemon.
+  # The database is DB-agnostic here: the chosen db recipe sets --database and
+  # KEEL_DB (priority -5, so it runs after this env but before the app migrates).
+  - "ddev config --project-type=generic --webserver-type=generic --docroot='' --disable-settings-management {{db.ddev_flag}}"
+  # Redis comes from the redis service recipe (selected by default), not from
+  # here: an env that installs services on its own runs them twice and ignores
+  # the user deselecting them.
+files:
+  - path: .ddev/config.django.yaml
+    content: |
+      # Runs `manage.py runserver` as a daemon and exposes it on 80/443.
+      # Traefik forwards straight to :8000 (generic webserver = no nginx, and no
+      # Apache either: under DDEV the reverse proxy is Traefik's, not ours).
+      web_extra_exposed_ports:
+        - name: django
+          container_port: 8000
+          http_port: 80
+          https_port: 443
+      web_extra_daemons:
+        - name: django
+          command: "python manage.py runserver 0.0.0.0:8000"
+          directory: /var/www/html
+  - path: .ddev/web-build/Dockerfile.python
+    content: |
+      # uv, with the project venv OUTSIDE the /var/www/html mount so it does not
+      # collide with the host filesystem (the key DDEV+uv gotcha).
+      #
+      # Pinned, and copied from the official distroless image rather than piped
+      # from an installer script: uv's own Docker guidance is
+      # `COPY --from=ghcr.io/astral-sh/uv:0.12.3 /uv /uvx /bin/`, and a curl-to-sh
+      # install resolves to a different uv on every rebuild.
+      COPY --from=ghcr.io/astral-sh/uv:0.12.3 /uv /uvx /bin/
+      # `ddev exec` runs as the web user, so make the out-of-mount venv dir writable.
+      RUN mkdir -p /opt/venv && chmod 777 /opt/venv
+      ENV UV_PROJECT_ENVIRONMENT=/opt/venv
+      ENV UV_LINK_MODE=copy
+      ENV VIRTUAL_ENV=/opt/venv
+      ENV PATH="/opt/venv/bin:$PATH"
+  - path: .ddev/commands/web/manage
+    content: |
+      #!/bin/bash
+      ## Description: run Django manage.py inside the web container
+      ## Usage: manage [args]
+      ## Example: "ddev manage migrate" or "ddev manage createsuperuser"
+      python manage.py "$@"
+  - path: .ddev/commands/web/ruff
+    content: |
+      #!/bin/bash
+      ## Description: run Ruff (lint + format check)
+      ## Usage: ruff [args]
+      ## Example: "ddev ruff check" or "ddev ruff format"
+      uv run ruff "$@"
+  - path: .ddev/commands/web/pytest
+    content: |
+      #!/bin/bash
+      ## Description: run the pytest suite
+      ## Usage: pytest [args]
+      ## Example: "ddev pytest -k users"
+      uv run pytest "$@"
+  - path: .ddev/commands/web/mypy
+    content: |
+      #!/bin/bash
+      ## Description: run mypy (strict type check)
+      ## Usage: mypy [args]
+      uv run mypy .

@@ -1,0 +1,143 @@
+id: fastapi
+kind: framework
+label: FastAPI
+lang: python
+provides: [python, fastapi]
+default: false
+updated: 2026-08-07
+pins:
+  fastapi: ">=0.115,<1.0"
+  python: "3.13"
+# The Python line is a choice. This framework supports a range, so keel
+# recommends one and offers the rest. The Dockerfile reads the answer as
+# {{pin.python_version}}.
+versions:
+  python_version:
+    label: Python version
+    # The values are full patch versions, not 3.13: the Dockerfiles pin a
+    # patch on purpose, so that an unrelated rebuild cannot become an
+    # unreviewed Python upgrade. Choosing a line must not give that up.
+    recommended: "3.13.15"
+    options:
+      - value: "3.11.14"
+        label: "Python 3.11"
+        note: "security fixes to Oct 2027"
+      - value: "3.12.12"
+        label: "Python 3.12"
+        note: "security fixes to Oct 2028"
+      - value: "3.13.15"
+        label: "Python 3.13"
+        note: "current stable, widest wheel coverage"
+      - value: "3.14.2"
+        label: "Python 3.14"
+        note: "newest; check your C-extension deps have wheels"
+install:
+  - "{{start}}"
+  - "{{exec}} uv sync --dev"
+  - "{{restart}}"
+smoke:
+  - "{{exec}} uv run python -c 'import main'"
+files:
+  - path: main.py
+    content: |
+      import os
+
+      from fastapi import FastAPI
+
+      from config import settings
+
+      app = FastAPI(title="app")
+
+
+      @app.get("/")
+      def root() -> dict[str, str]:
+          return {"app": "keel FastAPI", "db": os.environ.get("KEEL_DB", "sqlite")}
+
+
+      @app.get("/health")
+      def health() -> dict[str, str]:
+          return {"status": "healthy", "debug": str(settings.debug)}
+  - path: config.py
+    content: |
+      from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+      class Settings(BaseSettings):
+          model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+          secret_key: str = "dev-insecure-change-me"
+          database_url: str = "sqlite:///./app.db"
+          debug: bool = True
+
+
+      settings = Settings()
+  - path: .env.example
+    content: |
+      # Copy to .env and fill in. Generate the secret with: keel secrets sync
+      SECRET_KEY=change-me
+      DATABASE_URL=sqlite:///./app.db
+      DEBUG=1
+  - path: pyproject.toml
+    content: |
+      [project]
+      name = "app"
+      version = "0.1.0"
+      requires-python = ">=3.12"
+      dependencies = [
+          "fastapi>=0.115",
+          "uvicorn[standard]>=0.32",
+          "pydantic-settings>=2.5",
+          "sqlalchemy>=2.0",
+          "psycopg[binary]>=3.2",
+      ]
+
+      [dependency-groups]
+      dev = [
+          "ruff>=0.6",
+          "pytest>=8.3",
+          "httpx>=0.27",
+          "mypy>=1.11",
+      ]
+
+      [tool.ruff]
+      line-length = 100
+      target-version = "py312"
+
+      [tool.ruff.lint]
+      select = ["E", "F", "I", "UP", "B"]
+
+      [tool.pytest.ini_options]
+      addopts = "-q"
+
+      [tool.mypy]
+      strict = true
+  - path: tests/test_health.py
+    content: |
+      from fastapi.testclient import TestClient
+
+      from main import app
+
+
+      def test_health() -> None:
+          r = TestClient(app).get("/health")
+          assert r.status_code == 200
+          assert r.json() == {"status": "healthy"}
+  - path: .gitignore
+    content: |
+      .venv/
+      __pycache__/
+      *.pyc
+      .env
+tasks:
+  # The real server command, not {{start}}. Under a native environment
+  # {{start}} renders empty - there is no stack to bring up - so `keel run dev`
+  # had nothing to run and reported the task as missing. Every other Python
+  # framework here already names its server directly; these two did not.
+  #
+  # $PORT so the port can be chosen by whatever is running it (the e2e harness
+  # allocates a free one); 8000 otherwise. Under a container environment this
+  # execs into the running service, the same as flask, streamlit and the rest.
+  dev: "{{exec}} uv run uvicorn main:app --reload --host 0.0.0.0 --port ${PORT:-8000}"
+  test: "{{exec}} uv run pytest"
+  lint: "{{exec}} uv run ruff check"
+  typecheck: "{{exec}} uv run mypy ."

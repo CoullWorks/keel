@@ -1,0 +1,7 @@
+id: django-model-bakery
+kind: addon
+label: model-bakery (test object creation)
+appliesTo: [django]
+provides: [model-bakery]
+install:
+  - "{{exec}} uv add --dev model-bakery"

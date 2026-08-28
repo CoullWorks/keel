@@ -1,0 +1,11 @@
+# Auth as a level:stack generator (FastAPI JWT). Points at the fastapi-jwt addon
+# that already exists.
+id: gen-auth-fastapi
+kind: generator
+level: stack
+label: "Authentication (FastAPI JWT - OAuth2 password flow, users, token/me)"
+appliesTo: [fastapi]
+provides: [auth]
+apply: [fastapi-jwt]
+schema_version: 2
+updated: 2026-08-21

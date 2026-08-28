@@ -1,0 +1,12 @@
+# Test suite as a level: stack generator. Points at the existing symfony-phpunit addon,
+# so `keel gen tests` on a symfony project adds its standard runner. Thin pointer,
+# not a second copy of how the runner installs.
+id: gen-tests-symfony
+kind: generator
+level: stack
+label: "Test suite (PHPUnit)"
+appliesTo: [symfony]
+provides: [tests]
+apply: [symfony-phpunit]
+schema_version: 2
+updated: 2026-08-24

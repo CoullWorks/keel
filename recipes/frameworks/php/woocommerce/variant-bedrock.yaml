@@ -1,0 +1,100 @@
+id: woocommerce-bedrock
+kind: framework
+label: WooCommerce (WordPress, Composer / Bedrock)
+lang: php
+provides: [php, wordpress, woocommerce, bedrock]
+default: false
+family: woocommerce
+variant: Bedrock (Composer)
+updated: 2026-08-07
+vars:
+  # Bedrock's layout: the document root is web/, and wp-content is renamed to
+  # app/. Everything Composer manages - vendor/, config/, .env, composer.json -
+  # therefore sits OUTSIDE the served tree by construction rather than by a deny
+  # rule, which is Bedrock's main security argument.
+  wp.docroot: /var/www/html/web
+  wp.content_dir: app
+  wp.uploads: web/app/uploads
+pins:
+  bedrock: ^1.23
+  woocommerce: ">=9.0"
+  php: ">=8.2"
+# Same PHP choice as the Classic variant: Bedrock is a different way to manage
+# WordPress, not a different runtime requirement.
+versions:
+  php_version:
+    label: PHP version
+    recommended: "8.3"
+    options:
+      - value: "8.2"
+        label: "PHP 8.2"
+        note: "security fixes only, ends Dec 2026"
+      - value: "8.3"
+        label: "PHP 8.3"
+        note: "active support ended Dec 2025, security to Dec 2027"
+      - value: "8.4"
+        label: "PHP 8.4"
+        note: "current; verify your plugins support it"
+# Composer-managed WordPress (Roots Bedrock): WP core via roots/wordpress,
+# config via .env, plugins + themes via Composer + WPackagist. Everything is in
+# your composer.json, so the whole stack is version-controlled and reproducible
+# (`composer install` rebuilds it). Docroot is web/; the env recipe sets that.
+#
+# How the app is created is per environment, because the two environments differ
+# in what exists when it runs. DDEV's composer creates into the directory
+# alongside .ddev/ quite happily; under compose the project already holds the
+# Dockerfile and compose.yaml keel has just written, and create-project refuses
+# a non-empty target - so it builds into a temp directory and merges, the same
+# way the Laravel and Symfony recipes do.
+create:
+  # Built in keeltmp and moved in: by the time the framework runs, keel has
+  # already written config under .keel/, and `ddev composer create-project`
+  # refuses a project root holding anything but public/. ddev exec runs composer
+  # inside the web container without that wrapper. Same as the other envs here.
+  woocommerce-bedrock-ddev: "ddev exec 'rm -rf keeltmp && composer create-project roots/bedrock keeltmp && cp -a keeltmp/. . && rm -rf keeltmp'"
+  # Created inside the project's OWN php image, not a stray composer container,
+  # so the dependency tree is resolved against the PHP version that will
+  # actually run it. A standalone composer:2 image runs a newer PHP, and the
+  # lock it produced pulled pest 4 -> symfony/process 8.1 -> php >= 8.4.1, which
+  # the project's own 8.3 image then refused to install. The error names pest
+  # and symfony/process and never mentions that two different PHP versions were
+  # involved.
+  #
+  # `build php` first because the dev stage COPYs nothing, so it builds happily
+  # before composer.json exists; `run --rm` then starts it on demand. Into /tmp
+  # because create-project refuses a non-empty target and the compose files are
+  # already here.
+  woocommerce-docker: "docker compose build php && docker compose run --rm -T --user \"$(id -u):$(id -g)\" -e COMPOSER_HOME=/tmp -e HOME=/tmp php sh -c 'composer create-project roots/bedrock /tmp/b && cp -a /tmp/b/. /var/www/html/ && rm -rf /tmp/b'"
+install:
+  - "{{create}}"
+  # The stack can only be built once composer.json exists, so this comes after
+  # create and before anything that execs into a container.
+  - "{{start}}"
+  # Bedrock reads its database credentials and URLs from .env, and they come from
+  # whichever database recipe is in the plan rather than being written twice.
+  # The salts are development placeholders - regenerate them for production
+  # (roots.io/salts).
+  - '{{exec}} sh -c ''printf "DB_NAME={{db.name}}\nDB_USER={{db.user}}\nDB_PASSWORD={{db.password}}\nDB_HOST={{db.host}}\nWP_ENV=development\nWP_HOME={{site_url}}\nWP_SITEURL={{site_url}}/wp\n" > .env'''
+  # WooCommerce + Storefront as Composer dependencies. Add more the same way:
+  # `keel run require`.
+  #
+  # wp-plugin/*, not wpackagist-plugin/*. Bedrock's composer.json no longer
+  # carries the WPackagist repository at all - it ships repo.wp-packages.org,
+  # whose available-package-patterns are wp-plugin/* and wp-theme/*. Requiring
+  # the old names against the new repository fails with "Could not find a
+  # matching version of package wpackagist-plugin/woocommerce", which reads like
+  # a version-constraint problem and is actually a repository that has never
+  # heard of the vendor.
+  - "{{composer}} require wp-plugin/woocommerce wp-theme/storefront"
+  - '{{wp}} core install --url={{site_url}} --title="{{project}}" --admin_user=admin --admin_password=admin --admin_email=admin@example.com --skip-email'
+  - "{{wp}} plugin activate woocommerce"
+  - "{{wp}} theme activate storefront"
+  - "{{restart}}"
+smoke:
+  - "{{wp}} plugin is-active woocommerce"
+tasks:
+  dev: "{{start}}"
+  plugins: "{{wp}} plugin list"
+  require: "{{composer}} require wp-plugin/" # append a plugin slug
+  update: "{{composer}} update"
+  flush: "{{wp}} cache flush"

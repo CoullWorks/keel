@@ -1,0 +1,217 @@
+id: apache-magento
+schema_version: 2
+kind: config
+label: Magento 2 VirtualHost for Apache
+updated: 2026-08-12
+# Division of labour. The shared Apache service (recipes/infra/web/apache.yaml)
+# owns .keel/apache/keel-tuning.conf: MPM event tuning, the LoadModule lines for
+# mod_proxy, mod_proxy_fcgi, mod_rewrite, mod_headers and mod_expires, global
+# compression, ServerTokens Prod, the global security headers, and the
+# `IncludeOptional conf.d/app-*.conf` that pulls this file in. This recipe owns
+# one VirtualHost and the compose wiring.
+#
+# Sources: magento/magento2, pub/.htaccess (290 lines) and nginx.conf.sample,
+# both on 2.4-develop, fetched 2026-08-12.
+#
+# Three things this file does that copying pub/.htaccess would not:
+#
+#   1. It sets NO PHP values, and that is the headline. pub/.htaccess wraps
+#      `php_value memory_limit 756M` and `php_value max_execution_time 18000` in
+#      <IfModule mod_php.c> and <IfModule mod_php7.c>. Under PHP-FPM with
+#      mod_proxy_fcgi neither module is loaded, so BOTH silently fall back to the
+#      php.ini defaults and nothing anywhere reports it. A Magento store on
+#      Apache and FPM, configured from the shipped .htaccess, is running on 128M
+#      and will die mid-checkout under load. keel sets them in the pool with
+#      php_admin_value, where FPM honours them and application code cannot raise
+#      them: docker/php/php-fpm.d/zzz-magento-pool.conf.
+#
+#   2. It reproduces the nginx sample's seven-script PHP allow-list. The shipped
+#      .htaccess has no equivalent: it rewrites anything not on disk to index.php
+#      and relies on four <Files> denies, so any stray .php file in pub/ is
+#      executable under Apache and a 403 under nginx.
+#
+#   3. It sets ProxyTimeout. The nginx sample sets fastcgi_read_timeout 600s and
+#      fastcgi_connect_timeout 600s; no Apache equivalent ships, so long admin
+#      operations are cut off by Apache's default.
+#
+# Not used on purpose: the ROOT .htaccess, whose `RewriteRule .* /pub/$0` exists
+# for hosting that cannot change the document root. DocumentRoot is pub/ here, so
+# app/etc/env.php, vendor/ and var/ are outside the served tree entirely rather
+# than inside it behind a rewrite.
+when:
+  frameworks: [magento, magento-mageos]
+  uses: apache
+provision:
+  compose:
+    files:
+      - path: docker/apache/conf.d/app-magento.conf
+        verbatim: true
+        content: |
+          # keel-generated. Magento 2 VirtualHost. Included by the shared keel-tuning.conf.
+          <VirtualHost *:80>
+              ServerName localhost
+
+              # pub/, never the project root. app/etc/env.php holds the database
+              # credentials and the encryption key one level up from here.
+              DocumentRoot /var/www/html/pub
+
+              # Long admin operations. The nginx sample's 600s, restated for
+              # Apache, which otherwise gives up far sooner and returns a 502 with
+              # the request still running in the pool.
+              ProxyTimeout 600
+
+              # Default posture: nothing with a .php extension is executed.
+              <FilesMatch "\.php$">
+                  Require all denied
+              </FilesMatch>
+
+              # The exceptions, path-anchored exactly as the vendor nginx config
+              # anchors them. Apache merges <Location> after <Files>, so the grant
+              # here overrides the blanket deny above for precisely these seven
+              # URLs and nothing else. health_check.php is Magento's shipped
+              # health endpoint and is one of the seven.
+              <LocationMatch "^/(index|get|static|errors/report|errors/404|errors/503|health_check)\.php$">
+                  Require all granted
+                  SetHandler "proxy:fcgi://php:9000"
+              </LocationMatch>
+
+              <Directory /var/www/html/pub>
+                  # The rewrite rules are inlined below, so Apache never looks for
+                  # a .htaccess. That also means the mod_php trap in the shipped
+                  # pub/.htaccess cannot bite: the file is not read at all.
+                  AllowOverride None
+                  Require all granted
+                  Options +FollowSymLinks -Indexes -MultiViews
+                  DirectoryIndex index.php
+
+                  RewriteEngine on
+
+                  # Workaround for HTTP authorization in CGI environment
+                  RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+
+                  # TRACE and TRACK HTTP methods disabled to prevent XSS attacks
+                  RewriteCond %{REQUEST_METHOD} ^TRAC[EK]
+                  RewriteRule .* - [L,R=405]
+
+                  # Never rewrite for existing files, directories and links
+                  RewriteCond %{REQUEST_FILENAME} !-f
+                  RewriteCond %{REQUEST_FILENAME} !-d
+                  RewriteCond %{REQUEST_FILENAME} !-l
+
+                  # Rewrite everything else to index.php
+                  RewriteRule .* index.php [L]
+              </Directory>
+
+              # The media denies from the nginx sample. Customer uploads,
+              # downloadable products, import files and custom-option uploads are
+              # served through PHP with an access check or not at all.
+              # pub/.htaccess has no equivalent, so an Apache store assembled from
+              # it publishes customers' files.
+              <DirectoryMatch "^/var/www/html/pub/media/(customer|downloadable|import|custom_options)">
+                  Require all denied
+              </DirectoryMatch>
+              <LocationMatch "^/media/theme_customization/.*\.xml$">
+                  Require all denied
+              </LocationMatch>
+
+              # Static assets are versioned in the URL
+              # (/static/version1712345678/...) and the version is stripped before
+              # lookup, so the content behind a given URL never changes and a
+              # one-year immutable cache is safe. This is the Apache equivalent of
+              # the add_header the nginx sample tells you to uncomment in
+              # production, which the nginx recipe beside this one does.
+              <LocationMatch "^/static/.*\.(ico|jpg|jpeg|png|gif|svg|svgz|webp|avif|avifs|js|css|eot|ttf|otf|woff|woff2|html|json|webmanifest)$">
+                  Header set Cache-Control "public, max-age=31536000, immutable"
+              </LocationMatch>
+              # Exports and feeds under /static/ are explicitly not cached,
+              # matching the sample's Cache-Control "no-store". A year-long
+              # immutable cache on a price feed is a real incident.
+              <LocationMatch "^/static/.*\.(zip|gz|gzip|bz2|csv|xml)$">
+                  Header set Cache-Control "no-store"
+              </LocationMatch>
+
+              # The <Files> denies from pub/.htaccess, in Apache 2.4 syntax only:
+              # the <IfVersion < 2.4> order/allow/deny halves of the vendor file
+              # are dead weight on any supported Apache.
+              <Files RELEASE_NOTES.txt>
+                  Require all denied
+              </Files>
+              <Files .htaccess>
+                  Require all denied
+              </Files>
+              <Files cron.php>
+                  Require all denied
+              </Files>
+              <Files .user.ini>
+                  Require all denied
+              </Files>
+              # Dotfiles generally. The vendor .htaccess does not cover .git; the
+              # nginx sample's banned-locations regex does, so this is the Apache
+              # half of that rule.
+              <FilesMatch "^\.">
+                  Require all denied
+              </FilesMatch>
+
+              # The web setup wizard and updater. The nginx sample denies
+              # setup/index.php by default and makes you allow-list your own
+              # address to enable it. They are outside DocumentRoot here, and
+              # denied outright.
+              <LocationMatch "^/(setup|update)(/|$)">
+                  Require all denied
+              </LocationMatch>
+
+              # From pub/.htaccess: unhandled 404s and 403s render Magento's own
+              # error page rather than Apache's, which would otherwise leak the
+              # server signature and the document root.
+              ErrorDocument 404 /errors/404.php
+              ErrorDocument 403 /errors/404.php
+
+              # FPM's status and ping pages, declared in the pool. Restricted for
+              # the same reason as the nginx config: the status page lists live
+              # workers and the slowest request. 172.16.0.0/12 is Docker's default
+              # bridge range.
+              <LocationMatch "^/(fpm-status|fpm-ping)$">
+                  SetHandler "proxy:fcgi://php:9000"
+                  Require ip 127.0.0.1 172.16.0.0/12
+              </LocationMatch>
+
+              ErrorLog /proc/self/fd/2
+              CustomLog /proc/self/fd/1 combined
+          </VirtualHost>
+      - path: compose.override.yaml
+        verbatim: true
+        content: |
+          # keel-generated. Compose merges compose.override.yaml over compose.yaml
+          # with no extra flags.
+          services:
+            apache:
+              image: httpd:2.4
+              # The official image's httpd.conf has every optional include
+              # commented out and no conf.d glob, so a mounted config file would
+              # never be read. -c processes a directive after the config files are
+              # read, which is how the shared tuning gets in without rebuilding
+              # the image. It in turn includes this framework's VirtualHost.
+              command: ["httpd-foreground", "-c", "Include conf/keel-tuning.conf"]
+              restart: unless-stopped
+              depends_on:
+                php:
+                  condition: service_healthy
+              ports:
+                - "${HTTP_PORT:-8080}:80"
+              volumes:
+                - .:/var/www/html:ro
+                # Shared, owned by recipes/infra/web/apache.yaml. The official
+                # image's stock httpd.conf includes nothing from conf.d, so the
+                # command above pulls this file in with -c, which httpd processes
+                # after the config files are read.
+                - ./.keel/apache/keel-tuning.conf:/usr/local/apache2/conf/keel-tuning.conf:ro
+                # This framework's VirtualHost, owned by this recipe. The shared
+                # tuning file ends with `IncludeOptional conf.d/app-*.conf`, which
+                # is relative to ServerRoot, hence /usr/local/apache2/conf.d and
+                # the app- prefix on the filename.
+                - ./docker/apache/conf.d:/usr/local/apache2/conf.d:ro
+              # No healthcheck: the official httpd image ships no HTTP client, so
+              # any check here would be a lie or need a rebuilt image. Probe
+              # /health_check.php, Magento's own endpoint, from your load balancer.
+  # DDEV already runs apache-fpm when asked, with a Magento-aware vhost.
+  ddev: {}

@@ -1,0 +1,85 @@
+id: fastapi-ddev
+schema_version: 2
+kind: env
+env_family: ddev
+label: DDEV
+bin: ddev
+appliesTo: [fastapi]
+provides: [env, docker]
+default: true
+priority: -10
+updated: 2026-08-12
+# A development environment. The daemon below runs uvicorn with --reload, and
+# FastAPI's docs are blunt about that: "The --reload option is useful during
+# development but consumes more resources and is unstable. Do not use --reload
+# in production."
+#
+# The production shape for this framework lives in envs/docker.yaml (uvicorn
+# with --workers, multi-stage image, non-root) and in infra/nginx.yaml or
+# infra/apache.yaml. Selecting nginx or apache alongside this env still writes
+# the server block or VirtualHost, so the deployment configuration lives beside
+# the code. See docs/infra/fastapi.md.
+commands:
+  start: "ddev start"
+  # Where the project can be opened once the build finishes.
+  site_url: "https://{{project}}.ddev.site"
+  # How this environment tears itself down. Used when a build fails partway:
+  # keel removes the directory it created, and without this the containers,
+  # volumes and network it started stay behind holding a bind mount to a
+  # path that no longer exists. The next attempt then reuses that container
+  # and dies with "current working directory is outside of container mount
+  # namespace root".
+  down: "ddev delete -Oy"
+  restart: "ddev restart"
+  exec: "ddev exec"
+  redis_addon: "ddev add-on get ddev/ddev-redis"
+  opensearch_addon: "ddev add-on get ddev/ddev-opensearch"
+  minio_addon: "ddev add-on get ddev/ddev-minio"
+  rabbitmq_addon: "ddev add-on get ddev/ddev-rabbitmq"
+install:
+  # The database comes from the chosen db recipe (which writes .ddev/config.db.yaml),
+  # not from this env: hardcoding it here meant the db choice was decorative.
+  - "ddev config --project-type=generic --webserver-type=generic --docroot='' --disable-settings-management {{db.ddev_flag}}"
+  - "ddev add-on get ddev/ddev-redis"
+files:
+  - path: .ddev/config.fastapi.yaml
+    content: |
+      # Traefik forwards straight to :8000 (generic webserver = no nginx and no
+      # Apache in the local path; under DDEV the reverse proxy is Traefik's).
+      web_environment:
+        - KEEL_DB=postgres
+      web_extra_exposed_ports:
+        - name: fastapi
+          container_port: 8000
+          http_port: 80
+          https_port: 443
+      web_extra_daemons:
+        - name: fastapi
+          # --reload is correct here and only here. See the note at the top.
+          command: "uvicorn main:app --host 0.0.0.0 --port 8000 --reload"
+          directory: /var/www/html
+  - path: .ddev/web-build/Dockerfile.python
+    content: |
+      # uv pinned and copied from the official distroless image rather than
+      # installed with pip: uv's own Docker guidance is
+      # `COPY --from=ghcr.io/astral-sh/uv:0.12.3 /uv /uvx /bin/`, and an
+      # unpinned install resolves to a different uv on every rebuild.
+      COPY --from=ghcr.io/astral-sh/uv:0.12.3 /uv /uvx /bin/
+      # The project venv lives outside the /var/www/html mount so it does not
+      # collide with the host filesystem. `ddev exec` runs as the web user, so
+      # the directory has to be writable by it.
+      RUN mkdir -p /opt/venv && chmod 777 /opt/venv
+      ENV UV_PROJECT_ENVIRONMENT=/opt/venv
+      ENV UV_LINK_MODE=copy
+      ENV VIRTUAL_ENV=/opt/venv
+      ENV PATH="/opt/venv/bin:$PATH"
+  - path: .ddev/commands/web/ruff
+    content: |
+      #!/bin/bash
+      ## Description: run Ruff
+      uv run ruff "$@"
+  - path: .ddev/commands/web/pytest
+    content: |
+      #!/bin/bash
+      ## Description: run pytest
+      uv run pytest "$@"

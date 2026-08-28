@@ -1,0 +1,21 @@
+id: magento-sampledata
+kind: addon
+label: Sample catalog data (Luma demo products)
+appliesTo: [magento, magento-mageos]
+provides: [sampledata]
+updated: 2026-08-07
+# The official Luma demo dataset (250+ products, customers, orders, CMS). It is
+# pulled from repo.magento.com and so needs Composer auth keys in auth.json
+# (Adobe Commerce Marketplace → Access Keys) — keel's Magento key flow writes
+# these. Budget ~1GB+ and several minutes, and run it in developer mode (the
+# framework recipe already sets deploy:mode:set developer). It is a demo store —
+# not for production.
+hooks:
+  pre_build:
+    - message: "Magento sample data (Luma): needs repo.magento.com Composer auth keys (auth.json), ~1GB+ and several minutes, developer mode only. Demo store, not for production."
+install:
+  - "{{magento}} sampledata:deploy"
+  - "{{magento}} setup:upgrade"
+  - "{{magento}} setup:static-content:deploy -f"
+  - "{{magento}} indexer:reindex"
+  - "{{magento}} cache:flush"

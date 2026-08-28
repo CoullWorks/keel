@@ -1,0 +1,9 @@
+id: symfony-debug
+schema_version: 2
+kind: addon
+label: Profiler and debug toolbar
+appliesTo: [symfony]
+default: true
+updated: 2026-08-10
+install:
+  - "{{composer}} require --dev symfony/debug-pack"

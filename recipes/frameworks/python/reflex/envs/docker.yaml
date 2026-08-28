@@ -1,0 +1,385 @@
+id: reflex-docker
+schema_version: 2
+kind: env
+env_family: compose
+label: Docker (compose)
+appliesTo: [reflex]
+provides: [env]
+priority: -10
+updated: 2026-08-12
+# Reflex is structurally unlike the other six: it compiles a JavaScript frontend
+# and runs a separate Python backend, and the two are deployed differently.
+# "Production mode creates an optimized build of your app. By default, the static
+# frontend of the app (HTML, Javascript, CSS) will be exposed on port 3000 and
+# the backend (event handlers) will be listening on port 8000."
+#
+# This env follows the vendor's own `production-compose` example: the image
+# exports the frontend statically at build time and then runs the backend only,
+# so node is not required at runtime. The vendor's README states the payoff:
+# "This type of deployment should use less memory and be more performant since
+# nodejs is not required at runtime."
+#
+# It is also the only framework here that the vendor positively documents as
+# horizontally scalable, and the condition is explicit. state_manager_mode
+# defaults to disk with redis_url unset, which is single instance only. Setting
+# REFLEX_REDIS_URL moves state into Redis, after which the vendor says the
+# backend is "scalable to multiple instances" and Redis is "a single instance
+# ... should share private networking with the backend". Sticky sessions are
+# never mentioned once Redis is in place. Redis is therefore brought up here
+# rather than left optional: without it a second replica silently loses state.
+#
+# A web server in front is a separate choice: add `nginx` or `apache`. Reflex
+# ships a Caddyfile and no nginx or Apache config, so both of those recipes are
+# keel's faithful translation of the vendor's path matcher.
+# See docs/infra/reflex.md.
+commands:
+  # --build so a changed Dockerfile actually rebuilds.
+  start: "docker compose up -d --build"
+  # Where the project can be opened once the build finishes.
+  site_url: "http://localhost:{{http_port}}"
+  # How this environment tears itself down. Used when a build fails partway:
+  # keel removes the directory it created, and without this the containers,
+  # volumes and network it started stay behind holding a bind mount to a
+  # path that no longer exists. The next attempt then reuses that container
+  # and dies with "current working directory is outside of container mount
+  # namespace root".
+  down: "docker compose down -v --remove-orphans"
+  restart: "docker compose restart"
+  create: "docker compose build"
+  # -T because these run from scripts and CI, where there is no TTY.
+  exec: "docker compose exec -T app"
+smoke:
+  - "docker compose ps"
+files:
+  - path: Dockerfile
+    content: |
+      # Two kinds of image, and the distinction is not cosmetic.
+      #
+      # `dev` is what compose builds. It carries no application code and no
+      # dependencies, because the project is bind-mounted from the host: `uv
+      # sync` run through keel writes .venv and uv.lock to your working tree
+      # where they belong, and an edit is live without a rebuild.
+      #
+      # The stages after it build the production image, which copies the source
+      # in and installs without dev dependencies. Build it explicitly with
+      # `docker build --target runtime .`.
+      #
+      # Pointing compose at the production stage instead would look like it
+      # works and would not: with no bind mount, everything uv writes lands in
+      # a layer that the next `--build` discards.
+      FROM python:{{pin.python_version}}-slim-bookworm AS dev
+      COPY --from=ghcr.io/astral-sh/uv:0.12.3 /uv /uvx /bin/
+      WORKDIR /app
+      # The frontend toolchain, which the production stages deliberately confine
+      # to the build stage. Dev needs it here for the opposite reason: this
+      # container runs `reflex run`, which compiles and serves the frontend
+      # itself so an edit is live. Reflex downloads bun on first run and unpacks
+      # it with unzip, and libpq-dev is psycopg's build dependency.
+      RUN apt-get update && apt-get install -y --no-install-recommends \
+            build-essential libpq-dev curl unzip \
+          && rm -rf /var/lib/apt/lists/*
+      # The venv lives in the bind-mounted tree, exactly as it would on the
+      # host, so an editor and a shell outside the container see the same
+      # interpreter and the same packages.
+      ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
+          PATH="/app/.venv/bin:$PATH" \
+          PYTHONUNBUFFERED=1
+      # uid 1000, matching the default first user on a Linux or WSL host, so
+      # files created in the bind mount are owned by you rather than by root.
+      RUN useradd --create-home --uid 1000 dev
+      USER dev
+      # 3000 is the frontend, 8000 the backend. Production exports the frontend
+      # to static files and exposes only 8000; dev serves it live from here, so
+      # both are open and the web server routes between them.
+      EXPOSE 3000 8000
+      # The same probe the production stage uses. Without it here, a web server
+      # depending on `condition: service_healthy` can never start: compose
+      # reports "container has no healthcheck configured" and gives up.
+      # start-period is longer than production's because the first run installs
+      # dependencies into the bind mount before the app can serve anything.
+      HEALTHCHECK --interval=10s --timeout=5s --start-period=180s --retries=10 \
+        CMD python -c "import urllib.request,sys; sys.exit(0 if b'pong' in urllib.request.urlopen('http://127.0.0.1:8000/ping', timeout=3).read() else 1)"
+      # The bind mount has no .venv on a first run, and the framework itself
+      # lives in it, so `uv run` would fail and `restart: unless-stopped` would
+      # turn that into a restart loop that `docker compose exec` cannot attach
+      # to. Wait for the install keel is about to run, then exec the real
+      # server so it still receives SIGTERM as PID 1.
+      #
+      # Not --backend-only. That flag belongs to the production image, where the
+      # frontend has already been exported to static files and something else
+      # serves them. Carrying it into dev left the stack with no frontend at
+      # all: nothing built it and nothing served it, so every request for / met
+      # an empty directory and nginx answered 403. `reflex run` compiles and
+      # serves the frontend on 3000 with hot reload, which is the vendor's own
+      # dev loop and the only shape in which editing a component means anything.
+      #
+      # There is no --frontend-host to pair with --backend-host, and none is
+      # needed: the frontend is `react-router dev --host` in the generated
+      # .web/package.json, and Vite's --host with no value binds 0.0.0.0. So the
+      # web server can reach it at app:3000 as it stands.
+      CMD ["sh", "-c", "until [ -d .venv ]; do echo 'waiting for dependencies'; sleep 2; done; exec uv run reflex run --env dev --backend-host 0.0.0.0"]
+
+      # keel-generated, following the vendor's docker-example/production-compose
+      # Dockerfile. The design points kept from it are the two stages (so the
+      # node build tooling never reaches the runtime image), uv for dependency
+      # install, a non-root user, PYTHONUNBUFFERED=1, STOPSIGNAL SIGKILL, and
+      # migrations before the backend starts. What is changed is called out.
+      #
+      # The base is pinned to a patch release. The vendor uses python:3.13 and
+      # python:3.13-slim; this pins the patch so an unrelated rebuild cannot
+      # become an unreviewed Python upgrade. Reflex "Requires Python 3.10+".
+      FROM python:{{pin.python_version}}-slim-bookworm AS build
+
+      # uv pinned and copied from the official image. The vendor pipes
+      # https://astral.sh/uv/install.sh instead, which resolves to a different uv
+      # on every build; uv's own Docker guidance is the COPY form.
+      COPY --from=ghcr.io/astral-sh/uv:0.12.3 /uv /uvx /bin/
+
+      WORKDIR /app
+      ENV UV_COMPILE_BYTECODE=1 \
+          UV_LINK_MODE=copy \
+          UV_PROJECT_ENVIRONMENT=/app/.venv
+
+      # node and unzip are needed by `reflex init` and `reflex export`, which
+      # "Download all npm dependencies and compile frontend". They exist only in
+      # this stage, which is the whole reason for the split. libpq-dev is
+      # psycopg's build dependency and carries the vendor's own comment: "Install
+      # libpq-dev for psycopg (skip if not using postgres)".
+      RUN apt-get update && apt-get install -y --no-install-recommends \
+            build-essential libpq-dev curl unzip \
+          && rm -rf /var/lib/apt/lists/*
+
+      # Dependencies before application code, so editing a component does not
+      # reinstall the tree. The vendor does COPY . . first.
+      COPY pyproject.toml uv.lock* ./
+      # --frozen fails when the lockfile is out of date instead of quietly
+      # resolving a different tree.
+      # A freshly scaffolded project has no uv.lock yet, so the first build
+      # creates one; commit it, and from then on --frozen is a real guarantee
+      # rather than a formality. The branch exists so that a lockfile which IS
+      # present is never silently regenerated.
+      RUN if [ -f uv.lock ]; then \
+            uv sync --frozen --no-dev --no-install-project; \
+          else \
+            uv lock && uv sync --frozen --no-dev --no-install-project; \
+          fi
+      COPY . .
+      RUN uv sync --frozen --no-dev
+
+      RUN mkdir -p /app/data /app/uploaded_files
+
+      # API_URL is baked into the compiled frontend at export time, not read at
+      # runtime. The vendor is explicit: "when exporting the frontend, set the
+      # API_URL environment variable to the ingress hostname of the backend
+      # service". Get it wrong and the compiled frontend calls localhost:8000
+      # from the user's browser. Override at build time:
+      #   docker compose build --build-arg API_URL=https://api.example.com
+      ARG API_URL=http://localhost:8000
+      ENV API_URL=${API_URL}
+
+      # Deploy templates and prepare the app, then export a static copy of the
+      # frontend. Both are the vendor's commands.
+      RUN uv run reflex init
+      RUN uv run reflex export --frontend-only --no-zip
+
+      # The vendor's shuffle, verbatim in effect: move the client build aside,
+      # delete the rest of .web (the node_modules and intermediate build tree),
+      # then put the client build back. The result is that the backend image
+      # keeps /app/.web/build/client and nothing else from the frontend build.
+      RUN mv .web/build/client /tmp/client \
+          && rm -rf .web && mkdir -p .web/build \
+          && mv /tmp/client .web/build/client
+
+      FROM python:{{pin.python_version}}-slim-bookworm AS runtime
+      # libpq5 is the runtime half of libpq-dev; the compiler and node stay
+      # behind in the build stage.
+      RUN apt-get update && apt-get install -y --no-install-recommends libpq5 \
+          && rm -rf /var/lib/apt/lists/* \
+          && useradd --create-home --uid 10001 app
+      # uv in the runtime stage too: keel's task vocabulary runs `uv run` inside
+      # this container. One pinned static binary; the dev dependency tree is
+      # still absent from the image.
+      COPY --from=ghcr.io/astral-sh/uv:0.12.3 /uv /uvx /bin/
+      WORKDIR /app
+      COPY --from=build --chown=app:app /app /app
+      ENV PATH="/app/.venv/bin:$PATH" \
+          PYTHONUNBUFFERED=1 \
+          PYTHONDONTWRITEBYTECODE=1 \
+          UV_PROJECT_ENVIRONMENT=/app/.venv
+      # Non-root, as the vendor's own image is (it adds a `reflex` user).
+      USER app
+      EXPOSE 8000
+
+      # The vendor's line, with the vendor's comment: "Needed until Reflex
+      # properly passes SIGTERM on backend." Without it `docker stop` waits the
+      # full timeout on every deploy. It also means in-flight requests are not
+      # drained on shutdown, which is why stop_grace_period in compose.yaml is
+      # short rather than generous: there is nothing to wait for.
+      STOPSIGNAL SIGKILL
+
+      # /ping is the documented probe: "Make sure when you access the ingress
+      # endpoint on /ping that it returns 'pong', indicating that the backend is
+      # up an available". The body is checked, not just the status, because that
+      # is what the vendor's sentence actually asserts. A /_health endpoint also
+      # exists in the documented backend endpoint list but its response is
+      # undocumented, so it is not used here.
+      #
+      # urllib rather than curl, because Python is already in the image.
+      HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=5 \
+        CMD python -c "import urllib.request,sys; sys.exit(0 if b'pong' in urllib.request.urlopen('http://127.0.0.1:8000/ping', timeout=3).read() else 1)"
+
+      # The vendor's CMD is `[ -d alembic ] && reflex db migrate; exec reflex run
+      # --env prod --backend-only`. The migration half is deliberately dropped
+      # here and moved to a one-shot `migrate` service in compose.yaml: the
+      # vendor's form runs in every container, so with more than one instance it
+      # is concurrent Alembic, which the vendor does not address.
+      #
+      # --backend-only because the frontend was exported statically above and is
+      # served by the web server. backend_host already defaults to 0.0.0.0, so
+      # no bind flag is needed.
+      CMD ["reflex", "run", "--env", "prod", "--backend-only"]
+
+      # Two config defaults worth changing before this is public:
+      #   cors_allowed_origins defaults to ('*',)
+      #   telemetry_enabled defaults to True
+      # Both are set through rxconfig.py, or through the environment by
+      # prepending REFLEX_ to the parameter name in uppercase.
+  - path: compose.yaml
+    content: |
+      # keel-generated, following the vendor's production-compose example.
+      services:
+        # One-shot migrations, run to completion before the backend starts.
+        # The vendor runs `reflex db migrate` inside every app container's CMD;
+        # with more than one instance that is concurrent Alembic, which the
+        # vendor does not comment on. Splitting it out makes the ordering
+        # explicit and keeps it single-process.
+        migrate:
+          build: .
+          environment:
+            REFLEX_DB_URL: "postgresql+psycopg://db:db@db:5432/db"
+          command: ["sh", "-c", "[ -d alembic ] && reflex db migrate || echo 'no alembic directory: run `reflex db init` first'"]
+          depends_on:
+            db:
+              condition: service_healthy
+          restart: "no"
+
+        app:
+          build:
+            context: .
+            # dev, not a production stage. See the note at the top of the
+            # Dockerfile: without the bind mount below, anything installed into
+            # this container is discarded by the next build.
+            target: dev
+          restart: unless-stopped
+          env_file:
+            # required: false so a checkout without a .env still comes up.
+            # Listing a missing env_file the short way is a hard compose error.
+            - path: .env
+              required: false
+          environment:
+            # Without this, state_manager_mode stays on disk and a second
+            # replica cannot see the first's state. The vendor's own note is
+            # that Redis "allows the backend to run with multiple workers and
+            # service more requests".
+            REFLEX_REDIS_URL: "redis://redis:6379"
+            # The vendor's compose.prod.yaml swaps SQLite for Postgres for the
+            # "more robust and performant" deployment. Note the driver:
+            # postgresql+psycopg is psycopg 3, which is why libpq is installed
+            # in the image.
+            REFLEX_DB_URL: "postgresql+psycopg://db:db@db:5432/db"
+          # expose, not ports: the web server is the only ingress, and it routes
+          # only the four backend paths to this service.
+          expose: ["8000"]
+          volumes:
+            # The project itself, so uv writes .venv and uv.lock to the host
+            # and an edit takes effect without a rebuild.
+            - .:/app
+            # Uploads land on the backend at /_upload and are written to local
+            # disk. The vendor mounts a named volume for exactly this. With more
+            # than one replica this has to become shared storage, because one
+            # instance cannot see another's uploads.
+            - upload-data:/app/uploaded_files
+            # No volume for the exported client build. There used to be one,
+            # published to the web server as /srv on the reasoning that a named
+            # volume is initialised from the image's contents at the path it
+            # covers - which is true, but only of an image that has those
+            # contents. This stack builds the dev stage, and `reflex export` runs
+            # in the build stage, so the volume was initialised from an empty
+            # directory and the web server served nothing but a 403.
+            #
+            # In dev the frontend is served live by `reflex run` on 3000 and
+            # proxied by the web server, so there is nothing on disk to publish.
+            # The production topology still wants it: see the note in
+            # infra/nginx.yaml.
+          depends_on:
+            redis:
+              condition: service_healthy
+            migrate:
+              condition: service_completed_successfully
+          # Short on purpose. STOPSIGNAL is SIGKILL because Reflex "does not pass
+          # SIGTERM on backend", so there is no drain to wait for and a long
+          # window would only slow every deploy down.
+          stop_grace_period: 10s
+
+        db:
+          # The vendor uses the untagged `postgres` image and pins no version.
+          # Major-pinned here to match the shared postgres recipe.
+          # A literal version rather than the db recipe's version var: Reflex is
+          # in no database recipe's appliesTo, so it brings its own Postgres and
+          # that var is never defined. Templated, the tag reached Docker
+          # unsubstituted and failed with "invalid reference format".
+          image: postgres:18
+          restart: unless-stopped
+          environment:
+            POSTGRES_DB: db
+            POSTGRES_USER: db
+            POSTGRES_PASSWORD: db
+          volumes:
+            - pgdata:/var/lib/postgresql
+          healthcheck:
+            # pg_isready answers only once the server accepts connections, so
+            # migrations do not start against a socket that is merely open.
+            test: ["CMD-SHELL", "pg_isready -U db -d db"]
+            interval: 10s
+            timeout: 5s
+            retries: 10
+
+        redis:
+          # The vendor uses the untagged `redis` image. Major-pinned here.
+          image: redis:7-alpine
+          restart: unless-stopped
+          # This holds session state, not the system of record. redis_lock_expiration
+          # is 10000 ms and redis_token_expiration 3600 s, so nothing here is
+          # meant to outlive a restart by much.
+          command: ["redis-server", "--save", "", "--appendonly", "no"]
+          healthcheck:
+            test: ["CMD", "redis-cli", "ping"]
+            interval: 10s
+            timeout: 3s
+            retries: 5
+
+      volumes:
+        pgdata:
+        upload-data:
+  - path: .dockerignore
+    content: |
+      .git
+      .github
+      .venv
+      .keel
+      # The web server's own config and the compose files: mounted by the proxy
+      # container, never needed inside the application image.
+      docker/
+      compose.yaml
+      compose.override.yaml
+      Dockerfile
+      __pycache__
+      *.pyc
+      .env
+      .web
+      assets/external
+      uploaded_files
+      data
+      .pytest_cache
+      .ruff_cache
+      .mypy_cache

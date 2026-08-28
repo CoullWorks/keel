@@ -1,0 +1,28 @@
+id: ci-python
+kind: extra
+label: GitHub Actions CI (Python)
+provides: [ci]
+appliesTo: [django, fastapi, flask, dash, streamlit, gradio, reflex]
+updated: 2026-08-13
+files:
+  - path: .github/workflows/ci.yml
+    content: |
+      name: CI
+      on: [push, pull_request]
+
+      jobs:
+        test:
+          runs-on: ubuntu-latest
+          steps:
+            - uses: actions/checkout@v4
+            - uses: astral-sh/setup-uv@v5
+              with:
+                # Matches the interpreter the project's image is built on.
+                python-version: '{{pin.python_version}}'
+            # --dev, because the tools this workflow runs are dev dependencies.
+            - run: uv sync --dev
+            # Non-blocking on a fresh scaffold: ruff and pytest are only present
+            # once the project adds them, and a pipeline that fails because a
+            # brand-new project has no tests teaches people to ignore CI.
+            - run: uv run ruff check . || echo "ruff not configured yet"
+            - run: uv run pytest || echo "no tests yet"

@@ -1,0 +1,8 @@
+id: woo-sampledata
+kind: addon
+label: Sample catalog data (WooCommerce demo products)
+appliesTo: [woocommerce]
+provides: [sampledata]
+install:
+  - "{{wp}} plugin install wordpress-importer --activate"
+  - "{{wp}} import wp-content/plugins/woocommerce/sample-data/sample_products.xml --authors=create"

@@ -1,0 +1,21 @@
+# Auth as a level:stack generator (Laravel Breeze).
+#
+# The fitness-review "Auth = level: stack generator" primitive: it does not
+# re-describe how Breeze installs — it is a thin, framework-scoped pointer
+# (apply:) at the laravel-breeze addon that already exists. Exposing it here lets
+# Generatables("laravel") offer "add the auth stack for this framework"
+# post-creation, replacing the studio's broken `gen auth` verb.
+id: gen-auth-laravel
+kind: generator
+level: stack
+label: "Authentication (Laravel Breeze - login, register, reset, verify)"
+appliesTo: [laravel]
+provides: [auth]
+apply: [laravel-breeze]
+schema_version: 2
+updated: 2026-08-21
+inputs:
+  - name: stack
+    type: choice
+    label: Breeze stack
+    choices: [blade, react, vue, api]

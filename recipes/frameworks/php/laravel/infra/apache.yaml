@@ -1,0 +1,175 @@
+id: apache-laravel
+schema_version: 2
+kind: config
+label: Laravel VirtualHost for Apache
+updated: 2026-08-12
+# Division of labour. The shared Apache service (recipes/infra/web/apache.yaml)
+# owns .keel/apache/keel-tuning.conf: MPM event tuning, the LoadModule lines for
+# mod_proxy, mod_proxy_fcgi, mod_rewrite and mod_headers, global compression,
+# mod_expires, ServerTokens Prod, the global security headers, and the
+# `IncludeOptional conf.d/app-*.conf` that pulls this file in. This recipe owns
+# one VirtualHost and the compose wiring.
+#
+# Apache here is a real alternative, not mod_php in disguise: PHP still runs in
+# the PHP-FPM pool and Apache reaches it over mod_proxy_fcgi.
+#
+# Laravel publishes no VirtualHost at all, only public/.htaccess in the
+# application skeleton (laravel/laravel, public/.htaccess). The rewrite rules
+# below are that file verbatim, lifted into the VirtualHost so AllowOverride None
+# can stand and Apache stops stat()ing for a .htaccess on every path segment of
+# every request. Symfony's docs make the same recommendation in as many words:
+# "For production, move these rules to the main Apache configuration file (as
+# shown above) to improve performance."
+when:
+  framework: laravel
+  uses: apache
+provision:
+  compose:
+    files:
+      - path: docker/apache/conf.d/app-laravel.conf
+        verbatim: true
+        content: |
+          # keel-generated. Laravel VirtualHost. Included by the shared keel-tuning.conf.
+          <VirtualHost *:80>
+              ServerName localhost
+
+              # public/, never the project root, for the reason Laravel spells
+              # out: serving from the project root "will expose many sensitive
+              # configuration files to the public Internet".
+              DocumentRoot /var/www/html/public
+
+              # PHP is handed to the FPM pool over FastCGI, so mod_php is not
+              # involved anywhere in this stack. Only the front controller is
+              # handed over: Laravel routes everything through public/index.php.
+              <FilesMatch "^index\.php$">
+                  SetHandler "proxy:fcgi://php:9000"
+              </FilesMatch>
+              # Any other .php file under public/ is refused rather than executed.
+              # Laravel's nginx block gets this from its catch-all location; the
+              # shipped .htaccess has no equivalent, so Apache needs it stated.
+              <FilesMatch "^(?!index\.php$).*\.php$">
+                  Require all denied
+              </FilesMatch>
+
+              <Directory /var/www/html/public>
+                  AllowOverride None
+                  Require all granted
+
+                  # index.php, because the httpd image only knows index.html.
+                  #
+                  # Without this, GET / is 403 Forbidden on a working install.
+                  # The front-controller rewrite below is guarded by
+                  # "RewriteCond %{REQUEST_FILENAME} !-d", and for / the request
+                  # filename IS a directory (public/), so the rewrite is skipped
+                  # by design. Apache then falls through to DirectoryIndex, the
+                  # image ships "DirectoryIndex index.html", public/index.html
+                  # does not exist, and Options -Indexes turns the resulting
+                  # directory listing into a refusal.
+                  #
+                  # Laravel's shipped .htaccess does not set this either: it
+                  # assumes a host Apache with mod_php, whose config already
+                  # lists index.php. This stack serves PHP over FastCGI, so
+                  # nothing has added it.
+                  DirectoryIndex index.php
+                  # -MultiViews and -Indexes are from Laravel's own .htaccess.
+                  # +FollowSymLinks is required by mod_rewrite.
+                  Options -MultiViews -Indexes +FollowSymLinks
+
+                  RewriteEngine On
+
+                  # Handle Authorization Header
+                  RewriteCond %{HTTP:Authorization} .
+                  RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+
+                  # Handle X-XSRF-Token Header
+                  RewriteCond %{HTTP:x-xsrf-token} .
+                  RewriteRule .* - [E=HTTP_X_XSRF_TOKEN:%{HTTP:X-XSRF-Token}]
+
+                  # Redirect Trailing Slashes If Not A Folder...
+                  # Worth knowing: this 301 exists only on the Apache side.
+                  # Laravel's nginx block serves $uri/ through try_files instead,
+                  # so the two servers canonicalise URLs differently out of the box.
+                  RewriteCond %{REQUEST_FILENAME} !-d
+                  RewriteCond %{REQUEST_URI} (.+)/$
+                  RewriteRule ^ %1 [L,R=301]
+
+                  # Send Requests To Front Controller...
+                  RewriteCond %{REQUEST_FILENAME} !-d
+                  RewriteCond %{REQUEST_FILENAME} !-f
+                  RewriteRule ^ index.php [L]
+              </Directory>
+
+              # Dotfiles. Laravel's nginx block denies them and the shipped
+              # .htaccess does not, so an Apache deployment assembled from the
+              # .htaccess alone is measurably less protected. /.well-known stays
+              # reachable for ACME.
+              <FilesMatch "^\.(?!well-known)">
+                  Require all denied
+              </FilesMatch>
+
+              # FPM's status and ping pages, declared in the pool. Same
+              # restriction as the nginx config: 172.16.0.0/12 is Docker's default
+              # bridge range.
+              <LocationMatch "^/(fpm-status|fpm-ping)$">
+                  SetHandler "proxy:fcgi://php:9000"
+                  Require ip 127.0.0.1 172.16.0.0/12
+              </LocationMatch>
+
+              # THE TRAP, and the reason this file sets no PHP values whatsoever.
+              # php_value and php_flag are directives supplied by mod_php. Under
+              # PHP-FPM with mod_proxy_fcgi mod_php is not loaded, so they are
+              # either a fatal "Invalid command 'php_value'" or, when wrapped in
+              # <IfModule mod_php.c> the way Magento's pub/.htaccess wraps
+              # memory_limit and max_execution_time, silently skipped with nothing
+              # reporting it. Every PHP value for this stack is set where both
+              # servers honour it: docker/php/conf.d/10-laravel.ini and
+              # docker/php/php-fpm.d/zzz-laravel-pool.conf.
+
+              ErrorLog /proc/self/fd/2
+              CustomLog /proc/self/fd/1 combined
+          </VirtualHost>
+      - path: compose.override.yaml
+        verbatim: true
+        content: |
+          # keel-generated. Compose merges compose.override.yaml over compose.yaml
+          # with no extra flags.
+          services:
+            apache:
+              # Apache HTTPD 2.4, the line WordPress's hosting handbook recommends
+              # and the only 2.4-era line still maintained upstream.
+              image: httpd:2.4
+              # The official image's httpd.conf has every optional include
+              # commented out and no conf.d glob, so a mounted config file would
+              # never be read. -c processes a directive after the config files are
+              # read, which is how the shared tuning gets in without rebuilding
+              # the image. It in turn includes this framework's VirtualHost.
+              command: ["httpd-foreground", "-c", "Include conf/keel-tuning.conf"]
+              restart: unless-stopped
+              depends_on:
+                php:
+                  condition: service_healthy
+              ports:
+                - "${HTTP_PORT:-8080}:80"
+              volumes:
+                - .:/var/www/html:ro
+                # Shared, owned by recipes/infra/web/apache.yaml. The official
+                # image's stock httpd.conf includes nothing from conf.d, so the
+                # command above pulls this file in with -c, which httpd processes
+                # after the config files are read.
+                - ./.keel/apache/keel-tuning.conf:/usr/local/apache2/conf/keel-tuning.conf:ro
+                # This framework's VirtualHost, owned by this recipe. The shared
+                # tuning file ends with `IncludeOptional conf.d/app-*.conf`, which
+                # is relative to ServerRoot, hence /usr/local/apache2/conf.d and
+                # the app- prefix on the filename.
+                - ./docker/apache/conf.d:/usr/local/apache2/conf.d:ro
+              # No healthcheck: the official httpd image ships no HTTP client (no
+              # curl, no wget), so any check here would either be a lie or need a
+              # rebuilt image. The php service is health-checked over FastCGI,
+              # which is where a real failure shows up. Probe /up from your load
+              # balancer: Laravel returns 200 there only when the application
+              # booted without exceptions.
+  # DDEV already runs apache-fpm when asked; the service recipe flips its
+  # webserver type and DDEV supplies the Laravel-aware vhost.
+  ddev: {}
+  sail: {}
+  local: {}

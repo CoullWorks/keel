@@ -1,0 +1,298 @@
+id: flask-login
+schema_version: 2
+kind: addon
+label: "Flask-Login (session auth: login, logout, protected routes)"
+category: Auth
+appliesTo: [flask]
+requires: [flask]
+provides: [auth]
+updated: 2026-08-24
+pins:
+  flask-login: ">=0.6.3"
+# Flask-Login is the canonical Flask session-auth extension: it manages the
+# user session (login_user/logout_user), gates routes with @login_required, and
+# exposes the signed-in user as current_user. Passwords are hashed with
+# Werkzeug's generate_password_hash/check_password_hash, which ship with Flask
+# itself, so no extra crypto dependency is needed. The user store here is an
+# in-memory STUB (one demo account) so the flow boots with zero database setup;
+# swap it for a real users table before you ship.
+install:
+  # uv add is idempotent and matches the base Flask stack, which is uv-managed.
+  # Werkzeug is a Flask dependency already, so only flask-login is added.
+  - "{{exec}} uv add flask-login"
+files:
+  # The auth blueprint plus its Flask-Login wiring, shipped as an importable
+  # module so it does not overwrite the user's app.py. app.py is user code:
+  # AUTH-SETUP.md documents the one-line wiring to register this. The module
+  # also exposes create_auth_app(), a tiny factory the test uses to exercise the
+  # blueprint on its own, so the test passes without editing app.py.
+  - path: auth.py
+    content: |
+      # keel-generated. Flask-Login session auth as an importable blueprint.
+      # Wire it into your app.py with two lines (see AUTH-SETUP.md):
+      #   from auth import auth_bp, login_manager
+      #   login_manager.init_app(app); app.register_blueprint(auth_bp)
+      import os
+
+      from flask import (
+          Blueprint,
+          Flask,
+          jsonify,
+          redirect,
+          request,
+          url_for,
+      )
+      from flask_login import (
+          LoginManager,
+          UserMixin,
+          current_user,
+          login_required,
+          login_user,
+          logout_user,
+      )
+      from werkzeug.security import check_password_hash, generate_password_hash
+
+      # LoginManager is created here but not bound to an app: call
+      # login_manager.init_app(app) once from your app factory (or app.py).
+      # login_view names the endpoint to redirect anonymous users to; because
+      # this blueprint is registered without a url_prefix, that is "auth.login".
+      login_manager = LoginManager()
+      login_manager.login_view = "auth.login"
+
+      auth_bp = Blueprint("auth", __name__)
+
+
+      class User(UserMixin):
+          # UserMixin supplies is_authenticated, is_active, is_anonymous and
+          # get_id(), so Flask-Login can manage the session with no extra code.
+          def __init__(self, user_id: str, email: str, password_hash: str):
+              self.id = user_id
+              self.email = email
+              self.password_hash = password_hash
+
+
+      # STUB user store: a single in-memory demo account so login works with zero
+      # database setup. Replace _USERS (and the two helpers below) with a real
+      # lookup against your users table. Never store plaintext passwords: the
+      # value here is a Werkzeug hash of "password123", generated at import time.
+      # Demo login: demo@example.com / password123
+      _USERS: dict[str, User] = {}
+
+
+      def _seed_demo_user() -> None:
+          demo = User(
+              user_id="1",
+              email="demo@example.com",
+              password_hash=generate_password_hash("password123"),
+          )
+          _USERS[demo.id] = demo
+
+
+      _seed_demo_user()
+
+
+      def _find_by_email(email: str) -> User | None:
+          for user in _USERS.values():
+              if user.email == email:
+                  return user
+          return None
+
+
+      @login_manager.user_loader
+      def load_user(user_id: str) -> User | None:
+          # Flask-Login calls this with the stored id (a string) on every
+          # request to rebuild current_user. Return None, do not raise, for an
+          # unknown id.
+          return _USERS.get(user_id)
+
+
+      @auth_bp.get("/login")
+      def login_form():
+          # Minimal HTML form so the flow is usable in a browser. Your real app
+          # will render a template instead.
+          return (
+              "<form method='post' action='/login'>"
+              "<input name='email' placeholder='Email'>"
+              "<input name='password' type='password' placeholder='Password'>"
+              "<button type='submit'>Sign in</button>"
+              "</form>"
+          )
+
+
+      @auth_bp.post("/login")
+      def login():
+          email = request.form.get("email", "")
+          password = request.form.get("password", "")
+          user = _find_by_email(email)
+          if user is None or not check_password_hash(user.password_hash, password):
+              return jsonify({"error": "invalid credentials"}), 401
+          login_user(user)
+          return jsonify({"ok": True, "email": user.email})
+
+
+      @auth_bp.post("/register")
+      def register():
+          # STUB: creates an in-memory account so the register flow is real.
+          # Persist to your users table (with a hashed password) in production.
+          email = request.form.get("email", "")
+          password = request.form.get("password", "")
+          if not email or not password:
+              return jsonify({"error": "email and password required"}), 422
+          if _find_by_email(email) is not None:
+              return jsonify({"error": "email already registered"}), 409
+          new_id = str(len(_USERS) + 1)
+          _USERS[new_id] = User(
+              user_id=new_id,
+              email=email,
+              password_hash=generate_password_hash(password),
+          )
+          return jsonify({"ok": True, "email": email}), 201
+
+
+      @auth_bp.post("/logout")
+      @login_required
+      def logout():
+          logout_user()
+          return jsonify({"ok": True})
+
+
+      @auth_bp.get("/protected")
+      @login_required
+      def protected():
+          # A route only a signed-in user can reach. Anonymous requests are sent
+          # to login_view (a 302 redirect), or get a 401 when login_view is unset.
+          return jsonify({"ok": True, "email": current_user.email})
+
+
+      def create_auth_app() -> Flask:
+          # A self-contained app that wires this blueprint, used by the test and
+          # handy for a quick manual run. Your project uses its own app.py: see
+          # AUTH-SETUP.md for the two-line wiring.
+          app = Flask(__name__)
+          app.config["SECRET_KEY"] = os.environ.get("FLASK_SECRET_KEY", "dev-only-change-me")
+          login_manager.init_app(app)
+          app.register_blueprint(auth_bp)
+          return app
+
+
+      if __name__ == "__main__":
+          create_auth_app().run(debug=True)
+  # A pytest that drives the blueprint through Flask's own test client. It builds
+  # its own app via create_auth_app(), so it passes without any edit to app.py,
+  # and runs under the base's `uv run pytest`.
+  - path: tests/test_auth.py
+    content: |
+      # keel-generated. Exercises the Flask-Login blueprint end to end through
+      # Flask's test client: a good login succeeds, a bad password is rejected,
+      # and the protected route blocks anonymous requests but serves a signed-in
+      # user. Uses create_auth_app() so it needs no changes to app.py.
+      import pytest
+
+      from auth import create_auth_app
+
+
+      @pytest.fixture
+      def client():
+          app = create_auth_app()
+          app.config["TESTING"] = True
+          return app.test_client()
+
+
+      def test_login_succeeds_with_demo_credentials(client):
+          resp = client.post(
+              "/login",
+              data={"email": "demo@example.com", "password": "password123"},
+          )
+          assert resp.status_code == 200
+          assert resp.get_json()["ok"] is True
+
+
+      def test_login_rejects_a_bad_password(client):
+          resp = client.post(
+              "/login",
+              data={"email": "demo@example.com", "password": "wrong"},
+          )
+          assert resp.status_code == 401
+
+
+      def test_protected_route_blocks_anonymous_users(client):
+          # login_view is set, so Flask-Login redirects (302) an anonymous
+          # request to the login page rather than serving the protected view.
+          resp = client.get("/protected")
+          assert resp.status_code in (302, 401)
+
+
+      def test_protected_route_serves_a_logged_in_user(client):
+          client.post(
+              "/login",
+              data={"email": "demo@example.com", "password": "password123"},
+          )
+          resp = client.get("/protected")
+          assert resp.status_code == 200
+          assert resp.get_json()["email"] == "demo@example.com"
+  # SECRET_KEY signs the session cookie. Flask-Login refuses to work without it.
+  # Written to .env (git-ignored by the base .gitignore) and documented in
+  # .env.example so `keel secrets sync` can fill it.
+  - path: .env
+    content: |
+      # keel-generated. Flask reads FLASK_SECRET_KEY to sign the session cookie
+      # that Flask-Login relies on. Keep it out of git (the base .gitignore
+      # already ignores .env). Generate a real one with:
+      #   python -c "import secrets; print(secrets.token_hex(32))"
+      FLASK_SECRET_KEY=change-me
+  - path: .env.example
+    content: |
+      # keel-generated. Copy to .env and fill in. Generate secrets with:
+      #   keel secrets sync
+      # Flask-Login needs a signing key for the session cookie.
+      FLASK_SECRET_KEY=change-me
+  - path: AUTH-SETUP.md
+    content: |
+      <!-- keel-generated -->
+      # Flask-Login (session auth) - wired by keel
+
+      keel scaffolded Flask-Login into this Flask app. The auth lives in an
+      importable module (`auth.py`) so it did not overwrite your `app.py`. The
+      only steps left are two lines of wiring and swapping the stubbed user
+      store for your own.
+
+      ## What's wired
+      - `auth.py` - a Flask blueprint (`auth_bp`) with `/login`, `/logout`,
+        `/register` and a `@login_required` `/protected` route, plus the
+        `login_manager` (LoginManager) and a `User(UserMixin)` model.
+      - A **STUB in-memory user store** with one demo account
+        (`demo@example.com` / `password123`), password hashed with Werkzeug's
+        `generate_password_hash`. Replace it with a real users table.
+      - `tests/test_auth.py` - drives the blueprint through Flask's test client
+        (login works, bad password is 401, the protected route blocks anonymous
+        users). Runs under `keel run test` (`uv run pytest`).
+      - `.env` - `FLASK_SECRET_KEY`, the key that signs the session cookie.
+
+      ## Wire it into your app (two lines)
+      Add this to your `app.py`, just after `app = Flask(__name__)`:
+
+      ```python
+      import os
+      from auth import auth_bp, login_manager
+
+      app.config["SECRET_KEY"] = os.environ["FLASK_SECRET_KEY"]
+      login_manager.init_app(app)
+      app.register_blueprint(auth_bp)
+      ```
+
+      With no `url_prefix` the routes are `/login`, `/logout`, `/register` and
+      `/protected`. Pass `url_prefix="/auth"` to `register_blueprint` to move
+      them under `/auth/*` (then update `login_manager.login_view` accordingly).
+
+      ## Before you ship
+      1. Generate a real secret and put it in `.env`:
+         `python -c "import secrets; print(secrets.token_hex(32))"`.
+      2. Replace the `_USERS` STUB in `auth.py` with a real lookup against your
+         database (SQLAlchemy, etc.). Store only the Werkzeug password hash,
+         never the plaintext.
+      3. Point `load_user` at that table and make `register` persist there.
+smoke:
+  # Self-contained: the test builds its own app via create_auth_app(), so it
+  # passes on its own without any wiring into app.py. Same runner as `keel run
+  # test`. Under a native env {{exec}} renders empty.
+  - "{{exec}} uv run pytest tests/test_auth.py"

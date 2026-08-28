@@ -1,0 +1,152 @@
+id: apache-nuxt
+schema_version: 2
+kind: config
+label: Nuxt VirtualHost for Apache
+updated: 2026-08-12
+# Written from docs/infra/nuxt.md plus the Apache 2.4 module reference, and the
+# honest headline is that none of this is vendor guidance.
+#
+# Nuxt v4 and Nitro publish no reverse proxy configuration of any kind. The only
+# proxy block Nuxt has ever published is an nginx one in the Nuxt 2 legacy
+# documentation, written for a pre-Nitro server and bannered as superseded by
+# the site itself. There has never been a Nuxt Apache configuration. Everything
+# below is keel's, translated from that legacy block's intent plus the Apache
+# module reference, and the recipe says so rather than implying endorsement.
+#
+# Division of labour. The shared Apache service (recipes/infra/web/apache.yaml)
+# owns .keel/apache/keel-tuning.conf: MPM event tuning, the LoadModule lines for the
+# proxy modules, global compression, mod_expires, ServerTokens Prod,
+# ServerSignature Off, TraceEnable Off, the global security headers, and the
+# `IncludeOptional conf.d/app-*.conf` that pulls this file in.
+when:
+  framework: nuxt
+  uses: apache
+files:
+  - path: docker/apache/conf.d/app-nuxt.conf
+    content: |
+      # Nuxt on the Nitro node-server preset, proxied. Included by the shared
+      # httpd.conf.
+      <VirtualHost *:80>
+          ServerName localhost
+
+          ProxyRequests Off
+
+          # mod_proxy_http adds X-Forwarded-For, X-Forwarded-Host and
+          # X-Forwarded-Server itself, and warns they "will contain more than
+          # one (comma-separated) value if the original request already
+          # contained one of these headers". Whether Nitro reads any of them is
+          # undocumented, so nothing in the framework validates them and the
+          # client's copy is cleared first on principle.
+          RequestHeader unset X-Forwarded-For
+          RequestHeader unset X-Forwarded-Host
+          RequestHeader unset X-Forwarded-Server
+          # mod_proxy_http does NOT add X-Forwarded-Proto; the documented list
+          # is For, Host and Server only. The Nuxt 2 legacy block set it, which
+          # is the only reason it appears here. Change to "https" when TLS
+          # terminates at this vhost.
+          RequestHeader set X-Forwarded-Proto "http"
+
+          ProxyPreserveHost On
+
+          # upgrade=websocket rather than mod_proxy_wstunnel, which the vendor
+          # marks Deprecated: "Since Apache HTTP Server 2.4.47, protocol Upgrade
+          # (tunneling) can be better handled by mod_proxy_http." The
+          # httpd:2.4-alpine image is 2.4.68. In production nothing upgrades;
+          # this is for the Vite HMR WebSocket in development, which Nuxt does
+          # not document proxying.
+          #
+          # timeout=60 matches the one minute read timeout in the Nuxt 2 legacy
+          # nginx block, the only proxy number Nuxt has ever published. ttl=50
+          # retires a pooled backend connection before Node's own idle close
+          # can pull it out from under Apache, which is the mechanism behind the
+          # intermittent 502 AdonisJS documents for every Node framework.
+          ProxyPass        / http://app:3000/ upgrade=websocket connectiontimeout=5 timeout=60 ttl=50
+          ProxyPassReverse / http://app:3000/
+
+          # /_nuxt/ is where Nitro puts the hashed client build assets. Nuxt
+          # publishes NO Cache-Control guidance, so this value is keel's
+          # convention, justified only by the filenames being content-hashed.
+          # Scoped to that path and nowhere else: the HTML around these assets
+          # is rendered per request and must not be cached, which is why the
+          # shared keel-tuning.conf's mod_expires configuration must not set a global
+          # ExpiresDefault.
+          #
+          # `always` puts the header in the table mod_headers documents as the
+          # one whose contents "are added to the response even on error", and
+          # `set` replaces rather than appends, so the app cannot leave a second
+          # Cache-Control alongside it.
+          <LocationMatch "^/_nuxt/">
+              Header always set Cache-Control "public, max-age=31536000, immutable"
+          </LocationMatch>
+
+          # LimitRequestBody alone does NOT cap a proxied request, and this is
+          # not a guess: it was tested against httpd 2.4.68 in this exact
+          # topology. With LimitRequestBody set on the vhost, a POST an order of
+          # magnitude over the limit still reached the backend with a 200. The
+          # directive is enforced when Apache itself serves the request, not
+          # when mod_proxy_http streams the body through to a backend. So the
+          # rewrite below is what actually rejects it. [R=413] aborts with that
+          # status rather than redirecting, because mod_rewrite treats any code
+          # outside 300-399 as an abort.
+          #
+          # Caveat worth knowing: this reads the declared Content-Length, so a
+          # chunked upload that sends none is not caught. nginx's
+          # client_max_body_size covers both cases. Keep the application's own
+          # body limit as the backstop either way.
+          RewriteEngine On
+          RewriteCond expr "%{HTTP:Content-Length} -gt 1048576"
+          RewriteRule ^ - [R=413,L]
+          # LimitRequestBody defaults to 0, unlimited. Nuxt and Nitro publish no
+          # body-size guidance whatsoever, so 1048576 is keel's number and there
+          # is no framework limit to align it with.
+          LimitRequestBody 1048576
+      </VirtualHost>
+
+      # Apache has no one-line equivalent of nginx's `return 200`, so there is
+      # no proxy-local health endpoint. The container health check probes the
+      # app through this vhost, which proves the whole proxy path.
+      #
+      # Streaming: Nitro streams responses and Apache implements no
+      # X-Accel-Buffering equivalent. mod_proxy_http forwards the response as it
+      # reads it rather than accumulating the whole body, so streaming works
+      # through this vhost, but that is keel's reading of the module and not a
+      # statement either vendor makes.
+provision:
+  compose:
+    files:
+      - path: compose.override.yaml
+        content: |
+          # Compose merges compose.override.yaml over compose.yaml with no extra
+          # flags, so the app service written by the env recipe is untouched.
+          services:
+            apache:
+              image: httpd:2.4-alpine
+              # The stock httpd.conf is left in place: it loads mpm_event and the base
+              # module set. -c appends this directive after it is read, pulling in the
+              # shared tuning and this framework's VirtualHost. Without it the image
+              # starts on stock config and serves its default page - it does not fail.
+              command: ["httpd-foreground", "-c", "Include conf/keel-tuning.conf"]
+              restart: unless-stopped
+              depends_on:
+                app:
+                  condition: service_healthy
+              ports:
+                - "${HTTP_PORT:-8080}:80"
+              volumes:
+                # Shared, owned by recipes/infra/web/apache.yaml.
+                - ./.keel/apache/keel-tuning.conf:/usr/local/apache2/conf/keel-tuning.conf:ro
+                # This framework's VirtualHost, owned by this recipe.
+                - ./docker/apache/conf.d:/usr/local/apache2/conf.d:ro
+              healthcheck:
+                test: ["CMD", "wget", "-qO-", "http://127.0.0.1/"]
+                interval: 15s
+                timeout: 5s
+                retries: 5
+                start_period: 10s
+              # Nitro's NITRO_SHUTDOWN_TIMEOUT defaults to 30000 ms, so the app
+              # can take 30 seconds to drain. The proxy gets the same.
+              stop_grace_period: 30s
+  # Native env: no container to add. The VirtualHost above still applies, but
+  # change the ProxyPass target to http://127.0.0.1:3000/, which is what the
+  # Nuxt 2 legacy nginx block did.
+  local: {}

@@ -1,0 +1,112 @@
+id: apache-astro
+schema_version: 2
+kind: config
+label: Astro VirtualHost for Apache (static)
+updated: 2026-08-12
+# Written from docs/infra/astro.md plus the Apache 2.4 core reference. Astro
+# publishes four Dockerfiles and one of them is "a static Apache variant copying
+# dist/ into /usr/local/apache2/htdocs/ on httpd:2.4", so the document root
+# below is the vendor's. The VirtualHost itself is not published, so it is
+# keel's translation of Astro's nginx config.
+#
+# Astro is the one framework of the nine that is not proxied: it is static by
+# default and the web server IS the runtime image, so there is no
+# compose.override.yaml and no second container.
+#
+# The fallback semantics are the point of this file. Astro's own nginx config
+# is `try_files $uri $uri/index.html =404` and deliberately not an SPA
+# catch-all: a prerendered multi-page site has real 404s and should return them.
+# The correct Apache translation is to do NOTHING special, because
+# DirectoryIndex plus the default handler already resolves file, then directory
+# index, then 404, which is exactly what that try_files expresses.
+#
+# FallbackResource is therefore deliberately NOT used. FallbackResource exists
+# to serve a resource "when the request would otherwise result in a 404 (Not
+# Found) error", which is the SPA catch-all Astro's own config avoids. A
+# RewriteRule with a [L] to index.html would be the same mistake in a different
+# spelling. If a project is deliberately a client-routed SPA, which Astro is not
+# by default, add `FallbackResource /index.html` and accept that genuine 404s
+# disappear.
+#
+# Division of labour. The shared Apache service (recipes/infra/web/apache.yaml)
+# owns .keel/apache/keel-tuning.conf: MPM event tuning, LoadModule lines, global
+# compression (Astro publishes a gzip type list, which belongs there),
+# mod_expires, ServerTokens Prod, ServerSignature Off, TraceEnable Off, the
+# global security headers, and the `IncludeOptional conf.d/app-*.conf` that
+# pulls this file in.
+when:
+  framework: astro
+  uses: apache
+patch:
+  - file: .env
+    # Selects the Dockerfile stage that serves dist/ from httpd:2.4-alpine with
+    # the shared keel-tuning.conf and this VirtualHost, instead of the env recipe's
+    # default nginx stage.
+    set:
+      WEB_TARGET: "apache-runtime"
+      # The static stages serve on 80; dev serves on 4321. These move together.
+      APP_PORT: "80"
+files:
+  - path: docker/apache/conf.d/app-astro.conf
+    content: |
+      # Astro, static. Included by the shared keel-tuning.conf.
+      <VirtualHost *:80>
+          ServerName localhost
+
+          # Astro's own Apache Dockerfile copies dist/ here.
+          DocumentRoot "/usr/local/apache2/htdocs"
+
+          # This pair is the Apache translation of Astro's
+          # `try_files $uri $uri/index.html =404`: serve the file if it exists,
+          # otherwise the directory's index.html, otherwise a real 404. Nothing
+          # further is needed, and nothing further should be added. See the note
+          # at the top of this recipe about FallbackResource.
+          DirectoryIndex index.html
+
+          <Directory "/usr/local/apache2/htdocs">
+              Require all granted
+              # Nothing in a built Astro site needs a .htaccess, and honouring
+              # one would let anything writable into the document root change
+              # the server's behaviour.
+              AllowOverride None
+              # No directory listings: without this, a directory with no
+              # index.html is enumerated instead of returning the 404 the
+              # try_files semantics promise.
+              Options -Indexes +FollowSymLinks
+          </Directory>
+
+          # The error page half of Astro's published config
+          # (`error_page 404 /404.html;` plus an `internal` location).
+          ErrorDocument 404 /404.html
+
+          # /_astro/ is where Astro puts its content-hashed assets. The header
+          # value is Astro's own, documented for the standalone Node server's
+          # asset serving: "Assets in the dist/client/_astro/ folder are the
+          # ones that Astro has built" and receive
+          # Cache-Control: public, max-age=31536000, immutable. Applying it from
+          # a web server for a static build is keel's extrapolation, because the
+          # published server config contains no caching directives at all. Safe
+          # because the filenames are content-hashed.
+          #
+          # Scoped to this path and nowhere else: the HTML around these assets
+          # is not fingerprinted and must not be cached, which is why the shared
+          # httpd.conf's mod_expires configuration must not set a global
+          # ExpiresDefault. `always` puts the header in the table mod_headers
+          # documents as the one whose contents "are added to the response even
+          # on error", and `set` replaces rather than appends.
+          <LocationMatch "^/_astro/">
+              Header always set Cache-Control "public, max-age=31536000, immutable"
+          </LocationMatch>
+
+          # LimitRequestBody defaults to 0, unlimited. This is a static document
+          # root: nothing here accepts a request body, so the limit is set low
+          # deliberately rather than left at a value sized for an application.
+          LimitRequestBody 65536
+      </VirtualHost>
+provision:
+  # No compose fragment: the web server is the runtime image, selected by
+  # WEB_TARGET above, so there is no extra container to add.
+  compose: {}
+  # Native env: serve dist/ from a host Apache. The VirtualHost above applies
+  # with DocumentRoot changed to wherever dist/ was copied.
+  local: {}

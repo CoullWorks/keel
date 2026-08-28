@@ -1,0 +1,17 @@
+id: fastapi-pytest
+schema_version: 2
+kind: addon
+label: pytest + httpx + coverage
+appliesTo: [fastapi]
+provides: [tests]
+updated: 2026-08-22
+# The FastAPI base declares pytest + httpx (the TestClient's transport) in its
+# dev group; this addon makes the suite explicit and adds coverage, so opting
+# into "the test suite" yields a runner that reports coverage, not just pass/fail.
+# uv add is idempotent, so re-declaring the base's runners is a no-op.
+install:
+  - "{{exec}} uv add --dev pytest httpx pytest-cov"
+smoke:
+  # Runs the suite against the base's tests/test_health.py, the same command
+  # `keel run test` uses.
+  - "{{exec}} uv run pytest"

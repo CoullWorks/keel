@@ -1,0 +1,97 @@
+id: magento-ddev
+schema_version: 2
+kind: env
+env_family: ddev
+label: DDEV
+bin: ddev
+appliesTo: [magento, magento-mageos]
+provides: [env, docker]
+default: true
+priority: -10 # provision DDEV before the app is created
+commands:
+  start: "ddev start"
+  # How this environment tears itself down. Used when a build fails partway:
+  # keel removes the directory it created, and without this the containers,
+  # volumes and network it started stay behind holding a bind mount to a
+  # path that no longer exists. The next attempt then reuses that container
+  # and dies with "current working directory is outside of container mount
+  # namespace root".
+  down: "ddev delete -Oy"
+  restart: "ddev restart"
+  exec: "ddev exec"
+  composer: "ddev composer"
+  magento: "ddev magento"
+  site_url: "https://{{project}}.ddev.site"
+  settings_reenable: "ddev config --disable-settings-management=false"
+  # DDEV has no cron container to hold back: its web container runs the crontab
+  # keel writes, and there is no second bin/magento racing the build. The token
+  # renders empty and the step is skipped.
+  cron_start: ""
+  opensearch_addon: "ddev add-on get ddev/ddev-opensearch"
+  elasticsearch_addon: "ddev add-on get ddev/ddev-elasticsearch"
+  meilisearch_addon: "ddev add-on get ddev/ddev-meilisearch"
+  minio_addon: "ddev add-on get ddev/ddev-minio"
+  rabbitmq_addon: "ddev add-on get ddev/ddev-rabbitmq"
+  memcached_addon: "ddev add-on get ddev/ddev-memcached"
+  mongo_addon: "ddev add-on get ddev/ddev-mongo"
+  solr_addon: "ddev add-on get ddev/ddev-solr"
+  redis_addon: "ddev add-on get ddev/ddev-redis"
+  varnish_addon: "ddev add-on get ddev/ddev-varnish"
+  webserver_nginx: "ddev config --webserver-type=nginx-fpm"
+  webserver_apache: "ddev config --webserver-type=apache-fpm"
+files:
+  # DDEV already serves through PHP-FPM behind nginx (nginx-fpm) or Apache
+  # (apache-fpm), and the shared nginx / apache service recipes flip between them
+  # with the webserver_* tokens above. What DDEV does not do is tune PHP for
+  # Magento, and two of these are not optional even locally.
+  - path: .ddev/php/keel-magento.ini
+    verbatim: true
+    content: |
+      ; keel-generated. Magento development PHP settings for DDEV.
+      ; NOT the production set: that is docker/php/conf.d/10-magento.ini, written by the
+      ; Docker envs, and it carries Adobe's full numbers.
+      [PHP]
+      ; Adobe's own figures: 1G to compile code or deploy static assets, 2G to
+      ; debug. Local work does both. docs/infra/magento.md, source 3.
+      memory_limit = 2G
+      max_execution_time = 18000
+
+      ; Adobe documents these twice with the same values and calls the realpath
+      ; cache a performance lever: too low or too high "adds additional overhead
+      ; during cache generation which slows performance". They cost nothing
+      ; locally and setup:di:compile is noticeably faster with them.
+      ; docs/infra/magento.md, sources 3 and 8.
+      realpath_cache_size = 10M
+      realpath_cache_ttl = 7200
+
+      [opcache]
+      ; HARD PREREQUISITE, not a tuning choice. Magento's code generation reads
+      ; annotations from doc comments at runtime, so save_comments = 0 breaks the
+      ; site in ways that point at anything but opcache.
+      ; docs/infra/magento.md, source 3.
+      opcache.save_comments = 1
+
+      ; 1, not Adobe's production 0. Your working tree is bind-mounted under DDEV
+      ; and you expect an edit to take effect on reload. validate_timestamps = 0
+      ; here means you edit a file, reload, and see the old code with nothing
+      ; explaining why.
+      opcache.validate_timestamps = 1
+      opcache.revalidate_freq = 0
+
+      ; Adobe's production value is 60000 because Magento generates tens of
+      ; thousands of files under generated/ and PHP's default of 10000 is far too
+      ; low. That is just as true locally. The manual rounds this up to 65407, the
+      ; next prime in its documented set.
+      opcache.max_accelerated_files = 60000
+      opcache.memory_consumption = 512
+      opcache.interned_strings_buffer = 64
+install:
+  # Magento's webroot is pub/; OpenSearch is the only supported catalog engine
+  # from 2.4.8. --disable-settings-management stops DDEV clobbering env.php during
+  # install (re-enabled by the framework recipe afterwards).
+  - "ddev config --project-type=magento2 --docroot=pub --upload-dirs=media --disable-settings-management --php-version=8.3 {{db.ddev_flag}}"
+  - "ddev add-on get ddev/ddev-opensearch"
+  - "ddev add-on get ddev/ddev-redis"
+  - "ddev start"
+smoke:
+  - "ddev describe"

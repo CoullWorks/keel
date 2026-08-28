@@ -1,0 +1,59 @@
+id: nextjs-daisyui
+kind: addon
+label: DaisyUI (Tailwind component library)
+category: UI kit
+appliesTo: [nextjs]
+requires: [nextjs, tailwind]
+provides: [daisyui, ui-library]
+priority: 41 # after the Tailwind addon (40)
+install:
+  - "{{exec}} npm install daisyui"
+smoke:
+  - "{{exec}} npm run build"
+files:
+  - path: app/globals.css
+    content: |
+      @import "tailwindcss";
+      @plugin "daisyui";
+  - path: app/page.tsx
+    content: |
+      // keel: a production-ready landing page built from daisyUI components.
+      const features = [
+        ["daisyUI", "Semantic component classes on top of Tailwind."],
+        ["Theming", "Swap the whole look with a data-theme attribute."],
+        ["keel-managed", "keel run dev · test · build, one vocabulary."],
+      ];
+
+      export default function Home() {
+        return (
+          <main className="min-h-screen bg-base-200 text-base-content">
+            <div className="mx-auto max-w-3xl px-6 py-20">
+              <div className="badge badge-success gap-2">running</div>
+              <h1 className="mt-6 text-4xl font-bold">Your Next.js app is running</h1>
+              <p className="mt-4 text-base-content/70">
+                Built with daisyUI + Tailwind, scaffolded by keel. Edit{" "}
+                <code className="rounded bg-base-300 px-1.5 py-0.5">app/page.tsx</code> to make it
+                yours.
+              </p>
+              <div className="mt-8 flex flex-wrap gap-3">
+                <a href="https://coullworks.com/tools/keel" className="btn btn-primary">
+                  keel docs
+                </a>
+                <a href="https://daisyui.com/components/" className="btn btn-outline">
+                  daisyUI components
+                </a>
+              </div>
+              <div className="mt-12 grid gap-4 sm:grid-cols-3">
+                {features.map(([title, body]) => (
+                  <div key={title} className="card bg-base-100 shadow-sm">
+                    <div className="card-body">
+                      <h2 className="card-title text-base">{title}</h2>
+                      <p className="text-sm text-base-content/70">{body}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </main>
+        );
+      }

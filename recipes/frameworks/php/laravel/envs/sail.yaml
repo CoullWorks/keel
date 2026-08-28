@@ -1,0 +1,30 @@
+id: sail
+schema_version: 2
+kind: env
+env_family: sail
+label: Sail
+appliesTo: [laravel]
+provides: [env, docker]
+# App creation + sail:install happen in the framework's create map (Sail needs
+# the app to exist first); {{start}} brings the containers up.
+commands:
+  start: "./vendor/bin/sail up -d"
+  # Where the project can be opened once the build finishes. The create step
+  # writes APP_PORT into .env from the same HTTP_PORT every other environment
+  # publishes on, so this follows it rather than naming Sail's default 80 -
+  # which keel should not claim, and which is already taken whenever DDEV's
+  # router is running.
+  site_url: "http://localhost:{{http_port}}"
+  # How this environment tears itself down. Used when a build fails partway:
+  # keel removes the directory it created, and without this the containers,
+  # volumes and network it started stay behind holding a bind mount to a
+  # path that no longer exists. The next attempt then reuses that container
+  # and dies with "current working directory is outside of container mount
+  # namespace root".
+  down: "./vendor/bin/sail down -v"
+  restart: "./vendor/bin/sail restart"
+  exec: "./vendor/bin/sail exec laravel.test"
+  composer: "./vendor/bin/sail composer"
+  artisan: "./vendor/bin/sail artisan"
+smoke:
+  - "./vendor/bin/sail artisan --version"

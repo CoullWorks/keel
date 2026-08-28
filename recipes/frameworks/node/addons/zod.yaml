@@ -1,0 +1,10 @@
+id: node-zod
+schema_version: 2
+kind: addon
+label: Zod (runtime validation for input and env)
+appliesTo: [express, fastify, hono, nestjs, nuxt, astro, sveltekit]
+provides: [validation]
+default: true
+updated: 2026-08-10
+install:
+  - "{{exec}} npm install zod"

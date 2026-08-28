@@ -1,0 +1,29 @@
+id: node-prisma
+schema_version: 2
+kind: addon
+label: Prisma ORM (schema, migrations, typed client)
+appliesTo: [express, fastify, hono, nestjs, nuxt, astro, sveltekit]
+provides: [orm, prisma]
+conflicts: [drizzle]
+requires: [db]
+updated: 2026-08-13
+# The provider and the connection string come from whichever database recipe is
+# in the plan. They used to be hardcoded:
+#
+#   npx prisma init --datasource-provider postgresql
+#
+# so choosing MySQL still generated a PostgreSQL datasource, and every query
+# failed against a server that was running perfectly well. `prisma init` also
+# writes its own DATABASE_URL placeholder pointing at localhost:5432, which is
+# the host, not the compose service - so even the PostgreSQL case could not
+# connect until you found and edited it.
+install:
+  - "{{exec}} npm install -D prisma"
+  - "{{exec}} npm install @prisma/client"
+  # --url writes the real DSN into .env instead of the placeholder, so the first
+  # `prisma migrate dev` reaches the database keel just started.
+  - "{{exec}} npx prisma init --datasource-provider {{db.prisma}} --url {{db.url}}"
+smoke:
+  # Parses schema.prisma and checks it against the provider: catches a datasource
+  # that does not match the running database, which is the bug above.
+  - "{{exec}} npx prisma validate"

@@ -1,0 +1,123 @@
+id: qdrant
+schema_version: 2
+kind: service
+label: Qdrant v1.15 (standalone vector database)
+category: Database
+# A standalone vector store that sits BESIDE the primary database, not instead
+# of it: the relational data stays in Postgres/MySQL/SQLite and the embeddings
+# live in Qdrant. So this is a service, not a `kind: db` - it neither conflicts
+# with the primary nor is chosen in its place. Offered to the frameworks likely
+# to build a retrieval/RAG feature: the Python API/ML stacks and the Node
+# frameworks.
+appliesTo: [django, fastapi, flask, express, fastify, hono, nestjs, nextjs, nuxt, sveltekit]
+provides: [vectordb, qdrant]
+# Two standalone vector stores for one job is a mistake, and so is running one
+# beside pgvector; a search engine is a different capability and does not clash.
+conflicts: [chroma, pgvector]
+updated: 2026-08-22
+vars:
+  # v1.15 is the current stable line. Qdrant serves REST on 6333 and gRPC on
+  # 6334. https://qdrant.tech/documentation/guides/installation/
+  qdrant.version: "v1.15.0"
+  qdrant.host: qdrant
+  qdrant.port: "6333"
+  qdrant.grpcPort: "6334"
+  qdrant.localPort: "6333"
+files:
+  - path: docker-compose.qdrant.yml
+    content: |
+      # keel-generated: Qdrant {{qdrant.version}} (standalone vector database).
+      # Standalone: docker compose -f docker-compose.qdrant.yml up -d
+      # Or merged:  docker compose -f docker-compose.yml -f docker-compose.qdrant.yml up -d
+      services:
+        qdrant:
+          image: qdrant/qdrant:{{qdrant.version}}
+          restart: unless-stopped
+          # Qdrant is unauthenticated by default. On loopback only that is fine
+          # for development; before it leaves your machine set QDRANT__SERVICE__
+          # API_KEY and put it behind TLS.
+          # https://qdrant.tech/documentation/guides/security/
+          environment:
+            QDRANT__LOG_LEVEL: INFO
+          volumes:
+            # /qdrant/storage is the documented data path.
+            - qdrant-data:/qdrant/storage
+          ports:
+            # Loopback only: the service has no API key set.
+            - "127.0.0.1:{{qdrant.localPort}}:6333"
+          healthcheck:
+            # The readiness endpoint answers from the engine itself and needs no
+            # client tools inside the image (the qdrant image is distroless), so
+            # the check runs against the TCP port rather than shelling out.
+            # /readyz returns 200 when Qdrant is ready to serve.
+            # https://qdrant.tech/documentation/guides/monitoring/
+            test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/6333 && printf 'GET /readyz HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q '200 OK' <&3"]
+            interval: 10s
+            timeout: 5s
+            retries: 10
+            start_period: 20s
+      volumes:
+        qdrant-data:
+  - path: QDRANT.md
+    content: |
+      # Qdrant (scaffolded by keel)
+
+      Standalone vector database, service `docker-compose.qdrant.yml` (DDEV:
+      `.ddev/docker-compose.qdrant.yaml`). REST `http://127.0.0.1:{{qdrant.localPort}}`,
+      gRPC on {{qdrant.grpcPort}}, dashboard at `/dashboard`.
+
+      ## It sits beside your primary database
+
+      Your relational data stays in its own database. Qdrant holds only the
+      vectors and their payloads; you store an id in both and join them in the
+      application. Create a collection with the dimension of your embedding model
+      (OpenAI text-embedding-3-small is 1536):
+
+          PUT /collections/items
+          { "vectors": { "size": 1536, "distance": "Cosine" } }
+
+      ## Before it leaves your laptop
+
+      There is no authentication configured, which is why the port is published
+      on 127.0.0.1 only. Set `QDRANT__SERVICE__API_KEY` and terminate TLS in
+      front of it before anything else can reach it.
+provision:
+  ddev:
+    files:
+      - path: .ddev/docker-compose.qdrant.yaml
+        content: |
+          # keel-generated: Qdrant {{qdrant.version}} for DDEV.
+          services:
+            qdrant:
+              container_name: ddev-${DDEV_SITENAME}-qdrant
+              image: qdrant/qdrant:{{qdrant.version}}
+              hostname: qdrant
+              restart: "no"
+              labels:
+                com.ddev.site-name: ${DDEV_SITENAME}
+                com.ddev.approot: ${DDEV_APPROOT}
+              environment:
+                - QDRANT__LOG_LEVEL=INFO
+                - VIRTUAL_HOST=$DDEV_HOSTNAME
+                - HTTP_EXPOSE=6333:6333
+                - HTTPS_EXPOSE=6343:6333
+              expose:
+                - "6333"
+                - "6334"
+              volumes:
+                - qdrant:/qdrant/storage
+              healthcheck:
+                test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/6333 && printf 'GET /readyz HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q '200 OK' <&3"]
+                interval: 10s
+                timeout: 5s
+                retries: 10
+                start_period: 20s
+          volumes:
+            qdrant:
+    install:
+      - "{{restart}}"
+  compose: {}
+  sail: {}
+  local:
+    install:
+      - "docker compose -f docker-compose.qdrant.yml up -d"

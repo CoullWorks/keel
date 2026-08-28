@@ -1,0 +1,342 @@
+id: django-docker
+schema_version: 2
+kind: env
+env_family: compose
+label: Docker (compose)
+appliesTo: [django]
+provides: [env, docker, db-postgres] # this stack brings up postgres itself
+priority: -10
+updated: 2026-08-12
+# Django speaks both WSGI and ASGI and its docs state no preference between
+# them. This env ships the WSGI path, because that is what a freshly scaffolded
+# project is: synchronous views, no Channels, no long-lived connections. The
+# ASGI command is written out in the Dockerfile so switching is a two-line edit
+# rather than a research project.
+#
+# The web server in front is a separate choice: add `nginx` or `apache` and the
+# matching config recipe under infra/ drops in the server block or VirtualHost.
+# Neither is bundled here, because which one a team runs is not Django's
+# business. See docs/infra/django.md.
+commands:
+  # --build so a changed Dockerfile actually rebuilds. `up -d` alone only builds
+  # when the image is missing, which is how a stale image survives a deploy.
+  start: "docker compose up -d --build"
+  # Where the project can be opened once the build finishes.
+  site_url: "http://localhost:{{http_port}}"
+  # How this environment tears itself down. Used when a build fails partway:
+  # keel removes the directory it created, and without this the containers,
+  # volumes and network it started stay behind holding a bind mount to a
+  # path that no longer exists. The next attempt then reuses that container
+  # and dies with "current working directory is outside of container mount
+  # namespace root".
+  down: "docker compose down -v --remove-orphans"
+  restart: "docker compose restart"
+  create: "docker compose build"
+  # -T because these run from scripts and CI, where there is no TTY to allocate.
+  exec: "docker compose exec -T app"
+  manage: "docker compose exec -T app python manage.py"
+smoke:
+  - "docker compose ps"
+files:
+  - path: Dockerfile
+    content: |
+      # Two kinds of image, and the distinction is not cosmetic.
+      #
+      # `dev` is what compose builds. It carries no application code and no
+      # dependencies, because the project is bind-mounted from the host: `uv
+      # sync` run through keel writes .venv and uv.lock to your working tree
+      # where they belong, and an edit is live without a rebuild.
+      #
+      # The stages after it build the production image, which copies the source
+      # in and installs without dev dependencies. Build it explicitly with
+      # `docker build --target runtime .`.
+      #
+      # Pointing compose at the production stage instead would look like it
+      # works and would not: with no bind mount, everything uv writes lands in
+      # a layer that the next `--build` discards.
+      FROM python:{{pin.python_version}}-slim-bookworm AS dev
+      COPY --from=ghcr.io/astral-sh/uv:0.12.3 /uv /uvx /bin/
+      WORKDIR /app
+      # The venv lives in the bind-mounted tree, exactly as it would on the
+      # host, so an editor and a shell outside the container see the same
+      # interpreter and the same packages.
+      ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
+          PATH="/app/.venv/bin:$PATH" \
+          PYTHONUNBUFFERED=1
+      # uid 1000, matching the default first user on a Linux or WSL host, so
+      # files created in the bind mount are owned by you rather than by root.
+      RUN useradd --create-home --uid 1000 dev
+      USER dev
+      EXPOSE 8000
+      # The same probe the production stage uses. Without it here, a web server
+      # depending on `condition: service_healthy` can never start: compose
+      # reports "container has no healthcheck configured" and gives up.
+      # start-period is longer than production's because the first run installs
+      # dependencies into the bind mount before the app can serve anything.
+      HEALTHCHECK --interval=10s --timeout=5s --start-period=180s --retries=10 \
+        CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/admin/login/', timeout=3).status == 200 else 1)"
+      # The bind mount has no .venv on a first run, and the framework itself
+      # lives in it, so `uv run` would fail and `restart: unless-stopped` would
+      # turn that into a restart loop that `docker compose exec` cannot attach
+      # to. Wait for the install keel is about to run, then exec the real
+      # server so it still receives SIGTERM as PID 1.
+      CMD ["sh", "-c", "until [ -d .venv ]; do echo 'waiting for dependencies'; sleep 2; done; exec uv run python manage.py runserver 0.0.0.0:8000"]
+
+      # keel-generated.
+      #
+      # Multi-stage: the compiler, the headers and the lockfile live in the build
+      # stage. The runtime stage gets the finished virtualenv and nothing else it
+      # does not need at request time.
+      #
+      # The base is pinned to a patch release, not to 3.13-slim. A floating tag
+      # turns an unrelated rebuild into an unreviewed Python upgrade. Django 6.1
+      # and 5.2 LTS both support 3.13 (Django FAQ, Installation).
+      FROM python:{{pin.python_version}}-slim-bookworm AS build
+
+      # uv pinned to a release, which is uv's own Docker guidance: it shows
+      # `COPY --from=ghcr.io/astral-sh/uv:0.12.3 /uv /uvx /bin/` and calls out
+      # that :latest means a different installer on every build.
+      COPY --from=ghcr.io/astral-sh/uv:0.12.3 /uv /uvx /bin/
+
+      WORKDIR /app
+      ENV UV_COMPILE_BYTECODE=1 \
+          UV_LINK_MODE=copy \
+          UV_PROJECT_ENVIRONMENT=/app/.venv
+
+      # libpq-dev is psycopg's build dependency. Reflex's own production
+      # Dockerfile carries the same package with the comment "Install libpq-dev
+      # for psycopg (skip if not using postgres)", which is the only vendor
+      # corroboration for the package name: psycopg.org refuses automated
+      # fetching, so treat it as inherited rather than confirmed.
+      RUN apt-get update && apt-get install -y --no-install-recommends \
+            build-essential libpq-dev \
+          && rm -rf /var/lib/apt/lists/*
+
+      # Dependencies before application code, so editing a view does not
+      # invalidate the dependency layer. uv's Docker guide recommends exactly
+      # this split via --no-install-project.
+      COPY pyproject.toml uv.lock* ./
+      # --frozen fails when the lockfile is out of date instead of quietly
+      # resolving a different dependency tree. A deploy is the wrong place to
+      # find out that a transitive pin moved.
+      # A freshly scaffolded project has no uv.lock yet, so the first build
+      # creates one; commit it, and from then on --frozen is a real guarantee
+      # rather than a formality. The branch exists so that a lockfile which IS
+      # present is never silently regenerated.
+      RUN if [ -f uv.lock ]; then \
+            uv sync --frozen --no-dev --no-install-project; \
+          else \
+            uv lock && uv sync --frozen --no-dev --no-install-project; \
+          fi
+      COPY . .
+      RUN uv sync --frozen --no-dev
+
+      # collectstatic runs here, once, not at container start. Django's
+      # static-files how-to treats it as a deployment step ("run the
+      # collectstatic command when static files change, then arrange for the
+      # collected static files directory to be moved to the static file
+      # server"). Running it per replica at boot has several processes writing
+      # the same directory for no benefit.
+      #
+      # The secret is a throwaway: nothing signed at build time survives, and
+      # settings.py refuses to import without one.
+      ENV DJANGO_SETTINGS_MODULE=config.settings
+      RUN DJANGO_SECRET_KEY=build-time-only DJANGO_DEBUG=0 \
+          /app/.venv/bin/python manage.py collectstatic --noinput
+
+      FROM python:{{pin.python_version}}-slim-bookworm AS runtime
+      # libpq5 is the runtime half of libpq-dev; the compiler stays behind.
+      RUN apt-get update && apt-get install -y --no-install-recommends libpq5 \
+          && rm -rf /var/lib/apt/lists/* \
+          && useradd --create-home --uid 10001 app
+      # uv is copied into the runtime stage as well, deliberately. keel's task
+      # vocabulary runs `uv run pytest` and `uv sync --dev` inside this
+      # container, so without it `keel run test` has nothing to call. It is one
+      # pinned static binary; the dev dependency tree is still absent from the
+      # image.
+      COPY --from=ghcr.io/astral-sh/uv:0.12.3 /uv /uvx /bin/
+      WORKDIR /app
+      COPY --from=build --chown=app:app /app /app
+      ENV PATH="/app/.venv/bin:$PATH" \
+          PYTHONUNBUFFERED=1 \
+          PYTHONDONTWRITEBYTECODE=1 \
+          UV_PROJECT_ENVIRONMENT=/app/.venv \
+          DJANGO_SETTINGS_MODULE=config.settings
+      # Non-root. A container that runs as root and is broken into is a host
+      # that is broken into.
+      USER app
+      EXPOSE 8000
+
+      # Django publishes no health endpoint, so this probes a URL the generated
+      # urls.py actually serves. A 200 from the admin login page proves the WSGI
+      # callable, settings, URLconf and template engine are all live, which a TCP
+      # connect does not. It does not touch the database: a /healthz view that
+      # does is application code the developer writes.
+      #
+      # urllib rather than curl, because Python is already in the image and
+      # curl would be a package installed purely to make a request.
+      HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=5 \
+        CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/admin/login/', timeout=3).status == 200 else 1)"
+
+      # Django's gunicorn how-to is `gunicorn myproject.wsgi`. The bind has to be
+      # 0.0.0.0 inside a container; the compose file answers gunicorn's
+      # "don't bind externally behind a proxy" warning by never publishing this
+      # port, only the web server's.
+      #
+      # --workers: Django publishes no number. (2 x cores) + 1 is gunicorn's
+      # figure, not Django's, and gunicorn also says it "typically needs only
+      # 4-12 workers to handle heavy traffic". 3 is a conservative single-box
+      # start; WEB_CONCURRENCY overrides it without a rebuild, which is
+      # gunicorn's own documented source for --workers.
+      # --graceful-timeout: explicit, so the drain window is a decision. compose
+      # sets stop_grace_period longer than it below.
+      # --timeout 60: gunicorn's default is 30; Django views that talk to a slow
+      # database legitimately exceed it, and a killed worker loses the request.
+      # --max-requests with jitter recycles workers to bound leak growth, and the
+      # jitter stops every worker restarting on the same request count.
+      # --worker-tmp-dir /dev/shm: gunicorn's own note on worker_tmp_dir is that
+      # os.fchmod on the heartbeat file "may block workers on disk-backed
+      # filesystems". /dev/shm is memory-backed.
+      # --forwarded-allow-ips: gunicorn defaults to 127.0.0.1,::1 and would
+      # ignore X-Forwarded-* from a proxy in another container. "*" is only safe
+      # because this port is never published, so the proxy is the sole peer.
+      CMD ["gunicorn", "config.wsgi:application", \
+           "--bind", "0.0.0.0:8000", \
+           "--workers", "3", \
+           "--graceful-timeout", "30", \
+           "--timeout", "60", \
+           "--max-requests", "1000", \
+           "--max-requests-jitter", "100", \
+           "--worker-tmp-dir", "/dev/shm", \
+           "--forwarded-allow-ips", "*", \
+           "--access-logfile", "-", \
+           "--error-logfile", "-"]
+
+      # ASGI variant, for Channels, async views or long-lived streaming
+      # responses. Django's uvicorn how-to gives:
+      #   python -m gunicorn myproject.asgi:application -k uvicorn_worker.UvicornWorker
+      # The worker class now lives in the separate `uvicorn-worker`
+      # distribution. The older in-tree path uvicorn.workers.UvicornWorker is
+      # not what the docs say any more and will not import.
+      #
+      # Add to the build stage, after the second `uv sync`:
+      #   RUN uv pip install --python /app/.venv/bin/python \
+      #         "uvicorn[standard]==0.52.1" "uvicorn-worker==0.4.0"
+      # then replace the CMD above with:
+      #   CMD ["gunicorn", "config.asgi:application", \
+      #        "-k", "uvicorn_worker.UvicornWorker", \
+      #        "--bind", "0.0.0.0:8000", "--workers", "3", \
+      #        "--graceful-timeout", "30", "--timeout", "60", \
+      #        "--forwarded-allow-ips", "*", \
+      #        "--access-logfile", "-", "--error-logfile", "-"]
+      # and uncomment the websocket block in the nginx or Apache config.
+  - path: compose.yaml
+    content: |
+      # keel-generated.
+      services:
+        app:
+          build:
+            context: .
+            # dev, not a production stage. See the note at the top of the
+            # Dockerfile: without the bind mount below, anything installed into
+            # this container is discarded by the next build.
+            target: dev
+          restart: unless-stopped
+          env_file:
+            # required: false so a checkout without a .env still comes up.
+            # Listing a missing env_file the short way is a hard compose error.
+            - path: .env
+              required: false
+          environment:
+            KEEL_DB: postgres
+            # These match the db.* contract published by the shared postgres
+            # recipe, so a plan that also selects `postgres` agrees with this
+            # stack instead of pointing settings.py at a second, absent server.
+            PGHOST: db
+            PGPORT: "5432"
+            PGDATABASE: db
+            PGUSER: db
+            PGPASSWORD: db
+            REDIS_URL: "redis://redis:6379"
+          # expose, not ports. gunicorn's sync worker "Requires a buffering
+          # proxy (nginx, HAProxy) for production", and Flask's gunicorn page
+          # puts it the other way round: binding externally behind a proxy makes
+          # "it possible to bypass the proxy". Publishing 8000 would do exactly
+          # that, so only the web server is ever published.
+          expose: ["8000"]
+          volumes:
+            # The project itself, so uv writes .venv and uv.lock to the host
+            # and an edit takes effect without a rebuild.
+            - .:/app
+            # collectstatic output, shared read-only with the web server so a
+            # request for a stylesheet never wakes a Python worker. Django's
+            # static-files how-to has the collected directory served by
+            # something other than the application process in every documented
+            # option.
+            - static:/app/staticfiles
+          depends_on:
+            db:
+              condition: service_healthy
+            redis:
+              condition: service_healthy
+          # Longer than gunicorn's --graceful-timeout of 30s. If these were
+          # equal, Docker would SIGKILL a worker at the exact moment it was
+          # still allowed to be draining.
+          stop_grace_period: 45s
+
+        db:
+          # Major-pinned to match the shared postgres recipe. Django 6.1
+          # supports PostgreSQL 15 and higher.
+          image: postgres:{{db.version}}
+          restart: unless-stopped
+          environment:
+            POSTGRES_DB: db
+            POSTGRES_USER: db
+            POSTGRES_PASSWORD: db
+          volumes:
+            - pgdata:/var/lib/postgresql
+            # The tuned configuration the postgres recipe wrote. Without this
+            # mount the file is generated and never read, and the server runs
+            # on image defaults.
+            - {{db.config_mount}}
+          {{db.command}}
+          healthcheck:
+            # pg_isready answers only once the server accepts connections, so
+            # the app is not started against a socket that is merely open.
+            test: ["CMD-SHELL", "pg_isready -U db -d db"]
+            interval: 10s
+            timeout: 5s
+            retries: 10
+
+        redis:
+          image: redis:7-alpine
+          restart: unless-stopped
+          healthcheck:
+            test: ["CMD", "redis-cli", "ping"]
+            interval: 10s
+            timeout: 3s
+            retries: 5
+
+      volumes:
+        pgdata:
+        static:
+  - path: .dockerignore
+    content: |
+      .git
+      .github
+      .venv
+      .keel
+      # The web server's own config and the compose files: mounted by the proxy
+      # container, never needed inside the application image.
+      docker/
+      compose.yaml
+      compose.override.yaml
+      Dockerfile
+      __pycache__
+      *.pyc
+      .env
+      db.sqlite3
+      staticfiles
+      .pytest_cache
+      .ruff_cache
+      .mypy_cache

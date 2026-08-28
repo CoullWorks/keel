@@ -1,0 +1,187 @@
+id: nextjs-docker
+schema_version: 2
+kind: env
+env_family: compose
+label: Docker (compose)
+appliesTo: [nextjs]
+provides: [env, docker]
+priority: -10
+# Written from docs/infra/nextjs.md.
+#
+# output: 'standalone' is what makes a self-hosted Next.js image sane: it traces
+# the modules actually used and emits a server.js with them, so the runtime
+# image needs no node_modules at all.
+#
+# The trap, and it is the one everyone hits: standalone does NOT copy public/ or
+# .next/static/. A Dockerfile missing those two COPY lines builds cleanly,
+# starts cleanly, and serves a site with no CSS, no JavaScript and no images.
+# There is no error. Vercel's own Dockerfile has all three lines and so does
+# this.
+#
+# The other trap is environment variables. NEXT_PUBLIC_* is inlined into the
+# bundle at BUILD time and frozen there, so one image cannot serve staging and
+# production with different values. Anything that must vary per environment has
+# to be read server-side at runtime instead.
+#
+# The app service is on `expose` only, not `ports`, so nothing reaches it until
+# a web server is chosen. That is deliberate: the nginx and Apache service
+# recipes in infra/ publish port 80 and become the single route in, which is
+# what makes any trusted-hop or forwarded-header handling sound. Add a `ports`
+# mapping here only if you genuinely want the app internet-facing.
+#
+# Streaming. Next.js's documented fix for a buffering proxy is the application
+# emitting X-Accel-Buffering: no from a headers() block in next.config. The
+# framework recipe does not write that block yet, so the nginx service recipe
+# sets proxy_buffering off instead, which does not depend on the app.
+commands:
+  start: "docker compose up -d --build"
+  # Where the project can be opened once the build finishes.
+  site_url: "http://localhost:{{http_port}}"
+  # How this environment tears itself down. Used when a build fails partway:
+  # keel removes the directory it created, and without this the containers,
+  # volumes and network it started stay behind holding a bind mount to a
+  # path that no longer exists. The next attempt then reuses that container
+  # and dies with "current working directory is outside of container mount
+  # namespace root".
+  down: "docker compose down -v --remove-orphans"
+  restart: "docker compose restart"
+  exec: "docker compose exec -T app"
+  create: "docker compose build"
+smoke:
+  - "docker compose ps"
+files:
+  - path: Dockerfile
+    content: |
+      # Two kinds of image, and the distinction is not cosmetic.
+      #
+      # `dev` is what compose builds. It carries no application code and no
+      # dependencies, because the project is bind-mounted from the host: `npm
+      # install` run through keel writes node_modules and package-lock.json to
+      # your working tree where they belong, and an edit is live without a
+      # rebuild.
+      #
+      # The stages after it build the production image, which copies the source
+      # in and installs without dev dependencies. Build it explicitly with
+      # `docker build --target runtime .`.
+      #
+      # Pointing compose at the production stage instead would look like it
+      # works and would not: with no bind mount, every file npm writes lands in
+      # a layer that the next `--build` discards.
+      FROM node:{{pin.node_version}}-slim AS dev
+      WORKDIR /app
+      # uid 1000 in the node image, which matches the default first user on a
+      # Linux or WSL host, so files created in the bind mount are owned by you
+      # rather than by root.
+      USER node
+      EXPOSE 3000
+      # The bind mount is empty of dependencies on a first run, and most dev
+      # servers are themselves a dependency: `nest start` or `vite` simply is
+      # not there yet, the process exits, and `restart: unless-stopped` turns
+      # that into a restart loop that `docker compose exec` cannot attach to.
+      # So wait for the install keel is about to run, then exec into the real
+      # server so it still receives SIGTERM as PID 1.
+      #
+      # The marker is node_modules/.package-lock.json, not the node_modules
+      # directory: npm creates the directory at the START of an install, so
+      # testing for it starts the dev server mid-install and the binary it
+      # needs is not there yet. npm writes the hidden lockfile only once the
+      # tree is fully reified.
+      CMD ["sh", "-c", "until [ -f node_modules/.package-lock.json ]; do echo \"waiting for dependencies\"; sleep 2; done; exec npm run dev"]
+
+      FROM node:{{pin.node_version}}-slim AS deps
+      WORKDIR /app
+      # package-lock.json* (glob) so a freshly scaffolded project, which has no
+      # lockfile yet, still builds. Commit the lock and npm ci becomes a real
+      # guarantee rather than a formality.
+      COPY package.json package-lock.json* ./
+      RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
+
+      FROM node:{{pin.node_version}}-slim AS build
+      WORKDIR /app
+      COPY --from=deps /app/node_modules ./node_modules
+      COPY . .
+      # Requires output: 'standalone' in next.config. Without it .next/standalone
+      # is never produced and the COPY below fails.
+      ENV NEXT_TELEMETRY_DISABLED=1
+      RUN npm run build
+
+      FROM node:{{pin.node_version}}-slim AS runtime
+      ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1
+      WORKDIR /app
+      # These three, in this order. standalone alone serves an unstyled site.
+      COPY --from=build --chown=node:node /app/.next/standalone ./
+      COPY --from=build --chown=node:node /app/.next/static     ./.next/static
+      COPY --from=build --chown=node:node /app/public           ./public
+      USER node
+      EXPOSE 3000
+      CMD ["node", "server.js"]
+  - path: compose.yaml
+    content: |
+      services:
+        app:
+          build:
+            context: .
+            # dev, not a production stage. See the note at the top of the
+            # Dockerfile: without the bind mount below, anything installed into
+            # this container is discarded by the next build.
+            target: dev
+          volumes:
+            # The project itself, so npm writes node_modules and the lockfile to
+            # the host and an edit takes effect without a rebuild.
+            - .:/app
+          restart: unless-stopped
+          env_file:
+            # required: false so a fresh scaffold comes up before anyone has written
+            # a .env. The short form (env_file: [.env]) is a hard compose error when
+            # the file is absent, and these recipes ship .env.example, not .env.
+            - path: .env
+              required: false
+          environment:
+            HOSTNAME: "0.0.0.0"
+            PORT: "3000"
+          expose: ["3000"]
+          healthcheck:
+            test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+            interval: 15s
+            timeout: 5s
+            retries: 5
+            start_period: 20s
+          stop_grace_period: 30s
+
+        # The database, when one is selected.
+        #
+        # Every field that differs between Postgres, MySQL and MariaDB comes from
+        # the chosen db recipe as a var, so this one definition serves all three.
+        # Writing it per engine is what left the Node frameworks with no database
+        # service at all: the compose file only ever had `app`, the db recipe's
+        # overlay had no image, and compose does not auto-merge that overlay, so
+        # picking a database silently produced nothing.
+        db:
+          image: {{db.type}}:{{db.version}}
+          restart: unless-stopped
+          environment: {{db.compose_env}}
+          volumes:
+            - dbdata:{{db.data_dir}}
+            # The tuned configuration the db recipe wrote. Mounted here rather
+            # than left in an overlay file compose never reads.
+            - {{db.config_mount}}
+          {{db.command}}
+          healthcheck:
+            # The app waits on this, so it must answer only once the server
+            # really accepts connections rather than when the port opens.
+            test: {{db.healthcheck}}
+            interval: 10s
+            timeout: 5s
+            retries: 12
+            start_period: 30s
+
+      volumes:
+        dbdata:
+  - path: .dockerignore
+    content: |
+      node_modules
+      .next
+      .git
+      .env*
+      npm-debug.log
+      coverage

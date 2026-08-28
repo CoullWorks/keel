@@ -1,0 +1,21 @@
+id: nextjs-vitest
+schema_version: 2
+kind: addon
+label: Vitest (unit and integration tests)
+appliesTo: [nextjs]
+provides: [tests]
+updated: 2026-08-22
+# The Next.js base already wires `test: vitest run` and ships app/health.test.ts,
+# so this addon makes the unit-test half of the suite explicit and installs the
+# runner idempotently. The shared node-vitest addon deliberately excludes Next.js
+# (its base bakes vitest in), so Next.js gets its own thin recipe here rather than
+# forcing a second `npm test` script onto a framework that already declares one.
+install:
+  - "{{exec}} npm install -D vitest"
+  # Name the runner in one place, the same convention node-vitest uses, so
+  # `npm test` runs vitest even if a later edit changes the base script.
+  - "{{exec}} npm pkg set scripts.test=\"vitest run\""
+smoke:
+  # Runs the suite for real (the base ships app/health.test.ts), the same command
+  # `keel run test` uses.
+  - "{{exec}} npx vitest run"

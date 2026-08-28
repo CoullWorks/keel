@@ -1,0 +1,28 @@
+id: postgres-fastapi
+schema_version: 2
+kind: config
+label: FastAPI wiring for PostgreSQL
+# Without this, choosing PostgreSQL provisioned a real server and the app carried
+# on using the SQLite URL from its own .env. The database was up, connected to
+# nothing, and no error said so.
+when:
+  framework: fastapi
+  uses: postgres
+provision:
+  ddev:
+    patch:
+      - file: .env
+        set:
+          DATABASE_URL: "postgresql+psycopg://{{db.user}}:{{db.password}}@{{db.host}}:{{db.port}}/{{db.name}}"
+  compose:
+    patch:
+      - file: .env
+        set:
+          DATABASE_URL: "postgresql+psycopg://{{db.user}}:{{db.password}}@{{db.host}}:{{db.port}}/{{db.name}}"
+  local:
+    patch:
+      - file: .env
+        set:
+          # The native env publishes the container on loopback, so the app
+          # connects over the published host port rather than the service name.
+          DATABASE_URL: "postgresql+psycopg://{{db.user}}:{{db.password}}@127.0.0.1:{{db.localPort}}/{{db.name}}"

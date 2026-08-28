@@ -1,0 +1,87 @@
+id: fastify
+kind: framework
+label: Fastify (fast Node API)
+lang: node
+provides: [node, fastify, self-serving]
+default: false
+family: fastify
+variant: JavaScript
+updated: 2026-08-07
+pins:
+  fastify: ^5.2.0
+# The Node line is a choice. Only the versions this framework actually
+# supports are offered; the note says what each one costs you.
+versions:
+  node_version:
+    label: Node.js version
+    recommended: "22"
+    options:
+      - value: "20"
+        label: "Node 20 LTS"
+        note: "maintenance only, ends Apr 2026"
+      - value: "22"
+        label: "Node 22 LTS"
+        note: "active LTS, the safe default"
+      - value: "24"
+        label: "Node 24 LTS"
+        note: "newest LTS"
+install:
+  # The stack has to be up before anything can exec into it. Under a native
+  # env {{start}} renders empty and the engine drops the no-op step.
+  - "{{start}}"
+  - "{{exec}} npm install"
+  # The app started before its dependencies existed, so bring it back up now
+  # that they are installed. Renders empty, and is dropped, on a native env.
+  - "{{restart}}"
+smoke:
+  - "{{exec}} node --check src/app.js"
+files:
+  - path: package.json
+    content: |
+      {
+        "name": "app",
+        "private": true,
+        "type": "module",
+        "scripts": {
+          "dev": "node --watch src/app.js",
+          "start": "node src/app.js",
+          "test": "node --test"
+        },
+        "dependencies": { "fastify": "^5.2.0" }
+      }
+  - path: src/app.js
+    content: |
+      import Fastify from "fastify";
+
+      const app = Fastify({ logger: true });
+
+      // The route keel's own URL points at. Without it a freshly built project
+      // answers 404 at the address the build prints, which reads as a broken
+      // stack rather than an empty one.
+      app.get("/", async () => ({
+        app: "keel Fastify",
+        db: process.env.KEEL_DB ?? "sqlite",
+      }));
+
+      app.get("/health", async () => ({ status: "healthy" }));
+
+      const port = Number(process.env.PORT) || 3000;
+      app.listen({ port, host: "0.0.0.0" }).catch((err) => {
+        app.log.error(err);
+        process.exit(1);
+      });
+
+      export default app;
+  - path: .env.example
+    content: |
+      # Copy to .env and fill in. Generate secrets with: keel secrets sync
+      PORT=3000
+  - path: .gitignore
+    content: |
+      node_modules/
+      .env
+tasks:
+  lint: "{{exec}} npx eslint ."
+  dev: "{{exec}} npm run dev"
+  start: "{{exec}} npm run start"
+  test: "{{exec}} npm test"

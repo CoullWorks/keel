@@ -1,0 +1,64 @@
+id: nextjs-shadcn
+kind: addon
+label: shadcn/ui (React component library)
+category: UI kit
+appliesTo: [nextjs]
+requires: [nextjs, tailwind]
+provides: [shadcn, ui-library]
+priority: 42 # after Tailwind (40); shadcn init updates globals.css
+# shadcn is a copy-in component library (not a dep). init -d uses defaults
+# (non-interactive); we add one component so the build proves it compiles.
+install:
+  - "{{exec}} npx --yes shadcn@latest init -d"
+  - "{{exec}} npx --yes shadcn@latest add button card badge"
+smoke:
+  - "{{exec}} npm run build"
+files:
+  - path: app/page.tsx
+    content: |
+      // keel: a production-ready landing page built from shadcn/ui components.
+      import { Badge } from "@/components/ui/badge";
+      import { Button } from "@/components/ui/button";
+      import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+
+      const features = [
+        ["shadcn/ui", "Accessible components you own, copied into your repo."],
+        ["Radix + Tailwind", "Unstyled primitives, styled with your tokens."],
+        ["keel-managed", "keel run dev · test · build, one vocabulary."],
+      ];
+
+      export default function Home() {
+        return (
+          <main className="min-h-screen bg-background text-foreground">
+            <div className="mx-auto max-w-3xl px-6 py-20">
+              <Badge variant="secondary">running</Badge>
+              <h1 className="mt-6 text-4xl font-bold tracking-tight sm:text-5xl">
+                Your Next.js app is running
+              </h1>
+              <p className="mt-4 text-lg text-muted-foreground">
+                Built with shadcn/ui, scaffolded by keel. Edit{" "}
+                <code className="rounded bg-muted px-1.5 py-0.5 text-sm">app/page.tsx</code> to make
+                it yours.
+              </p>
+              <div className="mt-8 flex flex-wrap gap-3">
+                <Button asChild>
+                  <a href="https://coullworks.com/tools/keel">keel docs</a>
+                </Button>
+                <Button variant="outline" asChild>
+                  <a href="https://ui.shadcn.com">shadcn/ui docs</a>
+                </Button>
+              </div>
+              <div className="mt-12 grid gap-4 sm:grid-cols-3">
+                {features.map(([title, body]) => (
+                  <Card key={title}>
+                    <CardHeader>
+                      <CardTitle className="text-base">{title}</CardTitle>
+                    </CardHeader>
+                    <CardContent className="text-sm text-muted-foreground">{body}</CardContent>
+                  </Card>
+                ))}
+              </div>
+            </div>
+          </main>
+        );
+      }

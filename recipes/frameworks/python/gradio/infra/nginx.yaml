@@ -1,0 +1,174 @@
+id: nginx-gradio
+schema_version: 2
+kind: config
+label: Gradio server block for NGINX
+updated: 2026-08-12
+# Written from docs/infra/gradio.md. Gradio is the one framework in this set
+# that publishes a real nginx config, and it is short. Verbatim, from "Running a
+# Gradio App on Your Web Server with Nginx":
+#
+#   server {
+#       listen 80;
+#       server_name example.com www.example.com;
+#       location /gradio-demo/ {
+#           proxy_pass http://127.0.0.1:7860/;
+#           proxy_buffering off;
+#           proxy_redirect off;
+#           proxy_http_version 1.1;
+#           proxy_set_header Upgrade $http_upgrade;
+#           proxy_set_header Connection "upgrade";
+#           proxy_set_header Host $host;
+#           proxy_set_header X-Forwarded-Host $host;
+#           proxy_set_header X-Forwarded-Proto $scheme;
+#       }
+#   }
+#
+# Every directive below that appears in that block is vendor text. The two that
+# do not, client_max_body_size and proxy_read_timeout, are marked as keel's: the
+# vendor block sets neither and Gradio publishes no number for either.
+#
+# proxy_buffering off is a deliberate override of the shared default and is the
+# single most important line in this file. See the comment where it appears.
+#
+# Division of labour. The shared NGINX service (recipes/infra/web/nginx.yaml)
+# owns .keel/nginx/nginx.conf: worker and http-level tuning, the log format,
+# gzip and its type list, server_tokens off, the default security headers,
+# real_ip from the trusted proxy, and the default client_max_body_size and proxy
+# timeouts. This recipe owns one server block and the compose wiring.
+when:
+  framework: gradio
+  uses: nginx
+files:
+  - path: docker/nginx/conf.d/app.conf
+    content: |
+      # Gradio on its own Uvicorn, proxied. Included by the shared nginx.conf
+      # from /etc/nginx/conf.d/*.conf; http-level config lives there.
+
+      upstream gradio_app {
+        # The compose service name. Under the native env there is no `app` host:
+        # change this to 127.0.0.1:7860, which is what the vendor block actually
+        # shows and is also GRADIO_SERVER_NAME's default, so on a host no
+        # widening is needed.
+        #
+        # One upstream, one replica. Gradio documents no multi-process or
+        # multi-replica mode, so there is deliberately no load-balancing block
+        # here and no sticky-session block either: adding one would imply a
+        # vendor position that does not exist.
+        server app:7860 fail_timeout=0;
+      }
+
+      server {
+        listen 80;
+        server_name _;
+
+        # keel's number, not Gradio's: the vendor block sets no body-size limit
+        # and Gradio publishes none. nginx's own default is 1m, which rejects an
+        # upload to a gr.Audio or gr.Image component before the app ever sees it.
+        # Raise it to whatever the demo actually accepts.
+        client_max_body_size 100m;
+
+        location / {
+          # Vendor's block. The trailing slash on proxy_pass is the vendor's too,
+          # and it strips the location prefix, which is what makes the subpath
+          # form below work unchanged.
+          proxy_pass http://gradio_app/;
+
+          # OVERRIDE of the shared default, which is nginx's own proxy_buffering
+          # on. This is the most important line in the file and it is the
+          # vendor's. Gradio streams incremental results back to the browser;
+          # with buffering on, nginx holds the response and the UI appears frozen
+          # until generation finishes. nginx documents the behaviour: with
+          # buffering off "the response is passed to a client synchronously,
+          # immediately as it is received".
+          proxy_buffering off;
+
+          proxy_redirect off;
+
+          # The upgrade. All three are vendor text and all three are required:
+          # without them the connection is never upgraded and the demo hangs on
+          # "connecting". proxy_http_version is stated explicitly because nginx
+          # only made 1.1 the default in 1.29.7; before that it was 1.0 and no
+          # upgrade was possible.
+          proxy_http_version 1.1;
+          proxy_set_header Upgrade    $http_upgrade;
+          proxy_set_header Connection "upgrade";
+
+          proxy_set_header Host             $host;
+          proxy_set_header X-Forwarded-Host $host;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          # Not in the vendor block, but FORWARDED_ALLOW_IPS exists precisely so
+          # Gradio can read X-Forwarded-For, and nothing else would be setting
+          # it.
+          proxy_set_header X-Forwarded-For  $proxy_add_x_forwarded_for;
+
+          # keel's number, not Gradio's. The vendor block sets no read timeout at
+          # all, and the docs note that long model inferences can exceed nginx's
+          # but publish no figure. nginx documents the default plainly: "By
+          # default, the connection will be closed if the proxied server does not
+          # transmit any data within 60 seconds." A queued job waiting on a GPU
+          # transmits nothing, so at the default the browser loses the connection
+          # mid-inference. 3600s is a ceiling, not a target;
+          # GRADIO_HEARTBEAT_INTERVAL of 15s keeps a live connection active well
+          # inside it.
+          proxy_connect_timeout 5s;
+          proxy_send_timeout    3600s;
+          proxy_read_timeout    3600s;
+        }
+
+        # Serving from a subpath, which is the shape the vendor block actually
+        # shows. If you use it, set GRADIO_ROOT_PATH to exactly the same prefix:
+        # "you'll need to set the root_path to be the same as the subpath that
+        # you specified in your nginx configuration. This is necessary for Gradio
+        # to run on any subpath besides the root of the domain."
+        # location /gradio-demo/ {
+        #   proxy_pass http://gradio_app/;
+        #   ... identical body to the location above ...
+        # }
+
+        # Answered by nginx, so the web tier's liveness does not depend on a
+        # model having finished loading. Gradio publishes no health endpoint of
+        # its own. add_header at this level stops the shared http-level
+        # add_header directives being inherited into it, which is nginx's
+        # documented behaviour and is harmless for a health endpoint.
+        location = /healthz {
+          access_log off;
+          add_header Content-Type text/plain;
+          return 200 "ok\n";
+        }
+      }
+provision:
+  compose:
+    files:
+      - path: compose.override.yaml
+        content: |
+          # Compose merges compose.override.yaml over compose.yaml with no extra
+          # flags, so the app service written by the env recipe is untouched.
+          services:
+            nginx:
+              image: nginx:1.27-alpine
+              restart: unless-stopped
+              depends_on:
+                app:
+                  condition: service_healthy
+              ports:
+                - "${HTTP_PORT:-8080}:80"
+              volumes:
+                # Shared, owned by recipes/infra/web/nginx.yaml.
+                - ./.keel/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+                # This framework's server block, owned by this recipe.
+                - ./docker/nginx/conf.d:/etc/nginx/conf.d:ro
+              healthcheck:
+                # nginx's own endpoint, not the app's: the app's start-period is
+                # long because model weights load at import time, and the proxy
+                # should not be marked unhealthy for the whole of it.
+                test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+                interval: 15s
+                timeout: 5s
+                retries: 5
+                start_period: 10s
+              # Matches the app's stop_grace_period, so the proxy is not killed
+              # while an inference it forwarded is still finishing.
+              stop_grace_period: 30s
+  # Native env: no container to add. The server block above still applies, but
+  # change the upstream to 127.0.0.1:7860, which is what the vendor block shows.
+  local: {}

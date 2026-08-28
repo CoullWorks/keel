@@ -1,0 +1,10 @@
+id: laravel-spatie-permission
+kind: addon
+label: Spatie Permission (roles & permissions)
+appliesTo: [laravel]
+provides: [permission]
+install:
+  - "{{composer}} require spatie/laravel-permission"
+  - "{{artisan}} vendor:publish --tag=permission-migrations"
+  - "{{artisan}} vendor:publish --tag=permission-config"
+  - "{{artisan}} migrate --force"

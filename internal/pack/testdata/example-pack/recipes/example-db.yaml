@@ -1,0 +1,60 @@
+id: example-sqlite
+schema_version: 2
+kind: db
+# A db recipe teaches keel a database. Its job is split in two, and that split is
+# the whole reason one db recipe serves every framework:
+#
+#   - HOW IT COMES UP is environment-specific (a container under compose, nothing
+#     under a native env) — so it lives in `provision:`, keyed by env family.
+#   - HOW AN APP WIRES TO IT is framework-specific (DB_CONNECTION for Laravel,
+#     DATABASE_URL for Node) — so it is NOT here; a `config` recipe owns that (see
+#     example-config.yaml), keyed off the `sqlite` capability this recipe provides.
+#
+# SQLite is used deliberately: it needs no server, so the example is minimal but
+# still real. A pack shipping Postgres/MySQL would add a compose service and more
+# db.* vars, but the shape is identical.
+label: "SQLite (a serverless database, added by the example pack)"
+category: Database
+appliesTo: ["*"]
+# `provides` is the contract other recipes match on. A config recipe wires "any
+# app that uses sqlite", never "the example-sqlite recipe" — so a different db can
+# satisfy the same app and this db can serve a different app.
+provides: [sqlite, database]
+default: false
+updated: 2026-08-22
+# Vars publish the `db.*` contract every framework reads. A framework works with
+# ANY database that fills this contract, and this database works with EVERY
+# framework that reads it — that is the decoupling `provides` + `vars` buy.
+vars:
+  db.type: sqlite
+  db.name: "database/app.sqlite"
+  db.host: ""
+  db.port: ""
+  db.user: ""
+  db.password: ""
+provision:
+  # SQLite is a file, so there is nothing to start under any env — the fragments
+  # are intentionally empty. keel merges the fragment for the plan's env family;
+  # a db that DID need a container (Postgres) would put its compose service here
+  # under `compose:`. A db recipe with a provision map and NO entry for the chosen
+  # env fails to resolve, which turns "the database choice was quietly ignored"
+  # into an error you can read — so list every family you support, even if empty.
+  compose: {}
+  local: {}
+  ddev: {}
+  sail: {}
+files:
+  - path: "database/.gitkeep"
+    content: ""
+    verbatim: true
+  - path: "EXAMPLE-DB.md"
+    content: |
+      # SQLite (added by the example pack)
+
+      <!-- keel-generated -->
+
+      A serverless database: the whole database is the file at
+      `{{db.name}}`. The example-config recipe wired your framework to it via the
+      `sqlite` capability. Swap this recipe for a Postgres/MySQL one and, because
+      wiring keys off the capability not the recipe id, nothing framework-side has
+      to change.

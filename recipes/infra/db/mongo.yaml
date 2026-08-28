@@ -1,0 +1,321 @@
+id: mongo
+schema_version: 2
+kind: db
+label: MongoDB 8 as the primary database (tuned)
+aliases: [django-mongo]
+# Django via MongoDB's official django-mongodb-backend; the Node frameworks via
+# Prisma, whose datasource provider is "mongodb" (db.prisma below). Prisma is
+# the only Node ORM keel offers that speaks Mongo: Drizzle is a SQL query
+# builder with no MongoDB dialect, so this recipe defines no db.drizzle and the
+# Drizzle add-on is simply not offered alongside it. Node frameworks were absent
+# here for no better reason than that the recipe started life Django-only, so a
+# Prisma+Mongo project - a mainstream stack - could not be built at all.
+appliesTo: [django, nextjs, express, fastify, hono, nestjs, adonisjs, nuxt, astro, sveltekit]
+provides: [db, mongo, db-mongo]
+conflicts: [db-postgres, db-mysql, db-mariadb]
+priority: -5 # bring Mongo up before the app migrates
+updated: 2026-08-22
+# MongoDB via MongoDB's official django-mongodb-backend (Django) or Prisma
+# (Node). NON-RELATIONAL: no cross-collection joins/constraints - build with
+# that in mind. For Amazon DocumentDB, point MONGO_URI / DATABASE_URL at your
+# DocumentDB cluster instead.
+#
+# Unlike the server databases, this one runs its own container even under the
+# native/local env, because no environment provides Mongo. Under the Node
+# frameworks' compose env it likewise runs its own service rather than reusing
+# the stack's `db` service, because Mongo is not a drop-in for a SQL `db`.
+vars:
+  db.type: mongodb
+  # Empty on purpose. Mongo is not a DDEV database type: DDEV keeps its own
+  # relational database and runs Mongo alongside it as an add-on, so there is
+  # no --database value to pass and passing one would be rejected.
+  db.ddev_flag: ""
+  # 8.0 is the current major release line. The backend's own minimum moved up
+  # with it: "Increase the minimum supported MongoDB version from 6.0 to 7.0"
+  # https://www.mongodb.com/docs/languages/python/django-mongodb/current/reference/release-notes/
+  # so 6.x is not an option at all, and 8.x gets the current TCMalloc and
+  # transaction behaviour. 8.2/8.3 are rapid releases; 8.0 is the one to run.
+  db.version: "8.0"
+  db.host: localhost
+  db.port: "27017"
+  db.name: app
+  # directConnection=true is needed against a single-node replica set: without
+  # it the driver performs replica-set discovery, gets back the container's
+  # internal hostname, and fails to connect from the host.
+  db.uri: mongodb://localhost:27017/app?directConnection=true
+  # No Drizzle entry: Drizzle is a SQL query builder and has no MongoDB
+  # dialect. The Drizzle add-on refuses this database rather than pretending.
+  db.prisma: mongodb
+  db.url: "mongodb://localhost:27017/app?directConnection=true"
+  # The compose-network spelling: inside the stack the app reaches Mongo at the
+  # service name `mongo`, not localhost. Prisma reads this from DATABASE_URL.
+  db.composeUrl: "mongodb://mongo:27017/app?directConnection=true"
+  # WiredTiger cache, in GB. See the config file for the arithmetic.
+  db.mongoCacheGB: "0.5"
+files:
+  - path: .keel/mongodb/mongod.conf
+    content: |
+      # keel-generated: MongoDB 8 server configuration.
+      #
+      # Sized for a container with 2 GB of RAM. mongod does not read a config
+      # file unless it is told to: "mongod does not read a configuration file by
+      # default, so the --config option with the path to the configuration file
+      # needs to be specified" (https://hub.docker.com/_/mongo), which the
+      # compose files below do.
+      #
+      # Sources, all fetched 2026-08-12:
+      #   [1] WiredTiger Storage Engine
+      #       https://www.mongodb.com/docs/manual/core/wiredtiger/
+      #   [2] Convert a Standalone to a Replica Set
+      #       https://www.mongodb.com/docs/manual/tutorial/convert-standalone-to-replica-set/
+      #   [3] Transactions
+      #       https://www.mongodb.com/docs/manual/core/transactions/
+      #   [4] UNIX ulimit Settings
+      #       https://www.mongodb.com/docs/manual/reference/ulimit/
+      #   [5] Transparent Huge Pages
+      #       https://www.mongodb.com/docs/manual/tutorial/transparent-huge-pages/
+      #   [6] mongo Docker Official Image
+      #       https://hub.docker.com/_/mongo
+
+      storage:
+        dbPath: /data/db
+        wiredTiger:
+          engineConfig:
+            # "The default WiredTiger internal cache size is the larger of
+            # either: 50% of (RAM - 1GB), or 0.256 GB." [1]
+            #
+            # Arithmetic for a 2 GB container:
+            #   0.5 x (2 GB - 1 GB) = 0.5 GB, which is above the 0.256 GB floor.
+            # On a 16 GB node: 0.5 x (16 - 1) = 7.5 GB.
+            #
+            # Set EXPLICITLY, and this is the whole reason the file exists.
+            # MongoDB's own warning: "In some instances, such as when running in
+            # a container that is configured to use less RAM than the amount of
+            # memory provisioned for the host, you must account for the limits.
+            # You may need to configure the WiredTiger cache to an appropriate
+            # value, as WiredTiger may not account for the memory limits of the
+            # specific container in certain cases." [1]
+            # Left to itself on a 32 GB laptop, a development mongod sizes its
+            # cache from 32 GB and gets OOM-killed by a 2 GB container limit.
+            # Check what it actually detected with db.hostInfo().system.memLimitMB.
+            cacheSizeGB: 0.5
+        # Everything not in the cache is served through the operating system's
+        # file cache: "With the filesystem cache, MongoDB automatically uses all
+        # free memory that is not used by the WiredTiger cache or by other
+        # processes" [1]. So do not raise cacheSizeGB to fill the container.
+
+      net:
+        port: 27017
+        # The container network only. The published port is bound to 127.0.0.1
+        # in the compose file, which is what keeps an unauthenticated
+        # development database off the network.
+        bindIp: 0.0.0.0
+
+      replication:
+        # A single-node replica set, not a standalone, and not for redundancy.
+        # Transactions are only available on a replica set or a sharded cluster:
+        # the supported-deployments table in [3] lists those two and nothing
+        # else. A standalone mongod therefore cannot run a multi-document
+        # transaction, which means Django's transaction.atomic() has nothing to
+        # do its job with.
+        #
+        # The set has to be initiated once (rs.initiate()); the install step in
+        # the recipe does that after the container reports healthy. [2]
+        replSetName: rs0
+
+      # ACCESS CONTROL is not enabled here, and that is a local-development
+      # decision. An unconfigured mongod has no authentication at all: the
+      # official image only turns it on as a side effect of setting both
+      # MONGO_INITDB_ROOT_USERNAME and MONGO_INITDB_ROOT_PASSWORD, and then
+      # "MongoDB will start with authentication enabled (mongod --auth)" [6].
+      #
+      # Enabling it on a REPLICA SET additionally requires internal
+      # authentication between members, which means a shared key file even when
+      # there is only one member:
+      #
+      #   openssl rand -base64 756 > .keel/mongodb/keyfile
+      #   chmod 400 .keel/mongodb/keyfile && sudo chown 999:999 .keel/mongodb/keyfile
+      #
+      # then mount it, uncomment the block below, and set the root credentials in
+      # the compose environment. The 999 is the uid mongod runs as in the
+      # official image; a key file it cannot read, or one with looser
+      # permissions, is refused at start-up.
+      #
+      # security:
+      #   authorization: enabled
+      #   keyFile: /etc/mongo/keyfile
+
+      operationProfiling:
+        # Log operations slower than 100 ms to the profiler. This is the Mongo
+        # equivalent of a slow query log and the fastest route to the missing
+        # index behind a slow page.
+        mode: slowOp
+        slowOpThresholdMs: 100
+
+      systemLog:
+        destination: file
+        path: /var/log/mongodb/mongod.log
+        logAppend: true
+        quiet: false
+  - path: docker-compose.mongo.yml
+    content: |
+      # keel-generated: MongoDB {{db.version}}, tuned by .keel/mongodb/mongod.conf.
+      services:
+        mongo:
+          image: mongo:{{db.version}}
+          restart: unless-stopped
+          command: ["mongod", "--config", "/etc/mongo/mongod.conf"]
+          ulimits:
+            # MongoDB's documented ulimits are "-n (open files) 64000" and
+            # "-u (processes/threads) 64000", and it warns that "A low 'soft'
+            # ulimit can cause can't create new thread, closing connection
+            # errors if the number of connections grows too high" and that
+            # "Incoming connections to a mongod or mongos instance require two
+            # file descriptors".
+            # https://www.mongodb.com/docs/manual/reference/ulimit/
+            nofile: {soft: 64000, hard: 64000}
+            nproc: {soft: 64000, hard: 64000}
+          volumes:
+            - mongo-data:/data/db
+            - mongo-logs:/var/log/mongodb
+            - ./.keel/mongodb/mongod.conf:/etc/mongo/mongod.conf:ro
+          ports:
+            # Loopback only: this instance has no authentication configured.
+            - "127.0.0.1:{{db.port}}:27017"
+          healthcheck:
+            # Runs a command against the server rather than probing the port.
+            # "The ping command is a no-op used to test whether a server is
+            # responding to commands. This command will return immediately even
+            # if the server is write-locked."
+            # https://www.mongodb.com/docs/manual/reference/command/ping/
+            # Being write-locked still counts as answering, so this proves the
+            # server is up and reachable, not that it can accept a write.
+            test: ["CMD-SHELL", "mongosh --quiet --eval \"db.adminCommand('ping').ok\" | grep -q 1"]
+            interval: 10s
+            timeout: 5s
+            retries: 12
+            start_period: 40s
+      volumes:
+        mongo-data:
+        mongo-logs:
+  - path: MONGODB.md
+    content: |
+      # MongoDB (scaffolded by keel)
+
+      Config `.keel/mongodb/mongod.conf` · service `docker-compose.mongo.yml`
+      (DDEV: `.ddev/docker-compose.mongo.yaml`) · URI `{{db.uri}}`.
+
+      ## Why it is a replica set with one member
+
+      Transactions need one. MongoDB's supported-deployments table lists replica
+      sets and sharded clusters, and nothing else, so a standalone `mongod`
+      cannot run a multi-document transaction and Django's
+      `transaction.atomic()` has nothing to work with. `rs.initiate()` is run
+      once by keel after the container comes up.
+
+      Clients must connect with `directConnection=true` (already in the URI):
+      without it the driver discovers the set, is handed the container's
+      internal hostname, and cannot reach it from the host.
+
+      ## Before this leaves your machine
+
+      There is no authentication. The port is published on 127.0.0.1 only for
+      that reason. Enabling access control on a replica set needs a key file as
+      well as credentials; the exact steps are written out in
+      `.keel/mongodb/mongod.conf`.
+
+      ## Transparent huge pages, if you are copying older advice
+
+      MongoDB reversed this at 8.0: "In MongoDB 8.0 and later, ensure that THP is
+      enabled before mongod starts ... If you are using MongoDB 7.0 or earlier,
+      disable THP."
+      https://www.mongodb.com/docs/manual/tutorial/transparent-huge-pages/
+      It is a host kernel setting, so it cannot be set from inside the container.
+
+      ## Django
+
+      `django-mongodb-backend` requires MongoDB 7.0 or later and is not a
+      drop-in for the relational ORM: no cross-collection joins, no foreign key
+      constraints. Model accordingly.
+provision:
+  local:
+    install:
+      # --wait blocks until the healthcheck passes, so rs.initiate() below runs
+      # against a server that is actually answering rather than racing it.
+      - "docker compose -f docker-compose.mongo.yml up -d --wait"
+      # Initiate the single-node replica set once. Idempotent: rs.status()
+      # succeeds on an already-initiated set, so a re-run is a no-op.
+      - "docker compose -f docker-compose.mongo.yml exec -T mongo mongosh --quiet --eval 'try { rs.status().ok } catch (e) { rs.initiate() }'"
+    files:
+      - path: .env
+        content: |
+          # keel: use MongoDB for Django (settings reads KEEL_DB + MONGO_URI).
+          # Node reads DATABASE_URL (Prisma's mongodb provider); it is the same
+          # single-node replica-set URI, so both stacks work from one file.
+          KEEL_DB=mongodb
+          MONGO_URI={{db.uri}}
+          DATABASE_URL={{db.uri}}
+  # Under the Node frameworks' docker env (the compose family) Mongo runs as its
+  # own service beside the app container, and the replica set is initiated once
+  # after it reports healthy - the same shape as the native env, published on the
+  # container network rather than loopback.
+  compose:
+    install:
+      - "docker compose -f docker-compose.mongo.yml up -d --wait"
+      - "docker compose -f docker-compose.mongo.yml exec -T mongo mongosh --quiet --eval 'try { rs.status().ok } catch (e) { rs.initiate() }'"
+    files:
+      - path: .env
+        content: |
+          # keel: MongoDB for the app container (Prisma reads DATABASE_URL).
+          # `mongo` is the compose service name; directConnection=true is required
+          # against a single-node replica set (see MONGODB.md).
+          KEEL_DB=mongodb
+          MONGO_URI={{db.composeUrl}}
+          DATABASE_URL={{db.composeUrl}}
+  ddev:
+    files:
+      - path: .ddev/docker-compose.mongo.yaml
+        content: |
+          # keel-generated: MongoDB {{db.version}} for DDEV.
+          # Rationale for every setting: .keel/mongodb/mongod.conf.
+          services:
+            mongo:
+              container_name: ddev-${DDEV_SITENAME}-mongo
+              image: mongo:{{db.version}}
+              hostname: mongo
+              restart: "no"
+              command: ["mongod", "--config", "/etc/mongo/mongod.conf"]
+              labels:
+                com.ddev.site-name: ${DDEV_SITENAME}
+                com.ddev.approot: ${DDEV_APPROOT}
+              ulimits:
+                nofile: {soft: 64000, hard: 64000}
+                nproc: {soft: 64000, hard: 64000}
+              expose:
+                - "27017"
+              volumes:
+                - mongo:/data/db
+                # Relative to .ddev/, so this is the project-root copy.
+                - "../.keel/mongodb/mongod.conf:/etc/mongo/mongod.conf:ro"
+              healthcheck:
+                test: ["CMD-SHELL", "mongosh --quiet --eval \"db.adminCommand('ping').ok\" | grep -q 1"]
+                interval: 10s
+                timeout: 5s
+                retries: 12
+                start_period: 40s
+            web:
+              depends_on:
+                - mongo
+          volumes:
+            mongo:
+      - path: .ddev/config.db.yaml
+        content: |
+          # keel-generated: Mongo runs as its own service; the web container still
+          # gets DDEV's default relational database (unused), so the app is
+          # pointed at Mongo through the environment.
+          web_environment:
+            - KEEL_DB=mongodb
+            - MONGO_URI=mongodb://mongo:27017/{{db.name}}?directConnection=true
+    install:
+      - "{{restart}}"
+      - "ddev exec -s mongo mongosh --quiet --eval 'try { rs.status().ok } catch (e) { rs.initiate() }'"

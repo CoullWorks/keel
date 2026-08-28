@@ -1,0 +1,46 @@
+id: ci-node
+kind: extra
+label: GitHub Actions CI (Node)
+provides: [ci]
+# CI existed for laravel, django and fastapi and for nobody else, so seventeen of
+# the twenty frameworks keel scaffolds came out with no pipeline at all.
+#
+# There is one of these per language rather than one for everything, because the
+# part that cannot be shared is exactly the part that matters: a workflow has to
+# set up a toolchain before it can run anything, and setup-node, setup-uv and
+# setup-php are not interchangeable.
+appliesTo: [express, fastify, hono, nestjs, nextjs, nuxt, sveltekit, astro, adonisjs]
+updated: 2026-08-13
+files:
+  - path: .github/workflows/ci.yml
+    content: |
+      name: CI
+      on: [push, pull_request]
+
+      jobs:
+        test:
+          runs-on: ubuntu-latest
+          steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-node@v4
+              with:
+                # The same line the project's own image builds on, so CI cannot
+                # pass on a Node the container will never run.
+                node-version: '{{pin.node_version}}'
+                cache: npm
+            # ci, not install: it installs exactly the lockfile and fails if the
+            # lockfile and package.json disagree, which is what you want in CI
+            # rather than a silent resolution to something else.
+            #
+            # A freshly scaffolded project has no lockfile until the first
+            # install is committed, so fall back rather than fail the pipeline on
+            # the very first push.
+            - run: |
+                if [ -f package-lock.json ]; then npm ci; else npm install; fi
+            # --if-present so a project that has not written these scripts yet
+            # gets a green pipeline instead of a red one telling it off for not
+            # having tests on day one.
+            - run: npm run lint --if-present
+            - run: npm run typecheck --if-present
+            - run: npm run build --if-present
+            - run: npm run test --if-present

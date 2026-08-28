@@ -1,0 +1,39 @@
+id: django-allauth
+kind: addon
+label: django-allauth (social + local auth)
+appliesTo: [django]
+provides: [allauth]
+install:
+  - "{{exec}} uv add django-allauth"
+files:
+  - path: config/settings.d/40-allauth.py
+    content: |
+      # allauth needs four separate registrations, and misses none of them
+      # quietly: the package installs, no auth URL exists, and nothing explains
+      # it.
+      INSTALLED_APPS += [
+          # allauth depends on the sites framework.
+          "django.contrib.sites",
+          "allauth",
+          "allauth.account",
+          "allauth.socialaccount",
+      ]
+      SITE_ID = 1
+
+      # Required since allauth 0.56: without it, requests fail with
+      # "django-allauth requires allauth.account.middleware.AccountMiddleware".
+      MIDDLEWARE.append("allauth.account.middleware.AccountMiddleware")
+
+      # The model backend stays first so ordinary username/password login keeps
+      # working; allauth's is added, not substituted.
+      AUTHENTICATION_BACKENDS = [
+          "django.contrib.auth.backends.ModelBackend",
+          "allauth.account.auth_backends.AuthenticationBackend",
+      ]
+  - path: config/urls.d/40-allauth.py
+    content: |
+      # allauth's login, signup, password-reset and social callback views. The
+      # backends configured in settings.d do nothing without a URL to reach them.
+      from django.urls import include
+
+      urlpatterns += [path("accounts/", include("allauth.urls"))]

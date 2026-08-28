@@ -1,0 +1,7 @@
+id: laravel-socialite
+kind: addon
+label: Socialite (OAuth social login)
+appliesTo: [laravel]
+provides: [socialite]
+install:
+  - "{{composer}} require laravel/socialite"

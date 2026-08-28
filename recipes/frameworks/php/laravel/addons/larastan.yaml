@@ -1,0 +1,17 @@
+id: laravel-larastan
+kind: addon
+label: Larastan (PHPStan static analysis)
+appliesTo: [laravel]
+provides: [larastan]
+default: true
+install:
+  - "{{composer}} require larastan/larastan:^3.0 --dev"
+files:
+  - path: phpstan.neon
+    content: |
+      includes:
+          - vendor/larastan/larastan/extension.neon
+      parameters:
+          paths:
+              - app
+          level: 5

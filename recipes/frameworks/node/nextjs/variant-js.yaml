@@ -1,0 +1,139 @@
+id: nextjs-js
+kind: framework
+label: Next.js (full-stack, App Router + API routes, JavaScript)
+lang: node
+provides: [node, nextjs, self-serving]
+default: false
+family: nextjs
+variant: JavaScript
+updated: 2026-08-25
+pins:
+  next: ^15.0.0
+  react: ^19.0.0
+# The Node line is a choice. Only the versions this framework actually
+# supports are offered; the note says what each one costs you.
+versions:
+  node_version:
+    label: Node.js version
+    recommended: "22"
+    options:
+      - value: "20"
+        label: "Node 20 LTS"
+        note: "maintenance only, ends Apr 2026"
+      - value: "22"
+        label: "Node 22 LTS"
+        note: "active LTS, the safe default"
+      - value: "24"
+        label: "Node 24 LTS"
+        note: "newest LTS"
+install:
+  # The stack has to be up before anything can exec into it. Under a native
+  # env {{start}} renders empty and the engine drops the no-op step.
+  - "{{start}}"
+  - "{{exec}} npm install"
+  # The app started before its dependencies existed, so bring it back up now
+  # that they are installed. Renders empty, and is dropped, on a native env.
+  - "{{restart}}"
+smoke:
+  - "{{exec}} npm run build"
+files:
+  - path: package.json
+    content: |
+      {
+        "name": "app",
+        "private": true,
+        "type": "module",
+        "scripts": {
+          "dev": "next dev",
+          "build": "next build",
+          "start": "next start",
+          "lint": "next lint",
+          "test": "vitest run"
+        },
+        "dependencies": {
+          "next": "^15.0.0",
+          "react": "^19.0.0",
+          "react-dom": "^19.0.0",
+          "zod": "^3.23.0"
+        },
+        "devDependencies": {
+          "vitest": "^2.1.0",
+          "eslint": "^9",
+          "eslint-config-next": "^15.0.0"
+        }
+      }
+  - path: jsconfig.json
+    content: |
+      {
+        "compilerOptions": {
+          "paths": { "@/*": ["./*"] }
+        }
+      }
+  - path: next.config.mjs
+    content: |
+      /** @type {import('next').NextConfig} */
+      const nextConfig = {};
+      export default nextConfig;
+  - path: app/layout.jsx
+    content: |
+      export const metadata = { title: "app", description: "Next.js full-stack (keel)" };
+
+      export default function RootLayout({ children }) {
+        return (
+          <html lang="en">
+            <body style={{ fontFamily: "system-ui, sans-serif", margin: 0 }}>{children}</body>
+          </html>
+        );
+      }
+  - path: app/page.jsx
+    content: |
+      export default async function Home() {
+        return (
+          <main style={{ padding: 40, maxWidth: 640 }}>
+            <h1>Next.js full-stack</h1>
+            <p>Scaffolded by keel. API route: <code>/api/health</code>.</p>
+          </main>
+        );
+      }
+  - path: app/api/health/route.js
+    content: |
+      import { NextResponse } from "next/server";
+
+      export function GET() {
+        return NextResponse.json({ status: "healthy" });
+      }
+  - path: lib/db.js
+    content: |
+      // Thin Postgres accessor. Swap for Prisma/Drizzle when your schema grows;
+      // kept dependency-free here so the scaffold builds with zero setup.
+      export const DATABASE_URL = process.env.DATABASE_URL ?? "";
+
+      export function dbConfigured() {
+        return DATABASE_URL.length > 0;
+      }
+  - path: app/health.test.js
+    content: |
+      import { expect, test } from "vitest";
+      import { GET } from "./api/health/route.js";
+
+      test("health route is healthy", async () => {
+        const res = GET();
+        expect(await res.json()).toEqual({ status: "healthy" });
+      });
+  - path: .env.example
+    content: |
+      # Copy to .env and fill in. Generate secrets with: keel secrets sync
+      # Auth: add the `nextjs-authjs` addon (`--with nextjs-authjs`) for a full
+      # Auth.js v5 scaffold - it sets AUTH_SECRET/AUTH_URL here and in .env.local.
+      DATABASE_URL=postgresql://app:secret@localhost:5432/app
+  - path: .gitignore
+    content: |
+      node_modules/
+      .next/
+      .env
+      .env.local
+tasks:
+  dev: "{{exec}} npm run dev"
+  test: "{{exec}} npm test"
+  lint: "{{exec}} npm run lint"
+  build: "{{exec}} npm run build"

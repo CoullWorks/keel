@@ -1,0 +1,48 @@
+id: flask-local
+schema_version: 2
+kind: env
+env_family: local
+label: Local (native, no Docker)
+appliesTo: [flask]
+provides: [env]
+default: true
+updated: 2026-08-12
+# Native Python via uv: no daemon, no containers. `keel run dev` starts the
+# development server, which is the only place it belongs.
+#
+# There is no Dockerfile here by definition, so the container requirements the
+# Docker env carries have no place to live. What still applies on a bare host:
+#
+#   - "Do not use the development server when deploying to production", and
+#     Flask defines production as "not development", however small the audience.
+#   - Use a virtual environment "both in development and in production".
+#   - The production command is `gunicorn -w 4 'app:app'`, with the worker count
+#     from Flask's own "a starting value could be CPU * 2".
+#   - Add --access-logfile=- or the process logs almost nothing per request.
+#   - Do not run gunicorn as root, and do not bind it to 0.0.0.0 behind a proxy
+#     or "it will be possible to bypass the proxy". Bind 127.0.0.1:8000.
+#   - Wrap the app in ProxyFix with counts matching the real proxy chain. Flask:
+#     "It can be a security issue if you get this configuration wrong." One nginx
+#     in front means 1; a CDN plus nginx means 2.
+#
+# Selecting nginx or apache writes the matching server block or VirtualHost to
+# .keel/, pointed at 127.0.0.1:8000. See docs/infra/flask.md.
+commands:
+  start: ""
+  # How this environment tears itself down. Used when a build fails partway:
+  # keel removes the directory it created, and without this the containers,
+  # volumes and network it started stay behind holding a bind mount to a
+  # path that no longer exists. The next attempt then reuses that container
+  # and dies with "current working directory is outside of container mount
+  # namespace root".
+  # The only thing keel starts under a native env is the local database, which
+  # the database recipe brings up from docker-compose.db.yml. Nothing else here
+  # runs in a container, so this is the whole teardown - and without it nothing
+  # ever stopped that container: `keel delete` left it running and holding the
+  # fixed host port, so the next project that wanted a database could not start.
+  # Guarded on the file so an environment built with no database is a no-op.
+  down: "[ -f docker-compose.db.yml ] && docker compose -f docker-compose.db.yml down -v || true"
+  restart: ""
+  exec: ""
+smoke:
+  - "uv --version"

@@ -1,0 +1,387 @@
+id: django
+kind: framework
+label: Django
+lang: python
+provides: [python, django]
+default: false
+updated: 2026-08-07
+pins:
+  django: ">=5.2,<6.0"
+  python: "3.13"
+# The Python line is a choice. This framework supports a range, so keel
+# recommends one and offers the rest. The Dockerfile reads the answer as
+# {{pin.python_version}}.
+versions:
+  python_version:
+    label: Python version
+    # The values are full patch versions, not 3.13: the Dockerfiles pin a
+    # patch on purpose, so that an unrelated rebuild cannot become an
+    # unreviewed Python upgrade. Choosing a line must not give that up.
+    recommended: "3.13.15"
+    options:
+      - value: "3.11.14"
+        label: "Python 3.11"
+        note: "security fixes to Oct 2027"
+      - value: "3.12.12"
+        label: "Python 3.12"
+        note: "security fixes to Oct 2028"
+      - value: "3.13.15"
+        label: "Python 3.13"
+        note: "current stable, widest wheel coverage"
+      - value: "3.14.2"
+        label: "Python 3.14"
+        note: "newest; check your C-extension deps have wheels"
+install:
+  - "{{start}}"
+  - "{{exec}} uv sync --dev"
+  - "{{manage}} migrate --noinput"
+  - "{{restart}}"
+smoke:
+  - "{{manage}} check"
+files:
+  # Docker creates any missing parent of a mount point, and it creates it as
+  # root. compose mounts the `static` named volume at /app/staticfiles, which sits
+  # inside the project bind mount, so without this the daemon creates
+  # staticfiles on your host owned by root: it turns up in `git status`,
+  # the application cannot write to it, and you need sudo to delete your own
+  # project.
+  #
+  # Writing this placeholder makes keel create the directory as the invoking
+  # user first, leaving only the volume mount itself to the daemon.
+  - path: staticfiles/.gitkeep
+    content: |
+  - path: manage.py
+    content: |
+      #!/usr/bin/env python
+      import os
+      import sys
+
+
+      def main() -> None:
+          os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
+          from django.core.management import execute_from_command_line
+
+          execute_from_command_line(sys.argv)
+
+
+      if __name__ == "__main__":
+          main()
+  - path: config/__init__.py
+    content: ""
+  - path: config/settings.py
+    content: |
+      import os
+      from pathlib import Path
+
+      BASE_DIR = Path(__file__).resolve().parent.parent
+
+      # Load a .env (KEY=VALUE) into the environment if present, so the native
+      # env can be configured without exporting vars (container envs set these
+      # directly). Real env vars win via setdefault.
+      _envf = BASE_DIR / ".env"
+      if _envf.exists():
+          for _l in _envf.read_text().splitlines():
+              _l = _l.strip()
+              if _l and not _l.startswith("#") and "=" in _l:
+                  _k, _v = _l.split("=", 1)
+                  os.environ.setdefault(_k.strip(), _v.strip())
+
+      SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "dev-insecure-change-me")
+      DEBUG = os.environ.get("DJANGO_DEBUG", "1") == "1"
+
+      def _env_list(key: str) -> list[str]:
+          return [v for v in os.environ.get(key, "").split(",") if v]
+
+      # DDEV serves the app at <project>.ddev.site - these must include it.
+      ALLOWED_HOSTS = ["localhost", "127.0.0.1", ".ddev.site"]
+      CSRF_TRUSTED_ORIGINS = ["https://*.ddev.site", "http://*.ddev.site", *_env_list("CSRF_TRUSTED_ORIGINS")]
+
+      # CORS for a decoupled frontend. Origins are injected by the frontend recipe
+      # via DDEV web_environment; empty by default → no cross-origin access.
+      CORS_ALLOWED_ORIGINS = _env_list("CORS_ALLOWED_ORIGINS")
+      CORS_ALLOW_CREDENTIALS = True
+
+      INSTALLED_APPS = [
+          "django.contrib.admin",
+          "django.contrib.auth",
+          "django.contrib.contenttypes",
+          "django.contrib.sessions",
+          "django.contrib.messages",
+          "django.contrib.staticfiles",
+          "corsheaders",
+          "rest_framework",
+      ]
+
+      MIDDLEWARE = [
+          "corsheaders.middleware.CorsMiddleware",
+          "django.middleware.security.SecurityMiddleware",
+          "whitenoise.middleware.WhiteNoiseMiddleware",
+          "django.contrib.sessions.middleware.SessionMiddleware",
+          "django.middleware.common.CommonMiddleware",
+          "django.middleware.csrf.CsrfViewMiddleware",
+          "django.contrib.auth.middleware.AuthenticationMiddleware",
+          "django.contrib.messages.middleware.MessageMiddleware",
+          "django.middleware.clickjacking.XFrameOptionsMiddleware",
+      ]
+
+      ROOT_URLCONF = "config.urls"
+      WSGI_APPLICATION = "config.wsgi.application"
+
+      TEMPLATES = [
+          {
+              "BACKEND": "django.template.backends.django.DjangoTemplates",
+              "DIRS": [],
+              "APP_DIRS": True,
+              "OPTIONS": {
+                  "context_processors": [
+                      "django.template.context_processors.request",
+                      "django.contrib.auth.context_processors.auth",
+                      "django.contrib.messages.context_processors.messages",
+                  ],
+              },
+          },
+      ]
+
+      # Postgres + Redis under a container env (KEEL_DB=postgres, set by DDEV/Docker);
+      # SQLite + local-memory cache for the Local env (nothing to provision).
+      if os.environ.get("KEEL_DB") == "postgres":
+          DATABASES = {
+              "default": {
+                  "ENGINE": "django.db.backends.postgresql",
+                  "NAME": os.environ.get("PGDATABASE", "db"),
+                  "USER": os.environ.get("PGUSER", "db"),
+                  "PASSWORD": os.environ.get("PGPASSWORD", "db"),
+                  "HOST": os.environ.get("PGHOST", "db"),
+                  "PORT": os.environ.get("PGPORT", "5432"),
+              }
+          }
+          CACHES = {
+              "default": {
+                  "BACKEND": "django.core.cache.backends.redis.RedisCache",
+                  "LOCATION": os.environ.get("REDIS_URL", "redis://redis:6379"),
+              }
+          }
+      elif os.environ.get("KEEL_DB") in ("mysql", "mariadb"):
+          # PyMySQL is a pure-Python driver (no system libs) that works for both
+          # MySQL and MariaDB via the mysql backend.
+          import pymysql
+
+          pymysql.install_as_MySQLdb()
+          DATABASES = {
+              "default": {
+                  "ENGINE": "django.db.backends.mysql",
+                  "NAME": os.environ.get("DB_NAME", "db"),
+                  "USER": os.environ.get("DB_USER", "db"),
+                  "PASSWORD": os.environ.get("DB_PASSWORD", "db"),
+                  "HOST": os.environ.get("DB_HOST", "db"),
+                  "PORT": os.environ.get("DB_PORT", "3306"),
+                  "OPTIONS": {"charset": "utf8mb4"},
+              }
+          }
+          CACHES = {
+              "default": {
+                  "BACKEND": "django.core.cache.backends.redis.RedisCache",
+                  "LOCATION": os.environ.get("REDIS_URL", "redis://redis:6379"),
+              }
+          }
+      elif os.environ.get("KEEL_DB") == "mongodb":
+          # MongoDB / Amazon DocumentDB via MongoDB's official Django backend. It's
+          # non-relational, so ObjectIdAutoField replaces the default auto PK.
+          import django_mongodb_backend
+
+          DATABASES = {
+              "default": django_mongodb_backend.parse_uri(
+                  os.environ.get("MONGO_URI", "mongodb://localhost:27017/app"),
+              ),
+          }
+          DEFAULT_AUTO_FIELD = "django_mongodb_backend.fields.ObjectIdAutoField"
+          CACHES = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
+      else:
+          DATABASES = {
+              "default": {
+                  "ENGINE": "django.db.backends.sqlite3",
+                  "NAME": str(BASE_DIR / "db.sqlite3"),
+              }
+          }
+          CACHES = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
+
+      REST_FRAMEWORK = {
+          "DEFAULT_AUTHENTICATION_CLASSES": [
+              "rest_framework.authentication.SessionAuthentication",
+          ],
+      }
+
+      # JWT is switched on automatically when the django-simplejwt add-on is installed.
+      try:
+          import rest_framework_simplejwt  # noqa: F401
+
+          REST_FRAMEWORK["DEFAULT_AUTHENTICATION_CLASSES"] = [
+              "rest_framework_simplejwt.authentication.JWTAuthentication",
+              "rest_framework.authentication.SessionAuthentication",
+          ]
+      except ImportError:
+          pass
+
+      STATIC_URL = "static/"
+      STATIC_ROOT = BASE_DIR / "staticfiles"
+      DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+      # Add-on settings, loaded last so a fragment can extend INSTALLED_APPS and
+      # MIDDLEWARE that this file has already defined.
+      #
+      # This exists because installing a package is not the same as enabling it.
+      # django-debug-toolbar, allauth, sentry and drf-spectacular all do nothing
+      # at all until they are named in INSTALLED_APPS, MIDDLEWARE or a settings
+      # call - and keel's file patching only understands KEY=VALUE dotenv files,
+      # so a recipe could not edit this module.
+      #
+      # Each add-on drops one file in config/settings.d/ and this reads them in
+      # filename order. The alternative was for THIS file to know about every
+      # add-on, which would mean a third-party pack could not add one without
+      # editing the framework recipe.
+      #
+      # exec rather than import, because a settings fragment has to mutate this
+      # module's namespace: `INSTALLED_APPS += [...]` must affect the list above.
+      _SETTINGS_D = BASE_DIR / "config" / "settings.d"
+      if _SETTINGS_D.is_dir():
+          for _fragment in sorted(_SETTINGS_D.glob("*.py")):
+              exec(compile(_fragment.read_text(), str(_fragment), "exec"))  # noqa: S102
+  - path: config/settings.d/README.md
+    content: |
+      Settings fragments.
+
+      Each keel add-on that needs Django configuration drops one `.py` file here.
+      They are executed in filename order at the end of `config/settings.py`, in
+      that module's namespace, so a fragment can append to `INSTALLED_APPS` and
+      `MIDDLEWARE` rather than redefine them.
+
+      The numeric prefix is the load order. Anything you add yourself is ordinary
+      Python and runs the same way.
+  - path: config/urls.py
+    content: |
+      import os
+      from pathlib import Path
+
+      from django.contrib import admin
+      from django.http import JsonResponse
+      from django.urls import path
+
+
+      # The route keel's own URL points at. Without it a freshly built project
+      # answered 404 at the address the build printed, because admin/ was the
+      # only pattern here - which reads as a broken stack rather than an empty
+      # one, and disagreed with the Flask and FastAPI skeletons beside it.
+      def index(request):
+          return JsonResponse({"app": "keel Django", "db": os.environ.get("KEEL_DB", "sqlite")})
+
+
+      urlpatterns = [
+          path("", index),
+          path("admin/", admin.site.urls),
+      ]
+
+      # Add-on routes, for the same reason config/settings.d exists: a package
+      # that needs a URL is not enabled by installing it. The debug toolbar,
+      # allauth and drf-spectacular each mount their own paths, and none of them
+      # appear until something adds them to urlpatterns.
+      #
+      # Fragments run in filename order in this module's namespace, so each one
+      # appends to the list above.
+      _URLS_D = Path(__file__).resolve().parent / "urls.d"
+      if _URLS_D.is_dir():
+          for _fragment in sorted(_URLS_D.glob("*.py")):
+              exec(compile(_fragment.read_text(), str(_fragment), "exec"))  # noqa: S102
+  - path: config/urls.d/README.md
+    content: |
+      URL fragments.
+
+      Each keel add-on that mounts routes drops one `.py` file here. They run in
+      filename order at the end of `config/urls.py`, in that module's namespace,
+      so a fragment appends to `urlpatterns` rather than replacing it.
+  - path: config/wsgi.py
+    content: |
+      import os
+
+      from django.core.wsgi import get_wsgi_application
+
+      os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
+      application = get_wsgi_application()
+  - path: config/asgi.py
+    content: |
+      import os
+
+      from django.core.asgi import get_asgi_application
+
+      os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
+      application = get_asgi_application()
+  - path: pyproject.toml
+    content: |
+      [project]
+      name = "app"
+      version = "0.1.0"
+      requires-python = ">=3.12"
+      dependencies = [
+          "django>=5.1",
+          "djangorestframework>=3.15",
+          "django-cors-headers>=4.4",
+          "psycopg[binary]>=3.2",
+          "PyMySQL>=1.1.1",
+          "django-mongodb-backend>=6.0",
+          "redis>=5.0",
+          "gunicorn>=23.0",
+          "whitenoise>=6.7",
+      ]
+
+      [dependency-groups]
+      dev = [
+          "ruff>=0.6",
+          "pytest>=8.3",
+          "pytest-django>=4.9",
+          "mypy>=1.11",
+          "django-stubs[compatible-mypy]>=5.1",
+          "djangorestframework-stubs>=3.15",
+      ]
+
+      [tool.ruff]
+      line-length = 100
+      target-version = "py312"
+
+      [tool.ruff.lint]
+      select = ["E", "F", "I", "UP", "B", "DJ"]
+
+      [tool.pytest.ini_options]
+      DJANGO_SETTINGS_MODULE = "config.settings"
+      python_files = ["test_*.py", "*_test.py", "tests.py"]
+
+      [tool.mypy]
+      strict = true
+      plugins = ["mypy_django_plugin.main"]
+
+      [tool.django-stubs]
+      django_settings_module = "config.settings"
+  - path: .env.example
+    content: |
+      # Copy to .env and fill in. Generate the secret with: keel secrets sync
+      DJANGO_SECRET_KEY=change-me
+      DJANGO_DEBUG=1
+      # Set by the container env; override for a custom Postgres:
+      # PGHOST=db
+      # PGDATABASE=db
+      # PGUSER=db
+      # PGPASSWORD=db
+  - path: .gitignore
+    content: |
+      .venv/
+      staticfiles/
+      __pycache__/
+      *.pyc
+      .env
+tasks:
+  # The real server command, not {{start}}: under a native environment
+  # {{start}} renders empty, so `keel run dev` had nothing to run and reported
+  # the task as missing while listing it. $PORT so the caller can choose one.
+  dev: "{{exec}} uv run python manage.py runserver 0.0.0.0:${PORT:-8000}"
+  test: "{{exec}} uv run pytest"
+  lint: "{{exec}} uv run ruff check"
+  typecheck: "{{exec}} uv run mypy ."
+  migrate: "{{manage}} migrate"

@@ -1,0 +1,262 @@
+id: nuxt-auth-utils
+schema_version: 2
+kind: addon
+label: "Auth (nuxt-auth-utils: sealed session, login, protected routes)"
+category: Auth
+appliesTo: [nuxt]
+requires: [nuxt]
+provides: [auth]
+updated: 2026-08-24
+pins:
+  nuxt-auth-utils: ^0.5.0
+# nuxt-auth-utils is the Nuxt team's official auth module (by Atinux). It stores
+# the session in a secured, sealed cookie, so there is no database to run just to
+# prove the flow works. The credential check in server/api/login.post.ts is a
+# STUB (a demo user) you replace with a real lookup; OAuth is one defineOAuth*
+# handler away when you want it. See AUTH-SETUP.md.
+install:
+  # The canonical install is `npx nuxi module add auth-utils`, which also edits
+  # nuxt.config for you. keel installs the package explicitly and ships a
+  # nuxt.config.ts that already registers the module (below), so the wiring is
+  # deterministic rather than depending on an interactive codemod.
+  - "{{exec}} npm install nuxt-auth-utils"
+smoke:
+  # `npm run build` compiles nuxt.config, both pages, the route middleware and
+  # every server route: a typo in any of them fails here. Under a native env
+  # {{exec}} renders empty and the engine drops the step.
+  - "{{exec}} npm run build"
+files:
+  # Replaces the base framework's placeholder nuxt.config.ts, keeping devtools and
+  # adding nuxt-auth-utils to modules. This is the one edit `npx nuxi module add`
+  # would have made; shipping the whole file makes it deterministic. If you had
+  # customised nuxt.config yourself, merge the modules line by hand instead.
+  - path: nuxt.config.ts
+    content: |
+      // keel-generated. Registers nuxt-auth-utils. If you already edited
+      // nuxt.config.ts, do not overwrite it: just add 'nuxt-auth-utils' to the
+      // modules array. https://nuxt.com/docs/api/configuration/nuxt-config
+      export default defineNuxtConfig({
+        devtools: { enabled: true },
+        modules: ["nuxt-auth-utils"],
+      });
+  # The login endpoint. It validates the body with zod, then checks the STUB demo
+  # user. `verifyCredentials` is exported as a pure function so the test can call
+  # it without booting a Nuxt runtime; the handler wraps it and sets the session.
+  - path: server/api/login.post.ts
+    content: |
+      // keel-generated. Login endpoint. Validates the body, checks credentials,
+      // and on success calls setUserSession (auto-imported by nuxt-auth-utils),
+      // which writes the sealed session cookie. On failure it throws 401.
+      //
+      // verifyCredentials is a STUB: it accepts one demo user so the flow works
+      // with zero setup. Replace it with a real lookup (hash-verify against your
+      // users table) before you ship. It is exported separately, and kept pure,
+      // so login.test.ts can exercise it without a Nuxt runtime.
+      import { z } from "zod";
+
+      const bodySchema = z.object({
+        email: z.string().email(),
+        password: z.string().min(8),
+      });
+
+      export type Credentials = z.infer<typeof bodySchema>;
+      export type SessionUser = { name: string; email: string };
+
+      // STUB demo user. Replace the whole function with a real credential check.
+      export function verifyCredentials(input: Credentials): SessionUser | null {
+        if (input.email === "demo@example.com" && input.password === "password123") {
+          return { name: "Demo User", email: input.email };
+        }
+        return null;
+      }
+
+      export default defineEventHandler(async (event) => {
+        const body = await readValidatedBody(event, bodySchema.parse);
+        const user = verifyCredentials(body);
+        if (!user) {
+          throw createError({ statusCode: 401, message: "Bad credentials" });
+        }
+        await setUserSession(event, { user });
+        return { ok: true };
+      });
+  # Logout: clears the sealed session cookie.
+  - path: server/api/logout.post.ts
+    content: |
+      // keel-generated. Logout endpoint. clearUserSession (auto-imported by
+      // nuxt-auth-utils) removes the sealed session cookie.
+      export default defineEventHandler(async (event) => {
+        await clearUserSession(event);
+        return { ok: true };
+      });
+  # A protected server route. requireUserSession throws 401 unless there is a
+  # signed-in user, so this handler only runs for authenticated requests.
+  - path: server/api/me.get.ts
+    content: |
+      // keel-generated. Protected endpoint. requireUserSession (auto-imported by
+      // nuxt-auth-utils) sends back 401 if there is no user in the session, so
+      // the code below only runs for signed-in requests.
+      export default defineEventHandler(async (event) => {
+        const { user } = await requireUserSession(event);
+        return { user };
+      });
+  # The login page. Posts credentials to /api/login, refreshes the client session
+  # so useUserSession updates, then navigates to the protected page.
+  - path: app/pages/login.vue
+    content: |
+      <!-- keel-generated. Login page. Posts to /api/login, refreshes the client
+           session (useUserSession), then navigates to the protected page.
+           Demo login: demo@example.com / password123. -->
+      <script setup lang="ts">
+      const { fetch: refreshSession } = useUserSession();
+      const credentials = reactive({ email: "", password: "" });
+      const errorMessage = ref("");
+
+      async function login() {
+        errorMessage.value = "";
+        try {
+          await $fetch("/api/login", { method: "POST", body: credentials });
+          await refreshSession();
+          await navigateTo("/dashboard");
+        } catch {
+          errorMessage.value = "Bad credentials";
+        }
+      }
+      </script>
+
+      <template>
+        <main style="max-width: 360px; margin: 80px auto; font-family: system-ui">
+          <h1>Sign in</h1>
+          <form @submit.prevent="login">
+            <input
+              v-model="credentials.email"
+              type="email"
+              placeholder="Email"
+              required
+              style="display: block; width: 100%; margin: 8px 0"
+            />
+            <input
+              v-model="credentials.password"
+              type="password"
+              placeholder="Password"
+              required
+              style="display: block; width: 100%; margin: 8px 0"
+            />
+            <button type="submit">Sign in</button>
+          </form>
+          <p v-if="errorMessage" style="color: crimson">{{ errorMessage }}</p>
+        </main>
+      </template>
+  # The protected page. Its middleware redirects unauthenticated visitors to
+  # /login, so reaching it means there is a session to read and clear.
+  - path: app/pages/dashboard.vue
+    content: |
+      <!-- keel-generated. Protected page. The auth route middleware below sends
+           unauthenticated visitors to /login, so this only renders for a signed-in
+           user. Logging out clears the sealed session cookie. -->
+      <script setup lang="ts">
+      definePageMeta({ middleware: ["auth"] });
+
+      const { user, clear: clearSession } = useUserSession();
+
+      async function logout() {
+        await clearSession();
+        await navigateTo("/login");
+      }
+      </script>
+
+      <template>
+        <main style="max-width: 480px; margin: 80px auto; font-family: system-ui">
+          <h1>Dashboard</h1>
+          <p>Signed in as <strong>{{ user?.email ?? "unknown" }}</strong>.</p>
+          <button @click="logout">Sign out</button>
+        </main>
+      </template>
+  # Route middleware that guards the protected page. definePageMeta references it
+  # by filename ("auth"). It runs on the client via the useUserSession composable.
+  - path: app/middleware/auth.ts
+    content: |
+      // keel-generated. Route middleware. Pages that set
+      // definePageMeta({ middleware: ["auth"] }) run this first; an unauthenticated
+      // visitor is redirected to /login. useUserSession is auto-imported.
+      export default defineNuxtRouteMiddleware(() => {
+        const { loggedIn } = useUserSession();
+        if (!loggedIn.value) {
+          return navigateTo("/login");
+        }
+      });
+  # A focused test. It exercises the pure verifyCredentials stub (good creds are
+  # accepted, bad creds rejected) without needing a Nuxt runtime, so it runs under
+  # the node-vitest addon exactly as `keel run test` invokes it.
+  - path: server/api/login.test.ts
+    content: |
+      // keel-generated. Proves the login credential check: the demo user is
+      // accepted, a wrong password is rejected. It imports the pure
+      // verifyCredentials export from the handler, so it runs under the standard
+      // node-vitest addon with no Nuxt runtime. `keel run test` runs it.
+      import { expect, test } from "vitest";
+
+      import { verifyCredentials } from "./login.post";
+
+      test("accepts the demo user", () => {
+        const user = verifyCredentials({ email: "demo@example.com", password: "password123" });
+        expect(user).toEqual({ name: "Demo User", email: "demo@example.com" });
+      });
+
+      test("rejects a wrong password", () => {
+        const user = verifyCredentials({ email: "demo@example.com", password: "wrong-password" });
+        expect(user).toBeNull();
+      });
+  # The session secret. nuxt-auth-utils encrypts the sealed cookie with
+  # NUXT_SESSION_PASSWORD, which must be at least 32 characters. Written to .env
+  # (git-ignored by the base framework) AND documented in .env.example.
+  - path: .env
+    content: |
+      # keel-generated. nuxt-auth-utils seals the session cookie with this key.
+      # It must be at least 32 characters. This file is git-ignored. Generate one:
+      #   openssl rand -base64 32
+      # In dev, the module auto-fills a value here if it is missing; set a real one
+      # in your production environment before deploying.
+      NUXT_SESSION_PASSWORD=change-me-to-at-least-32-characters-long
+  - path: .env.example
+    content: |
+      # Copy to .env and fill in. Generate secrets with: keel secrets sync
+      # nuxt-auth-utils session seal key. Must be 32+ characters.
+      NUXT_SESSION_PASSWORD=change-me-to-at-least-32-characters-long
+  - path: AUTH-SETUP.md
+    content: |
+      <!-- keel-generated -->
+      # Auth (nuxt-auth-utils) - wired by keel
+
+      keel scaffolded nuxt-auth-utils into this Nuxt app. It is the Nuxt team's
+      official auth module: it stores the session in a secured, sealed cookie, so
+      there is no database to run just to prove the flow. Everything below is
+      already in place; the only real work left is swapping the stubbed credential
+      check for your own user store.
+
+      ## What's wired
+      - `nuxt.config.ts` - registers `nuxt-auth-utils` in `modules` (keeps
+        devtools). This is the edit `npx nuxi module add auth-utils` makes.
+      - `server/api/login.post.ts` - validates the body with zod and checks a
+        **STUB demo user** (`demo@example.com` / `password123`) via the pure
+        `verifyCredentials` function, then calls `setUserSession`. Replace
+        `verifyCredentials` with a real lookup (hash-verify against your users
+        table).
+      - `server/api/logout.post.ts` - `clearUserSession` (drops the cookie).
+      - `server/api/me.get.ts` - protected route, guarded by `requireUserSession`
+        (401 when signed out).
+      - `app/pages/login.vue` - the login form (uses `useUserSession`).
+      - `app/pages/dashboard.vue` - a protected page.
+      - `app/middleware/auth.ts` - route middleware that redirects unauthenticated
+        visitors to `/login`; `dashboard.vue` opts in via `definePageMeta`.
+      - `.env` - `NUXT_SESSION_PASSWORD` (the sealed-cookie key, 32+ chars).
+      - `server/api/login.test.ts` - proves the credential check; runs under the
+        Vitest addon (`keel run test`).
+
+      ## Before you ship
+      1. Set a real `NUXT_SESSION_PASSWORD` (32+ chars): `openssl rand -base64 32`.
+         In dev the module auto-fills one; production needs a real value set.
+      2. Replace the `verifyCredentials` stub in `server/api/login.post.ts` with a
+         real credential check (hash-verify against your users table).
+      3. Optional: add OAuth by dropping a `defineOAuth*EventHandler` server route
+         (e.g. `server/routes/auth/github.get.ts`) and calling `setUserSession` in
+         its `onSuccess`. See https://nuxt.com/modules/auth-utils.

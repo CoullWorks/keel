@@ -1,0 +1,143 @@
+id: nginx-express
+schema_version: 2
+kind: config
+label: Express server block for NGINX
+updated: 2026-08-12
+# Written from docs/infra/express.md plus the nginx directive reference.
+#
+# Division of labour. The shared NGINX service (recipes/infra/web/nginx.yaml)
+# owns .keel/nginx/nginx.conf: worker and http-level tuning, the log format,
+# gzip and its type list, server_tokens off, the default security headers,
+# real_ip from the trusted proxy, and the default client_max_body_size and
+# proxy timeouts. This recipe owns one server block and the compose wiring that
+# mounts it. Nothing here redeclares a shared directive except where the
+# comment says which one it overrides and why.
+#
+# Why the forwarded-header set is written out in every framework's block rather
+# than inherited from the shared http level: nginx documents that these
+# directives "are inherited from the previous configuration level if and only if
+# there are no proxy_set_header directives defined on the current level". Hono
+# has to overwrite X-Forwarded-For and SvelteKit has to add X-Forwarded-Host, so
+# those blocks would silently drop every inherited header. Restating the set
+# everywhere is the only form that behaves the same in all nine.
+when:
+  framework: express
+  uses: nginx
+patch:
+  - file: .env
+    # Express `trust proxy` defaults to false, and its own warning is that
+    # setting it to true requires the last trusted proxy to be removing or
+    # overwriting X-Forwarded-For, -Host and -Proto, "otherwise it may be
+    # possible for the client to provide any value". So never true.
+    #
+    # loopback alone is wrong here, and this is the value most people get wrong.
+    # The proxy is a sibling container on the compose bridge network, so its
+    # address is RFC1918, not 127.0.0.1, and a loopback-only setting never
+    # matches: every request would look like it came straight from the proxy.
+    # loopback and uniquelocal are both pre-configured subnet names Express
+    # documents. See docs/infra/express.md.
+    set:
+      TRUST_PROXY: "loopback, uniquelocal"
+files:
+  - path: docker/nginx/conf.d/app.conf
+    content: |
+      # Express, proxied. Included by the shared nginx.conf from
+      # /etc/nginx/conf.d/*.conf; everything http-level lives there.
+      server {
+        listen 80;
+        server_name _;
+
+        # Overrides the shared default (nginx documents client_max_body_size 1m).
+        # express.json() and express.urlencoded() both default `limit` to
+        # "100kb", so anything between the two limits is rejected by Express
+        # with an error the proxy never sees. Raise both together or neither.
+        client_max_body_size 100k;
+
+        location / {
+          proxy_pass http://app:3000;
+
+          # Express derives req.hostname from X-Forwarded-Host, req.protocol
+          # from X-Forwarded-Proto and req.ip from X-Forwarded-For, but only
+          # once `trust proxy` is set. The .env patch in this recipe sets it.
+          proxy_set_header Host              $host;
+          proxy_set_header X-Real-IP         $remote_addr;
+          proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+
+          # Append, not overwrite: nginx adds the real peer to whatever the
+          # client sent, and the framework walks the list from the right
+          # discarding trusted hops, so a client-supplied prefix is dropped
+          # before it can become the client IP. That holds while the real client
+          # is outside the trusted ranges, which is the internet-facing case. If
+          # this app only ever serves traffic that is itself inside those ranges,
+          # switch to `$remote_addr` here so the header is true by construction,
+          # which is what the Hono recipe has to do because Hono has no walk at
+          # all. Keep the append form if a CDN or load balancer sits in front and
+          # you need its hop preserved, and widen the trusted set to match.
+
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header X-Forwarded-Host  $host;
+
+          # WebSocket upgrade. Express does not handle the upgrade path itself;
+          # you attach a WebSocket server to the underlying http.Server. This is
+          # nginx's simple documented form. It sends Connection: upgrade on
+          # every request, which is what Fastify's own published config does
+          # too. The general alternative is a `map $http_upgrade
+          # $connection_upgrade` at http level, which only the shared nginx.conf
+          # can declare because map is an http-context directive.
+          proxy_set_header Upgrade    $http_upgrade;
+          proxy_set_header Connection "upgrade";
+
+          # Buffering is left at the shared default (nginx documents
+          # proxy_buffering on). Express takes no position on streaming and
+          # ships nothing that streams by default.
+
+          # No `upstream { keepalive N; }` is declared, so nginx opens a fresh
+          # connection per request. That is deliberate: with upstream keep-alive
+          # on, Node's 5 second default idle close against nginx's 60 second
+          # proxy_read_timeout produces the intermittent 502 that AdonisJS
+          # documents and Express does not. If you add upstream keep-alive here,
+          # raise the app's server.keepAliveTimeout above proxy_read_timeout.
+        }
+
+        # Liveness for the proxy itself, answered without touching the app so a
+        # database blip cannot restart the web tier.
+        location = /healthz {
+          access_log off;
+          add_header Content-Type text/plain;
+          return 200 "ok\n";
+        }
+      }
+provision:
+  compose:
+    files:
+      - path: compose.override.yaml
+        content: |
+          # Compose merges compose.override.yaml over compose.yaml with no extra
+          # flags, so the app service written by the env recipe is untouched.
+          services:
+            nginx:
+              image: nginx:1.27-alpine
+              restart: unless-stopped
+              depends_on:
+                app:
+                  condition: service_healthy
+              # The app service stays on `expose` only, so this is the single
+              # route in. That is what makes the trusted-hop setting sound:
+              # there is no second, shorter path a client could take.
+              ports:
+                - "${HTTP_PORT:-8080}:80"
+              volumes:
+                # Shared, owned by recipes/infra/web/nginx.yaml.
+                - ./.keel/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+                # This framework's server block, owned by this recipe.
+                - ./docker/nginx/conf.d:/etc/nginx/conf.d:ro
+              healthcheck:
+                test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+                interval: 15s
+                timeout: 5s
+                retries: 5
+                start_period: 10s
+              stop_grace_period: 30s
+  # Native env: no container to add. The server block above still applies, but
+  # change proxy_pass to http://127.0.0.1:3000 because there is no `app` host.
+  local: {}

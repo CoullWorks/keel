@@ -1,0 +1,275 @@
+id: flask-docker
+schema_version: 2
+kind: env
+env_family: compose
+label: Docker (compose)
+appliesTo: [flask]
+provides: [env]
+priority: -10
+updated: 2026-08-12
+# Flask is a WSGI application, not a server: "A WSGI server is used to run the
+# application". The development server is out of the question here, and the docs
+# say so twice, in bold: "Do not use the development server when deploying to
+# production. It is intended for use only during local development. It is not
+# designed to be particularly secure, stable, or efficient." Note their
+# definition too: "'Production' means 'not development'", including a tool used
+# privately by one person.
+#
+# gunicorn is the server this env uses, from Flask's own list. Flask's session
+# is a signed cookie, so it survives across processes and replicas and this
+# scales behind an ordinary stateless load balancer with no session affinity.
+# That is not true of Streamlit, Gradio or Reflex.
+#
+# A web server in front is a separate choice: add `nginx` or `apache` and the
+# config recipe under infra/ drops in the server block or VirtualHost.
+# See docs/infra/flask.md.
+commands:
+  # --build so a changed Dockerfile actually rebuilds.
+  start: "docker compose up -d --build"
+  # Where the project can be opened once the build finishes.
+  site_url: "http://localhost:{{http_port}}"
+  # How this environment tears itself down. Used when a build fails partway:
+  # keel removes the directory it created, and without this the containers,
+  # volumes and network it started stay behind holding a bind mount to a
+  # path that no longer exists. The next attempt then reuses that container
+  # and dies with "current working directory is outside of container mount
+  # namespace root".
+  down: "docker compose down -v --remove-orphans"
+  restart: "docker compose restart"
+  create: "docker compose build"
+  # -T because these run from scripts and CI, where there is no TTY.
+  exec: "docker compose exec -T app"
+smoke:
+  - "docker compose ps"
+files:
+  - path: Dockerfile
+    content: |
+      # Two kinds of image, and the distinction is not cosmetic.
+      #
+      # `dev` is what compose builds. It carries no application code and no
+      # dependencies, because the project is bind-mounted from the host: `uv
+      # sync` run through keel writes .venv and uv.lock to your working tree
+      # where they belong, and an edit is live without a rebuild.
+      #
+      # The stages after it build the production image, which copies the source
+      # in and installs without dev dependencies. Build it explicitly with
+      # `docker build --target runtime .`.
+      #
+      # Pointing compose at the production stage instead would look like it
+      # works and would not: with no bind mount, everything uv writes lands in
+      # a layer that the next `--build` discards.
+      FROM python:{{pin.python_version}}-slim-bookworm AS dev
+      COPY --from=ghcr.io/astral-sh/uv:0.12.3 /uv /uvx /bin/
+      WORKDIR /app
+      # The venv lives in the bind-mounted tree, exactly as it would on the
+      # host, so an editor and a shell outside the container see the same
+      # interpreter and the same packages.
+      ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
+          PATH="/app/.venv/bin:$PATH" \
+          PYTHONUNBUFFERED=1
+      # uid 1000, matching the default first user on a Linux or WSL host, so
+      # files created in the bind mount are owned by you rather than by root.
+      RUN useradd --create-home --uid 1000 dev
+      USER dev
+      EXPOSE 8000
+      # The same probe the production stage uses. Without it here, a web server
+      # depending on `condition: service_healthy` can never start: compose
+      # reports "container has no healthcheck configured" and gives up.
+      # start-period is longer than production's because the first run installs
+      # dependencies into the bind mount before the app can serve anything.
+      HEALTHCHECK --interval=10s --timeout=5s --start-period=180s --retries=10 \
+        CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status == 200 else 1)"
+      # The bind mount has no .venv on a first run, and the framework itself
+      # lives in it, so `uv run` would fail and `restart: unless-stopped` would
+      # turn that into a restart loop that `docker compose exec` cannot attach
+      # to. Wait for the install keel is about to run, then exec the real
+      # server so it still receives SIGTERM as PID 1.
+      CMD ["sh", "-c", "until [ -d .venv ]; do echo 'waiting for dependencies'; sleep 2; done; exec uv run flask --app app run --host 0.0.0.0 --port 8000 --debug"]
+
+      # keel-generated.
+      #
+      # Multi-stage: the build layer carries uv and the lockfile, the runtime
+      # layer carries neither. Nothing that is only needed to install ends up in
+      # the image that runs.
+      #
+      # The base is pinned to a patch release, not to 3.13-slim: a floating tag
+      # turns an unrelated rebuild into an unreviewed Python upgrade. Flask
+      # "supports Python 3.9 and newer" and recommends "using the latest version
+      # of Python", so 3.13 is comfortably inside its range.
+      FROM python:{{pin.python_version}}-slim-bookworm AS build
+
+      # uv pinned, per uv's own Docker guidance: `COPY --from=
+      # ghcr.io/astral-sh/uv:0.12.3 /uv /uvx /bin/`. :latest would mean a
+      # different installer on every build.
+      COPY --from=ghcr.io/astral-sh/uv:0.12.3 /uv /uvx /bin/
+
+      WORKDIR /app
+      ENV UV_COMPILE_BYTECODE=1 \
+          UV_LINK_MODE=copy \
+          UV_PROJECT_ENVIRONMENT=/app/.venv
+
+      # Dependencies before application code, so editing a view does not
+      # invalidate the dependency layer.
+      COPY pyproject.toml uv.lock* ./
+      # --frozen fails when the lockfile is out of date instead of quietly
+      # resolving a different dependency tree.
+      # A freshly scaffolded project has no uv.lock yet, so the first build
+      # creates one; commit it, and from then on --frozen is a real guarantee
+      # rather than a formality. The branch exists so that a lockfile which IS
+      # present is never silently regenerated.
+      RUN if [ -f uv.lock ]; then \
+            uv sync --frozen --no-dev --no-install-project; \
+          else \
+            uv lock && uv sync --frozen --no-dev --no-install-project; \
+          fi
+      COPY . .
+      RUN uv sync --frozen --no-dev
+
+      # No build toolchain is installed anywhere in this file. Flask is pure
+      # Python, and it notes gunicorn "is easy to install as it does not require
+      # additional dependencies or compilation". Add apt packages only for what
+      # the application itself imports.
+
+      FROM python:{{pin.python_version}}-slim-bookworm AS runtime
+      # Non-root, and not as a style preference. Flask: "Gunicorn should not be
+      # run as root because it would cause your application code to run as root,
+      # which is not secure. However, this means it will not be possible to bind
+      # to port 80 or 443. Instead, a reverse proxy such as nginx or Apache httpd
+      # should be used in front of Gunicorn."
+      RUN useradd --create-home --uid 10001 app
+      # uv in the runtime stage too: keel's task vocabulary runs `uv run pytest`
+      # inside this container. One pinned static binary; the dev dependency tree
+      # is still absent from the image.
+      COPY --from=ghcr.io/astral-sh/uv:0.12.3 /uv /uvx /bin/
+      WORKDIR /app
+      COPY --from=build --chown=app:app /app /app
+      ENV PATH="/app/.venv/bin:$PATH" \
+          PYTHONUNBUFFERED=1 \
+          PYTHONDONTWRITEBYTECODE=1 \
+          UV_PROJECT_ENVIRONMENT=/app/.venv
+      USER app
+      EXPOSE 8000
+
+      # Flask publishes no health endpoint, so this probes /health, a route in
+      # the generated app.py. A 200 proves the WSGI callable is routing and
+      # returning JSON, which a TCP connect does not. urllib rather than curl,
+      # because Python is already in the image.
+      HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=5 \
+        CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status == 200 else 1)"
+
+      # Flask's documented form is `gunicorn -w 4 'hello:app'`, where the import
+      # string is "{module_import}:{app_variable}". Here that is app:app, from
+      # the generated app.py.
+      #
+      # --workers 4: Flask's own guidance is "a starting value could be CPU * 2",
+      # and it warns "The default is only 1 worker, which is probably not what
+      # you want". Gunicorn's own design page says (2 x CPU cores) + 1 instead.
+      # These are two different vendors' numbers and blending them would be
+      # dishonest, so this follows Flask's, because it is Flask being deployed.
+      # WEB_CONCURRENCY overrides it without a rebuild.
+      # --access-logfile -: Flask points this out as a real default, not a nicety.
+      # "Logs for each request aren't shown by default, only worker info and
+      # errors are shown", so without this the container barely logs.
+      # --graceful-timeout 30: explicit, so the drain window is a decision.
+      # compose sets stop_grace_period longer than it below.
+      # --timeout 60: gunicorn's default is 30, which is tight for a view that
+      # waits on a slow upstream; a killed worker loses the request.
+      # --max-requests with jitter bounds leak growth and staggers the restarts.
+      # --worker-tmp-dir /dev/shm: gunicorn's own note is that os.fchmod on the
+      # heartbeat file "may block workers on disk-backed filesystems".
+      # --forwarded-allow-ips: gunicorn defaults to 127.0.0.1,::1 and would
+      # ignore X-Forwarded-* from a proxy in another container. "*" is only safe
+      # because this port is never published.
+      #
+      # The 0.0.0.0 bind is unavoidable in a container, and Flask warns "Don't do
+      # this when using a reverse proxy setup, otherwise it will be possible to
+      # bypass the proxy". compose answers that at the network layer instead: the
+      # port is exposed, never published.
+      CMD ["gunicorn", "app:app", \
+           "--bind", "0.0.0.0:8000", \
+           "--workers", "4", \
+           "--graceful-timeout", "30", \
+           "--timeout", "60", \
+           "--max-requests", "1000", \
+           "--max-requests-jitter", "100", \
+           "--worker-tmp-dir", "/dev/shm", \
+           "--forwarded-allow-ips", "*", \
+           "--access-logfile", "-", \
+           "--error-logfile", "-"]
+
+      # If the app uses the factory pattern, the import string becomes a call:
+      #   CMD ["gunicorn", "app:create_app()", ...]
+      # If it needs "numerous, long running, concurrent connections", Flask
+      # documents the gevent worker instead: add "-k", "gevent" here and add
+      # gevent to pyproject.toml. Flask is careful about what that is: "This is
+      # not the same as Python's async/await, or the ASGI server spec."
+  - path: compose.yaml
+    content: |
+      # keel-generated.
+      services:
+        app:
+          build:
+            context: .
+            # dev, not a production stage. See the note at the top of the
+            # Dockerfile: without the bind mount below, anything installed into
+            # this container is discarded by the next build.
+            target: dev
+          volumes:
+            # The project itself, so uv writes .venv and uv.lock to the host and
+            # an edit takes effect without a rebuild.
+            - .:/app
+          restart: unless-stopped
+          env_file:
+            # required: false so a checkout without a .env still comes up.
+            # Listing a missing env_file the short way is a hard compose error.
+            - path: .env
+              required: false
+          # expose, not ports. gunicorn's sync worker "Requires a buffering
+          # proxy (nginx, HAProxy) for production", and Flask warns that binding
+          # externally behind a proxy makes it "possible to bypass the proxy".
+          # Only the web server is ever published.
+          expose: ["8000"]
+          # Longer than gunicorn's --graceful-timeout of 30s. Equal values mean
+          # Docker SIGKILLs a worker at the exact moment it is still entitled to
+          # be draining.
+          stop_grace_period: 45s
+
+        # The database, when one is selected. Every field that differs between
+        # Postgres, MySQL and MariaDB comes from the chosen db recipe as a var,
+        # so this one definition serves all three.
+        db:
+          image: {{db.type}}:{{db.version}}
+          restart: unless-stopped
+          environment: {{db.compose_env}}
+          volumes:
+            - dbdata:{{db.data_dir}}
+            - {{db.config_mount}}
+          {{db.command}}
+          healthcheck:
+            test: {{db.healthcheck}}
+            interval: 10s
+            timeout: 5s
+            retries: 12
+            start_period: 30s
+
+      volumes:
+        dbdata:
+  - path: .dockerignore
+    content: |
+      .git
+      .github
+      .venv
+      .keel
+      # The web server's own config and the compose files: mounted by the proxy
+      # container, never needed inside the application image.
+      docker/
+      compose.yaml
+      compose.override.yaml
+      Dockerfile
+      __pycache__
+      *.pyc
+      .env
+      instance/
+      .pytest_cache
+      .ruff_cache
+      .mypy_cache

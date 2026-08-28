@@ -1,0 +1,146 @@
+id: nginx-hono
+schema_version: 2
+kind: config
+label: Hono server block for NGINX
+updated: 2026-08-12
+# Written from docs/infra/hono.md, and Hono is the one framework here where the
+# research changes what the proxy has to do rather than just how it is written.
+#
+# Hono has NO trust-proxy setting and no equivalent. Not a different name for
+# one: nothing. getConnInfo returns the socket peer, so behind this proxy every
+# client IP is the proxy's, and the ConnInfo documentation never mentions
+# X-Forwarded-For. Express and Fastify both ship the parsing and the hop logic;
+# Hono does not, so there is no vendor-provided validation to lean on.
+#
+# The consequence for this file is concrete and is the only place in these nine
+# recipes where the header handling differs on purpose: X-Forwarded-For is
+# OVERWRITTEN with $remote_addr rather than appended to with
+# $proxy_add_x_forwarded_for. Appending would hand the app a header whose left
+# entries are client-supplied, and the app has nothing to validate them with, so
+# any client could claim any IP. Overwriting makes the single value in the
+# header true by construction. That decision is keel's, not Hono's, and
+# docs/infra/hono.md says so.
+#
+# Division of labour. The shared NGINX service (recipes/infra/web/nginx.yaml)
+# owns .keel/nginx/nginx.conf: worker and http-level tuning, the log format,
+# gzip and its type list, server_tokens off, the default security headers,
+# real_ip from the trusted proxy, and the default client_max_body_size and
+# proxy timeouts. This recipe owns one server block and the compose wiring.
+when:
+  framework: hono
+  uses: nginx
+patch:
+  - file: .env
+    # Consumed by the forwarded-header handling the app has to implement itself.
+    # With the overwrite above there is exactly one entry in X-Forwarded-For and
+    # it is the real client, so the correct depth is 1. This value is only
+    # meaningful because the application reads it; Hono supplies no built-in
+    # that would.
+    set:
+      TRUSTED_PROXY_HOPS: "1"
+files:
+  - path: docker/nginx/conf.d/app.conf
+    content: |
+      # Hono on @hono/node-server, proxied. Included by the shared nginx.conf
+      # from /etc/nginx/conf.d/*.conf; everything http-level lives there.
+      server {
+        listen 80;
+        server_name _;
+
+        # Hono publishes no framework-level body limit for Node: its Body Limit
+        # middleware requires maxSize and its own example uses 100kb, but the
+        # page carries a Bun caveat and no Node note at all, and on Node there
+        # is no runtime cap below the middleware. So nginx is the only limit
+        # unless the app adds the middleware. 1m is keel's number, chosen to
+        # match the shared default rather than silently allowing unbounded
+        # uploads; set the middleware to the same value.
+        client_max_body_size 1m;
+
+        location / {
+          proxy_pass http://app:3000;
+
+          proxy_set_header Host              $host;
+          proxy_set_header X-Real-IP         $remote_addr;
+          # Overwrite, not append. See the note at the top of this recipe: this
+          # is the whole reason Hono's block differs from the other eight.
+          proxy_set_header X-Forwarded-For   $remote_addr;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header X-Forwarded-Host  $host;
+
+          # @hono/node-server's autoCleanupIncoming defaults to true and its
+          # documentation is effectively a denial-of-service warning: without
+          # the cleanup, "incomplete requests from clients may cause the
+          # application to stop responding". It says the cleanup may be turned
+          # off for trusted clients "such as in a reverse proxy environment".
+          # Leave it on anyway: nginx buffers the request body by default
+          # (proxy_request_buffering on) so slow bodies terminate here, but the
+          # exemption also requires no route to answer before reading the body,
+          # which this config cannot verify on the app's behalf.
+        }
+
+        # Hono's own WebSocket example serves the upgrade at /ws via
+        # upgradeWebSocket from @hono/node-server with a `ws` WebSocketServer.
+        # This is nginx's simple documented upgrade form, scoped to that path so
+        # ordinary requests keep a normal Connection header and the upstream
+        # connection semantics are not changed for the whole site. Move or widen
+        # the location if the app upgrades elsewhere.
+        location /ws {
+          proxy_pass http://app:3000;
+          proxy_set_header Upgrade    $http_upgrade;
+          proxy_set_header Connection "upgrade";
+          proxy_set_header Host              $host;
+          proxy_set_header X-Real-IP         $remote_addr;
+          proxy_set_header X-Forwarded-For   $remote_addr;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header X-Forwarded-Host  $host;
+          # A WebSocket is idle between messages, so the shared
+          # proxy_read_timeout (nginx documents 60s) would close it. Overridden
+          # here and only here.
+          proxy_read_timeout 3600s;
+          proxy_send_timeout 3600s;
+        }
+
+        # Answered by nginx, so the web tier's liveness does not depend on the
+        # app. add_header at this level stops the shared http-level add_header
+        # directives being inherited into it, which is nginx's documented
+        # behaviour and is harmless for a health endpoint.
+        location = /healthz {
+          access_log off;
+          add_header Content-Type text/plain;
+          return 200 "ok\n";
+        }
+      }
+provision:
+  compose:
+    files:
+      - path: compose.override.yaml
+        content: |
+          # Compose merges compose.override.yaml over compose.yaml with no extra
+          # flags, so the app service written by the env recipe is untouched.
+          services:
+            nginx:
+              image: nginx:1.27-alpine
+              restart: unless-stopped
+              depends_on:
+                app:
+                  condition: service_healthy
+              # The app service stays on `expose` only. That matters more for
+              # Hono than for the others: the overwrite of X-Forwarded-For is
+              # only trustworthy while this proxy is the single route in.
+              ports:
+                - "${HTTP_PORT:-8080}:80"
+              volumes:
+                # Shared, owned by recipes/infra/web/nginx.yaml.
+                - ./.keel/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+                # This framework's server block, owned by this recipe.
+                - ./docker/nginx/conf.d:/etc/nginx/conf.d:ro
+              healthcheck:
+                test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+                interval: 15s
+                timeout: 5s
+                retries: 5
+                start_period: 10s
+              stop_grace_period: 30s
+  # Native env: no container to add. The server block above still applies, but
+  # change proxy_pass to http://127.0.0.1:3000 because there is no `app` host.
+  local: {}

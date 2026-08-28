@@ -1,0 +1,365 @@
+id: nestjs-jwt
+schema_version: 2
+kind: addon
+label: JWT auth (Passport, login + protected routes, bcrypt)
+category: Auth
+appliesTo: [nestjs]
+requires: [nestjs]
+provides: [auth]
+updated: 2026-08-24
+pins:
+  "@nestjs/passport": ^11.0.5
+  "@nestjs/jwt": ^11.0.2
+  passport: ^0.7.0
+  passport-jwt: ^4.0.1
+  bcrypt: ^6.0.0
+# The canonical NestJS JWT auth from the official Authentication + Passport docs:
+# @nestjs/passport wires Passport into Nest, passport-jwt reads a Bearer token,
+# @nestjs/jwt signs and verifies it, bcrypt hashes the password. It is scaffolded
+# with a STUB user store (one demo user, bcrypt-hashed) so the flow boots with
+# zero database. Replace UsersService with a real user lookup before you ship.
+install:
+  # Runtime deps for the JWT flow. Under a native env {{exec}} renders empty and
+  # the engine drops the prefix.
+  - "{{exec}} npm install @nestjs/passport passport passport-jwt @nestjs/jwt bcrypt"
+  # Type stubs for the two untyped libraries. passport itself ships its own types
+  # from v0.6, so only passport-jwt and bcrypt need @types.
+  - "{{exec}} npm install -D @types/passport-jwt @types/bcrypt"
+smoke:
+  # `npm run build` (nest build -> tsc) compiles every generated .ts file: the
+  # module, service, strategy, guard, controllers and the test. A typo, a missing
+  # import or a bad type fails here. This mirrors how nextjs-authjs proves its
+  # scaffold at build time. Under a native env {{exec}} renders empty.
+  - "{{exec}} npm run build"
+files:
+  # The AuthModule: wires PassportModule + JwtModule and registers the service,
+  # strategy and controller. It is NOT imported anywhere automatically - keel does
+  # not overwrite app.module.ts. AUTH-SETUP.md documents the one-line import.
+  - path: src/auth/auth.module.ts
+    content: |
+      // keel-generated. The auth feature module. It configures Passport and signs
+      // JWTs with JwtModule.register (secret + 1h expiry, from the docs). Import
+      // this into AppModule to switch auth on - see AUTH-SETUP.md. The JWT_SECRET
+      // env var signs and verifies every token; set it in .env.
+      import { Module } from "@nestjs/common";
+      import { JwtModule } from "@nestjs/jwt";
+      import { PassportModule } from "@nestjs/passport";
+
+      import { AuthController } from "./auth.controller";
+      import { AuthService } from "./auth.service";
+      import { JwtStrategy } from "./jwt.strategy";
+      import { MeController } from "./me.controller";
+      import { UsersService } from "./users.service";
+
+      @Module({
+        imports: [
+          PassportModule,
+          JwtModule.register({
+            // STUB default: the demo secret lets the build and test pass with no
+            // setup. In any real deployment set JWT_SECRET in the environment.
+            secret: process.env.JWT_SECRET ?? "dev-only-change-me",
+            signOptions: { expiresIn: "1h" },
+          }),
+        ],
+        controllers: [AuthController, MeController],
+        providers: [AuthService, JwtStrategy, UsersService],
+        exports: [AuthService],
+      })
+      export class AuthModule {}
+  # The user store. STUB: one in-memory demo user with a bcrypt-hashed password,
+  # so login works without a database. Swap findByEmail for a real repository.
+  - path: src/auth/users.service.ts
+    content: |
+      // keel-generated. STUB user store. It holds one demo user in memory with a
+      // bcrypt-hashed password, so login works with zero database setup.
+      //
+      // Demo credentials: demo@example.com / password123
+      //
+      // Replace findByEmail with a real lookup against your users table (and drop
+      // the seeded user) before you ship. Keep passwords hashed - never store or
+      // compare plaintext.
+      import { Injectable } from "@nestjs/common";
+      import * as bcrypt from "bcrypt";
+
+      export interface User {
+        id: number;
+        email: string;
+        // The bcrypt hash, never the plaintext password.
+        passwordHash: string;
+      }
+
+      @Injectable()
+      export class UsersService {
+        // bcrypt hash of "password123" (cost 10). Generated at load so the demo
+        // works offline; a real store would read pre-hashed values from the DB.
+        private readonly users: User[] = [
+          {
+            id: 1,
+            email: "demo@example.com",
+            passwordHash: bcrypt.hashSync("password123", 10),
+          },
+        ];
+
+        // STUB: replace with a real query, e.g. this.repo.findOne({ email }).
+        async findByEmail(email: string): Promise<User | undefined> {
+          return this.users.find((u) => u.email === email);
+        }
+      }
+  # The service: validateUser hashes-compares the password (bcrypt), login issues
+  # a signed JWT. This is the docs' AuthService, minus the local strategy.
+  - path: src/auth/auth.service.ts
+    content: |
+      // keel-generated. The auth service. validateUser looks the user up and
+      // bcrypt-compares the password; login signs a JWT whose payload identifies
+      // the user (sub + email). This is the canonical NestJS AuthService.
+      import { Injectable, UnauthorizedException } from "@nestjs/common";
+      import { JwtService } from "@nestjs/jwt";
+      import * as bcrypt from "bcrypt";
+
+      import { UsersService } from "./users.service";
+
+      export interface AuthedUser {
+        id: number;
+        email: string;
+      }
+
+      @Injectable()
+      export class AuthService {
+        constructor(
+          private readonly usersService: UsersService,
+          private readonly jwtService: JwtService,
+        ) {}
+
+        // Returns the user (minus the hash) on a correct password, or throws 401.
+        async validateUser(email: string, password: string): Promise<AuthedUser> {
+          const user = await this.usersService.findByEmail(email);
+          if (!user) {
+            throw new UnauthorizedException("Invalid credentials");
+          }
+          const ok = await bcrypt.compare(password, user.passwordHash);
+          if (!ok) {
+            throw new UnauthorizedException("Invalid credentials");
+          }
+          return { id: user.id, email: user.email };
+        }
+
+        // Signs a short-lived access token. `sub` is the JWT standard subject
+        // claim; JwtStrategy.validate reads it back on protected routes.
+        async login(user: AuthedUser): Promise<{ access_token: string }> {
+          const payload = { sub: user.id, email: user.email };
+          return { access_token: await this.jwtService.signAsync(payload) };
+        }
+      }
+  # The passport-jwt strategy. Reads the Bearer token, verifies it with the same
+  # secret, and returns the identity that Nest attaches as req.user.
+  - path: src/auth/jwt.strategy.ts
+    content: |
+      // keel-generated. The passport-jwt strategy. It pulls the token from the
+      // "Authorization: Bearer <token>" header, verifies the signature with
+      // JWT_SECRET, and rejects expired tokens. Whatever validate returns becomes
+      // req.user on every route guarded by JwtAuthGuard.
+      import { Injectable } from "@nestjs/common";
+      import { PassportStrategy } from "@nestjs/passport";
+      import { ExtractJwt, Strategy } from "passport-jwt";
+
+      export interface JwtPayload {
+        sub: number;
+        email: string;
+      }
+
+      @Injectable()
+      export class JwtStrategy extends PassportStrategy(Strategy) {
+        constructor() {
+          super({
+            jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
+            ignoreExpiration: false,
+            // Must match the secret AuthModule signs with.
+            secretOrKey: process.env.JWT_SECRET ?? "dev-only-change-me",
+          });
+        }
+
+        // Passport has already verified the signature and expiry by the time this
+        // runs. The return value is set as req.user.
+        async validate(payload: JwtPayload) {
+          return { userId: payload.sub, email: payload.email };
+        }
+      }
+  # The guard. Thin subclass of AuthGuard('jwt') so protected routes read as
+  # @UseGuards(JwtAuthGuard) rather than the stringly-typed AuthGuard('jwt').
+  - path: src/auth/jwt-auth.guard.ts
+    content: |
+      // keel-generated. Guard for protected routes. It runs the "jwt" strategy
+      // above; an absent, malformed or expired Bearer token yields 401 before the
+      // handler runs. Naming it makes controllers read @UseGuards(JwtAuthGuard).
+      import { Injectable } from "@nestjs/common";
+      import { AuthGuard } from "@nestjs/passport";
+
+      @Injectable()
+      export class JwtAuthGuard extends AuthGuard("jwt") {}
+  # The login endpoint. POST /auth/login validates the body and returns a token.
+  - path: src/auth/auth.controller.ts
+    content: |
+      // keel-generated. The login endpoint. POST /auth/login with a JSON body of
+      // { email, password } returns { access_token }. AuthService throws 401 on
+      // bad credentials. Use the token as "Authorization: Bearer <token>" against
+      // protected routes.
+      import { Body, Controller, HttpCode, Post } from "@nestjs/common";
+
+      import { AuthService } from "./auth.service";
+
+      interface LoginDto {
+        email: string;
+        password: string;
+      }
+
+      @Controller("auth")
+      export class AuthController {
+        constructor(private readonly authService: AuthService) {}
+
+        @Post("login")
+        @HttpCode(200)
+        async login(@Body() body: LoginDto) {
+          const user = await this.authService.validateUser(
+            body.email,
+            body.password,
+          );
+          return this.authService.login(user);
+        }
+      }
+  # The protected route. GET /me returns req.user, which only exists once the
+  # JWT strategy has verified the token - proof the whole flow works end to end.
+  - path: src/auth/me.controller.ts
+    content: |
+      // keel-generated. A protected route. @UseGuards(JwtAuthGuard) requires a
+      // valid Bearer token; the guard runs JwtStrategy, which sets req.user to
+      // { userId, email }. Call this with the token from POST /auth/login. An
+      // unauthenticated request gets 401 and never reaches the handler.
+      import { Controller, Get, Req, UseGuards } from "@nestjs/common";
+      import type { Request } from "express";
+
+      import { JwtAuthGuard } from "./jwt-auth.guard";
+
+      @Controller("me")
+      export class MeController {
+        @UseGuards(JwtAuthGuard)
+        @Get()
+        me(@Req() req: Request) {
+          // req.user is whatever JwtStrategy.validate returned.
+          return req.user;
+        }
+      }
+  # A focused Jest spec: proves AuthService issues a token for the demo user and
+  # rejects a bad password. Runs under the Jest that `nest new` already ships.
+  - path: src/auth/auth.service.spec.ts
+    content: |
+      // keel-generated. Proves the core of the flow: the demo user logs in and
+      // gets a signed token, and a wrong password is rejected with 401. Runs
+      // under the framework's test runner (`keel run test`). It wires the real
+      // JwtService and the stub UsersService, so no mocks or database are needed.
+      import { UnauthorizedException } from "@nestjs/common";
+      import { JwtService } from "@nestjs/jwt";
+
+      import { AuthService } from "./auth.service";
+      import { UsersService } from "./users.service";
+
+      describe("AuthService", () => {
+        const jwt = new JwtService({ secret: "test-secret" });
+        const service = new AuthService(new UsersService(), jwt);
+
+        it("issues a token for the demo user", async () => {
+          const user = await service.validateUser(
+            "demo@example.com",
+            "password123",
+          );
+          const { access_token } = await service.login(user);
+          expect(typeof access_token).toBe("string");
+          const decoded = jwt.verify<{ sub: number; email: string }>(
+            access_token,
+            { secret: "test-secret" },
+          );
+          expect(decoded.email).toBe("demo@example.com");
+          expect(decoded.sub).toBe(1);
+        });
+
+        it("rejects a bad password", async () => {
+          await expect(
+            service.validateUser("demo@example.com", "wrong-password"),
+          ).rejects.toBeInstanceOf(UnauthorizedException);
+        });
+      });
+  # The signing secret. Git-ignored (.gitignore lists .env). JwtModule and the
+  # strategy both read JWT_SECRET; if it is unset they fall back to a dev-only
+  # default so the build passes, but you MUST set a real one before shipping.
+  - path: .env
+    content: |
+      # keel-generated. Read by JwtModule and JwtStrategy to sign and verify
+      # tokens. Keep it out of git (this file is git-ignored). Generate one with:
+      #   openssl rand -base64 32
+      JWT_SECRET=change-me
+  - path: .env.example
+    content: |
+      # Copy to .env and fill in. Generate a secret with: openssl rand -base64 32
+      # JWT_SECRET signs and verifies every access token.
+      JWT_SECRET=change-me
+  - path: AUTH-SETUP.md
+    content: |
+      <!-- keel-generated -->
+      # JWT auth (Passport) - wired by keel
+
+      keel scaffolded the canonical NestJS JWT auth (from the official
+      Authentication and Passport docs) into `src/auth/`. Everything is in place
+      except one import you must add, and swapping the stubbed user store for your
+      own.
+
+      ## The one manual step: import AuthModule
+
+      keel does not overwrite `app.module.ts`. Add `AuthModule` to your
+      `AppModule` imports so the routes are registered:
+
+      ```ts
+      import { Module } from "@nestjs/common";
+      import { AppController } from "./app.controller";
+      import { AuthModule } from "./auth/auth.module";
+
+      @Module({
+        imports: [AuthModule],
+        controllers: [AppController],
+      })
+      export class AppModule {}
+      ```
+
+      ## What's wired
+      - `src/auth/auth.module.ts` - PassportModule + JwtModule.register (secret +
+        1h expiry) and the providers below.
+      - `src/auth/users.service.ts` - a **STUB user store**: one in-memory demo
+        user (`demo@example.com` / `password123`) with a bcrypt-hashed password.
+      - `src/auth/auth.service.ts` - `validateUser` (bcrypt-compares the password)
+        and `login` (signs the JWT).
+      - `src/auth/jwt.strategy.ts` - the passport-jwt strategy: reads the Bearer
+        token, verifies it, returns `{ userId, email }` as `req.user`.
+      - `src/auth/jwt-auth.guard.ts` - `JwtAuthGuard` (extends `AuthGuard('jwt')`).
+      - `src/auth/auth.controller.ts` - `POST /auth/login` -> `{ access_token }`.
+      - `src/auth/me.controller.ts` - `GET /me`, protected by `JwtAuthGuard`.
+      - `src/auth/auth.service.spec.ts` - a focused Jest test.
+      - `.env` - `JWT_SECRET` (git-ignored), plus `.env.example`.
+
+      ## Try it
+      ```bash
+      # log in
+      curl -s -X POST http://localhost:3000/auth/login \
+        -H 'content-type: application/json' \
+        -d '{"email":"demo@example.com","password":"password123"}'
+      # -> {"access_token":"eyJ..."}
+
+      # call the protected route with the token
+      curl -s http://localhost:3000/me -H "authorization: Bearer <token>"
+      # -> {"userId":1,"email":"demo@example.com"}
+      ```
+
+      ## Before you ship
+      1. Set a real `JWT_SECRET` in `.env` (`openssl rand -base64 32`). The code
+         falls back to a dev-only default if it is unset, which is fine for the
+         build and test but must not reach production.
+      2. Replace `UsersService.findByEmail` with a real lookup against your users
+         table and remove the seeded demo user. Keep passwords bcrypt-hashed.
+      3. Add a registration endpoint that hashes new passwords with `bcrypt.hash`.

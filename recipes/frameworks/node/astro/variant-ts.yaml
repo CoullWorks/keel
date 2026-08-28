@@ -1,0 +1,99 @@
+id: astro-ts
+kind: framework
+label: Astro (content-driven sites, TypeScript)
+lang: node
+provides: [node, astro, self-serving]
+default: false
+family: astro
+variant: TypeScript
+updated: 2026-08-25
+pins:
+  astro: ^6.0.0
+# The Node line is a choice. Only the versions this framework actually
+# supports are offered; the note says what each one costs you.
+versions:
+  node_version:
+    label: Node.js version
+    recommended: "22"
+    options:
+      - value: "20"
+        label: "Node 20 LTS"
+        note: "maintenance only, ends Apr 2026"
+      - value: "22"
+        label: "Node 22 LTS"
+        note: "active LTS, the safe default"
+      - value: "24"
+        label: "Node 24 LTS"
+        note: "newest LTS"
+install:
+  # The stack has to be up before anything can exec into it. Under a native
+  # env {{start}} renders empty and the engine drops the no-op step.
+  - "{{start}}"
+  - "{{exec}} npm install"
+  # The app started before its dependencies existed, so bring it back up now
+  # that they are installed. Renders empty, and is dropped, on a native env.
+  - "{{restart}}"
+smoke:
+  - "{{exec}} npx astro build"
+files:
+  - path: package.json
+    content: |
+      {
+        "name": "app",
+        "private": true,
+        "type": "module",
+        "scripts": {
+          "dev": "astro dev",
+          "build": "astro build",
+          "preview": "astro preview",
+          "check": "astro check"
+        },
+        "dependencies": { "astro": "^6.0.0" },
+        "devDependencies": {
+          "typescript": "^5.6.0",
+          "@astrojs/check": "^0.9.0"
+        }
+      }
+  - path: tsconfig.json
+    content: |
+      {
+        "extends": "astro/tsconfigs/strict",
+        "include": [".astro/types.d.ts", "**/*"],
+        "exclude": ["dist"]
+      }
+  - path: astro.config.mjs
+    content: |
+      import { defineConfig } from "astro/config";
+
+      // https://astro.build/config
+      export default defineConfig({});
+  - path: src/pages/index.astro
+    content: |
+      ---
+      const title: string = "Astro";
+      ---
+
+      <html lang="en">
+        <head>
+          <meta charset="utf-8" />
+          <meta name="viewport" content="width=device-width, initial-scale=1" />
+          <title>{title}</title>
+        </head>
+        <body style="font-family: system-ui, sans-serif; padding: 40px; max-width: 640px">
+          <h1>{title}</h1>
+          <p>Scaffolded by keel. Edit <code>src/pages/index.astro</code>.</p>
+        </body>
+      </html>
+  - path: .gitignore
+    content: |
+      node_modules/
+      dist/
+      .astro/
+      .env
+tasks:
+  test: "{{exec}} npx vitest run"
+  lint: "{{exec}} npx eslint ."
+  check: "{{exec}} npm run check"
+  dev: "{{exec}} npm run dev -- --port ${PORT:-4321}"
+  build: "{{exec}} npm run build"
+  preview: "{{exec}} npm run preview"

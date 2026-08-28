@@ -1,0 +1,124 @@
+id: fastapi-jwt
+kind: addon
+label: JWT auth (OAuth2 password flow, SQLAlchemy users, register/token/me)
+appliesTo: [fastapi]
+provides: [auth]
+install:
+  - '{{exec}} uv add "python-jose[cryptography]" "passlib[bcrypt]" python-multipart'
+files:
+  - path: auth.py
+    content: |
+      from datetime import datetime, timedelta, timezone
+      from typing import Annotated
+
+      from fastapi import APIRouter, Depends, HTTPException, status
+      from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+      from jose import JWTError, jwt
+      from passlib.context import CryptContext
+      from pydantic import BaseModel
+      from sqlalchemy import String, create_engine
+      from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
+
+      from config import settings
+
+      ALGORITHM = "HS256"
+      ACCESS_TTL = timedelta(hours=12)
+
+      engine = create_engine(settings.database_url, connect_args={"check_same_thread": False}
+                             if settings.database_url.startswith("sqlite") else {})
+      pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
+      oauth2 = OAuth2PasswordBearer(tokenUrl="/auth/token")
+      router = APIRouter(prefix="/auth", tags=["auth"])
+
+
+      class Base(DeclarativeBase):
+          pass
+
+
+      class User(Base):
+          __tablename__ = "users"
+          id: Mapped[int] = mapped_column(primary_key=True)
+          username: Mapped[str] = mapped_column(String(150), unique=True, index=True)
+          hashed_password: Mapped[str] = mapped_column(String(255))
+
+
+      Base.metadata.create_all(engine)
+
+
+      class Credentials(BaseModel):
+          username: str
+          password: str
+
+
+      class Token(BaseModel):
+          access_token: str
+          token_type: str = "bearer"
+
+
+      def get_db():
+          with Session(engine) as db:
+              yield db
+
+
+      DB = Annotated[Session, Depends(get_db)]
+
+
+      def _make_token(username: str) -> str:
+          exp = datetime.now(timezone.utc) + ACCESS_TTL
+          return jwt.encode({"sub": username, "exp": exp}, settings.secret_key, algorithm=ALGORITHM)
+
+
+      def current_user(token: Annotated[str, Depends(oauth2)], db: DB) -> User:
+          err = HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid credentials")
+          try:
+              username = jwt.decode(token, settings.secret_key, algorithms=[ALGORITHM]).get("sub")
+          except JWTError:
+              raise err
+          user = db.query(User).filter_by(username=username).first()
+          if user is None:
+              raise err
+          return user
+
+
+      @router.post("/register", response_model=Token, status_code=201)
+      def register(body: Credentials, db: DB) -> Token:
+          if db.query(User).filter_by(username=body.username).first():
+              raise HTTPException(status.HTTP_409_CONFLICT, "Username taken")
+          user = User(username=body.username, hashed_password=pwd.hash(body.password))
+          db.add(user)
+          db.commit()
+          return Token(access_token=_make_token(user.username))
+
+
+      @router.post("/token", response_model=Token)
+      def token(form: Annotated[OAuth2PasswordRequestForm, Depends()], db: DB) -> Token:
+          user = db.query(User).filter_by(username=form.username).first()
+          if user is None or not pwd.verify(form.password, user.hashed_password):
+              raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Bad username or password")
+          return Token(access_token=_make_token(user.username))
+
+
+      @router.get("/me")
+      def me(user: Annotated[User, Depends(current_user)]) -> dict[str, object]:
+          return {"id": user.id, "username": user.username}
+  - path: main.py
+    content: |
+      import os
+
+      from fastapi import FastAPI
+
+      from auth import router as auth_router
+      from config import settings
+
+      app = FastAPI(title="app")
+      app.include_router(auth_router)
+
+
+      @app.get("/")
+      def root() -> dict[str, str]:
+          return {"app": "keel FastAPI", "db": os.environ.get("KEEL_DB", "sqlite")}
+
+
+      @app.get("/health")
+      def health() -> dict[str, str]:
+          return {"status": "healthy", "debug": str(settings.debug)}

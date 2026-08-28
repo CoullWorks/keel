@@ -1,0 +1,365 @@
+id: nginx-magento
+schema_version: 2
+kind: config
+label: Magento 2 server block for NGINX
+updated: 2026-08-12
+# Division of labour. The shared NGINX service (recipes/infra/web/nginx.yaml)
+# owns .keel/nginx/nginx.conf: worker and http-level tuning, the log format,
+# gzip and its type list, server_tokens off, the default security headers,
+# real_ip from the trusted proxy, the default client_max_body_size and the
+# default fastcgi buffer sizes. This recipe owns one server block and the compose
+# wiring.
+#
+# Magento's nginx.conf.sample carries a gzip block of its own. It is NOT
+# reproduced here: gzip settings that differ per site are a maintenance trap, and
+# the sample's gzip_types list belongs in the shared http config where every site
+# gets it. That is the only part of the vendor file deliberately dropped.
+#
+# Source: magento/magento2, nginx.conf.sample on branch 2.4-develop, 253 lines,
+# fetched 2026-08-12. It is an include fragment meant to be pulled into a
+# server {} block that has already set $MAGE_ROOT, so this file is the same
+# content with the wrapper supplied.
+when:
+  frameworks: [magento, magento-mageos]
+  uses: nginx
+provision:
+  compose:
+    files:
+      - path: docker/nginx/conf.d/app.conf
+        verbatim: true
+        content: |
+          # keel-generated. Magento 2 server block. Included by the shared nginx.conf
+          # from /etc/nginx/conf.d/*.conf.
+          #
+          # The shared half lives once in recipes/infra/web/nginx.yaml, which owns
+          # .keel/nginx/nginx.conf: worker_processes
+          # and worker_connections, sendfile / tcp_nopush / keepalive_timeout, the log
+          # format, gzip and its type list, server_tokens off, the default security
+          # headers, real_ip from the trusted proxy, the default client_max_body_size
+          # and the default fastcgi buffer sizes. Magento's nginx.conf.sample carries a
+          # gzip block of its own; it is not reproduced here, because gzip settings
+          # that differ per site are a maintenance trap, not a feature.
+          #
+          # Source: magento/magento2, nginx.conf.sample on branch 2.4-develop, 253
+          # lines, read on 2026-08-12. That file is an include fragment meant to be
+          # pulled into a server {} block that has already set $MAGE_ROOT, so this file
+          # is the same content with the wrapper supplied. Deltas, all deliberate:
+          #
+          #   1. fastcgi_pass targets php:9000 instead of the sample's
+          #      `fastcgi_backend` upstream, whose shipped socket path is still
+          #      php7.4-fpm.sock on 2.4-develop and is stale against every supported
+          #      PHP version. Do not copy that line from the vendor file.
+          #   2. The PHP_VALUE and PHP_FLAG fastcgi_params are commented out. They are
+          #      set in the FPM pool instead, with php_admin_value, so that the Apache
+          #      deployment gets the same limits (it cannot get them any other way, see
+          #      the .htaccess trap in the Apache config) and so application code
+          #      cannot raise them with ini_set(). See
+          #      docker/php/php-fpm.d/zzz-magento-pool.conf.
+          #   3. The Cache-Control immutable header on the outer /static/ block is
+          #      UNCOMMENTED. The vendor file ships it commented with the instruction,
+          #      in its own header: "In production mode, you should uncomment the
+          #      add_header Cache-Control ... directive in the /static/ location block".
+          #      Shipping the sample unmodified ships a production site without it.
+          #
+          # Everything else, including the seven-script PHP allow-list, the
+          # version-stripping static rewrite, the media denies and the banned
+          # locations, is the vendor's and must not be trimmed.
+
+          server {
+              listen 80;
+              listen [::]:80;
+              server_name _;
+
+              # The sample expects both of these from its wrapper.
+              set $MAGE_ROOT /var/www/html;
+              set $MAGE_DEBUG_SHOW_ARGS 0;
+
+              # pub/, not the project root. app/etc/env.php holds the database
+              # credentials and the crypt key, and it sits one level above this.
+              root $MAGE_ROOT/pub;
+
+              index index.php;
+              autoindex off;
+              charset UTF-8;
+              error_page 404 403 = /errors/404.php;
+
+              # Deny access to sensitive files
+              location /.user.ini {
+                  deny all;
+              }
+
+              # PHP entry point for setup application
+              location ~* ^/setup($|/) {
+                  root $MAGE_ROOT;
+                  location ~ ^/setup/index.php {
+                      # The web setup wizard is denied out of the box, by the vendor.
+                      # Add your own address above the fastcgi_pass to enable it, and
+                      # take it out again afterwards.
+                      deny all;
+                      # allow 127.0.0.1;
+
+                      fastcgi_pass php:9000;
+
+                      # 600 here, not 18000: the vendor gives the setup entry point a
+                      # much shorter ceiling than the storefront.
+                      fastcgi_read_timeout 600s;
+                      fastcgi_connect_timeout 600s;
+
+                      fastcgi_index index.php;
+                      fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+                      include fastcgi_params;
+                  }
+
+                  location ~ ^/setup/(?!pub/). {
+                      deny all;
+                  }
+
+                  location ~ ^/setup/pub/ {
+                      add_header X-Frame-Options "SAMEORIGIN";
+                  }
+              }
+
+              # PHP entry point for update application
+              location ~* ^/update($|/) {
+                  root $MAGE_ROOT;
+
+                  location ~ ^/update/index.php {
+                      fastcgi_split_path_info ^(/update/index.php)(/.+)$;
+                      fastcgi_pass php:9000;
+                      fastcgi_index index.php;
+                      fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+                      fastcgi_param PATH_INFO $fastcgi_path_info;
+                      include fastcgi_params;
+                  }
+
+                  # Deny everything but index.php
+                  location ~ ^/update/(?!pub/). {
+                      deny all;
+                  }
+
+                  location ~ ^/update/pub/ {
+                      add_header X-Frame-Options "SAMEORIGIN";
+                  }
+              }
+
+              location / {
+                  try_files $uri $uri/ /index.php$is_args$args;
+              }
+
+              location /pub/ {
+                  location ~ ^/pub/media/(downloadable|customer|import|custom_options|theme_customization/.*\.xml) {
+                      deny all;
+                  }
+                  alias $MAGE_ROOT/pub/;
+                  add_header X-Frame-Options "SAMEORIGIN";
+              }
+
+              location /static/ {
+                  # Uncommented, unlike the vendor file. See delta 3 in the header.
+                  # Safe because Magento versions every static URL
+                  # (/static/version1712345678/...), so the content behind a given URL
+                  # genuinely never changes.
+                  add_header Cache-Control "public, max-age=31536000, immutable";
+
+                  # Remove signature of the static files that is used to overcome the
+                  # browser cache. This rewrite is why the immutable header is safe:
+                  # the version segment is stripped before the file is looked up, so a
+                  # deploy changes every URL without changing a single filename.
+                  location ~ ^/static/version\d*/ {
+                      rewrite ^/static/version\d*/(.*)$ /static/$1 last;
+                  }
+
+                  location ~* \.(ico|jpg|jpeg|png|gif|svg|svgz|webp|avif|avifs|js|css|eot|ttf|otf|woff|woff2|html|json|webmanifest)$ {
+                      add_header Cache-Control "public, max-age=31536000, immutable";
+                      add_header X-Frame-Options "SAMEORIGIN";
+
+                      # A miss falls through to static.php, which materialises the file
+                      # on demand. This is what makes a deploy that has not finished
+                      # setup:static-content:deploy still serve pages, slowly.
+                      if (!-f $request_filename) {
+                          rewrite ^/static/(version\d*/)?(.*)$ /static.php?resource=$2 last;
+                      }
+                  }
+                  location ~* \.(zip|gz|gzip|bz2|csv|xml)$ {
+                      # Deliberately not cached: these are exports and feeds, and a
+                      # year-long immutable cache on a price feed is a real incident.
+                      add_header Cache-Control "no-store";
+                      add_header X-Frame-Options "SAMEORIGIN";
+                      expires off;
+
+                      if (!-f $request_filename) {
+                          rewrite ^/static/(version\d*/)?(.*)$ /static.php?resource=$2 last;
+                      }
+                  }
+                  if (!-f $request_filename) {
+                      rewrite ^/static/(version\d*/)?(.*)$ /static.php?resource=$2 last;
+                  }
+                  add_header X-Frame-Options "SAMEORIGIN";
+              }
+
+              location /media/ {
+
+              ## The following section allows to offload image resizing from Magento
+              ## instance to the Nginx. Catalog image URL format should be set
+              ## accordingly. It needs ngx_http_image_filter_module, which is a
+              ## dynamic module and must be loaded from the MAIN config file, not from
+              ## here: `load_module /etc/nginx/modules/ngx_http_image_filter_module.so;`
+              ## belongs in the shared nginx recipe.
+              ## See https://experienceleague.adobe.com/docs/commerce-admin/config/general/web.html
+              #   location ~* ^/media/catalog/.* {
+              #
+              #       # Replace placeholders and uncomment the line below to serve
+              #       # product images from public S3.
+              #       # resolver 8.8.8.8;
+              #       # proxy_pass https://<bucket-name>.<region-name>.amazonaws.com;
+              #
+              #       set $width "-";
+              #       set $height "-";
+              #       if ($arg_width != '') {
+              #           set $width $arg_width;
+              #       }
+              #       if ($arg_height != '') {
+              #           set $height $arg_height;
+              #       }
+              #       image_filter resize $width $height;
+              #       image_filter_jpeg_quality 90;
+              #   }
+
+                  # try_files $uri $uri/ /get.php$is_args$args;
+
+                  location ~ ^/media/theme_customization/.*\.xml {
+                      deny all;
+                  }
+
+                  location ~* \.(ico|jpg|jpeg|png|gif|svg|svgz|webp|avif|avifs|js|css|eot|ttf|otf|woff|woff2)$ {
+                      add_header Cache-Control "public";
+                      add_header X-Frame-Options "SAMEORIGIN";
+                      expires +1y;
+                      # get.php is the image resizer: a miss generates the cached
+                      # derivative and serves it.
+                      try_files $uri $uri/ /get.php$is_args$args;
+                  }
+                  location ~* \.(zip|gz|gzip|bz2|csv|xml)$ {
+                      add_header Cache-Control "no-store";
+                      add_header X-Frame-Options "SAMEORIGIN";
+                      expires off;
+                      # try_files $uri $uri/ /get.php$is_args$args;
+                  }
+                  add_header X-Frame-Options "SAMEORIGIN";
+              }
+
+              # Four hard denies. Customer uploads, downloadable products, import files
+              # and custom-option uploads are all served through PHP with an access
+              # check, never straight off disk. Dropping any of these publishes
+              # customers' files.
+              location /media/customer/ {
+                  deny all;
+              }
+
+              location /media/downloadable/ {
+                  deny all;
+              }
+
+              location /media/import/ {
+                  deny all;
+              }
+
+              location /media/custom_options/ {
+                  deny all;
+              }
+
+              location /errors/ {
+                  location ~* \.xml$ {
+                      deny all;
+                  }
+              }
+
+              # PHP entry point for main application.
+              #
+              # THE most important directive in this file: an allow-list of exactly
+              # seven scripts. Nothing else in pub/ is ever executed, which is why a
+              # stray .php dropped into the webroot is a 403 under nginx and a live
+              # script under a naive Apache config. health_check.php is Magento's
+              # shipped health endpoint and is on the list.
+              location ~ ^/(index|get|static|errors/report|errors/404|errors/503|health_check)\.php$ {
+                  try_files $uri =404;
+                  fastcgi_pass php:9000;
+                  # OVERRIDES the shared default fastcgi buffer sizes with the vendor's
+                  # own: Magento's admin renders very large pages and the default
+                  # buffers spill every one of them to a temporary file.
+                  fastcgi_buffers 16 16k;
+                  fastcgi_buffer_size 32k;
+
+                  # The vendor sets these two here. keel sets them in the FPM pool
+                  # instead: see delta 2 in the header and
+                  # docker/php/php-fpm.d/zzz-magento-pool.conf.
+                  # fastcgi_param PHP_FLAG  "session.auto_start=off \n suhosin.session.cryptua=off";
+                  # fastcgi_param PHP_VALUE "memory_limit=756M \n max_execution_time=18000";
+
+                  # 600s, and the pool's request_terminate_timeout is set to 610s so
+                  # FPM never kills a worker that nginx is still waiting on.
+                  fastcgi_read_timeout 600s;
+                  fastcgi_connect_timeout 600s;
+
+                  fastcgi_index index.php;
+                  fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+                  include fastcgi_params;
+              }
+
+              # FPM's own status and ping pages, declared in the pool. Not part of the
+              # vendor sample; keel's addition, and restricted because the status page
+              # lists live workers and the slowest request. 172.16.0.0/12 is Docker's
+              # default bridge range.
+              location ~ ^/(fpm-status|fpm-ping)$ {
+                  allow 127.0.0.1;
+                  allow 172.16.0.0/12;
+                  deny all;
+                  fastcgi_pass php:9000;
+                  fastcgi_param SCRIPT_FILENAME $fastcgi_script_name;
+                  include fastcgi_params;
+                  access_log off;
+              }
+
+              # Banned locations (only reached if the earlier PHP entry point regexes
+              # don't match).
+              location ~* (\.php$|\.phtml$|\.htaccess$|\.htpasswd$|\.git) {
+                  deny all;
+              }
+          }
+      - path: compose.override.yaml
+        verbatim: true
+        content: |
+          # keel-generated. Compose merges compose.override.yaml over compose.yaml with no
+          # extra flags, so the php service written by the env recipe is untouched.
+          services:
+            nginx:
+              # Adobe lists nginx 1.30 across 2.4.7-p10, 2.4.8-p5 and 2.4.9
+              # (docs/infra/magento.md, source 1). Bump this tag once your registry has
+              # it; 1.27 is pinned because it is the newest tag this recipe was verified
+              # against.
+              image: nginx:1.27-alpine
+              restart: unless-stopped
+              depends_on:
+                php:
+                  condition: service_healthy
+              ports:
+                - "${HTTP_PORT:-8080}:80"
+              volumes:
+                # nginx serves pub/static and pub/media straight off disk, read-only: it
+                # has no business writing into a Magento tree.
+                - .:/var/www/html:ro
+                # Shared, owned by recipes/infra/web/nginx.yaml.
+                - ./.keel/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+                # This framework's server block, owned by this recipe.
+                - ./docker/nginx/conf.d:/etc/nginx/conf.d:ro
+              healthcheck:
+                # health_check.php is Magento's own endpoint and one of the seven scripts
+                # the vendor config allows FPM to execute.
+                test: ["CMD", "wget", "-qO-", "http://127.0.0.1/health_check.php"]
+                interval: 15s
+                timeout: 5s
+                retries: 10
+                start_period: 180s
+  # DDEV already runs nginx-fpm with a Magento-aware config; the service recipe
+  # only flips ddev's webserver type. Nothing to add here.
+  ddev: {}

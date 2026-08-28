@@ -1,0 +1,48 @@
+# GoReleaser builds keel's cross-platform release binaries. It runs from the
+# release workflow when release-please tags a version. See docs/PLUGIN-STANDARD.md.
+version: 2
+
+project_name: keel
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: keel
+    main: ./cmd/keel
+    binary: keel
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w -X github.com/coullworks/keel/internal/cli.Version={{ .Version }}
+
+# Bare binaries, not tarballs: install.sh and `keel selfupdate` both download the
+# raw asset keel_<os>_<arch> and chmod it (see internal/selfupdate.AssetName).
+archives:
+  - id: keel
+    formats: [binary]
+    name_template: "keel_{{ .Os }}_{{ .Arch }}"
+
+# One checksum file PER asset, named <asset>.sha256, because install.sh and
+# selfupdate fetch <asset>.sha256 (not a single checksums.txt) and refuse to
+# install without it.
+checksum:
+  split: true
+  name_template: "{{ .ArtifactName }}.sha256"
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+release:
+  github:
+    owner: coullworks
+    name: keel

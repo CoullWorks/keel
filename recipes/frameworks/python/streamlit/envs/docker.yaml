@@ -1,0 +1,289 @@
+id: streamlit-docker
+schema_version: 2
+kind: env
+env_family: compose
+label: Docker (compose)
+appliesTo: [streamlit]
+provides: [env]
+priority: -10
+updated: 2026-08-12
+# Streamlit has no worker model and no process model. Nothing in its
+# documentation mentions gunicorn, Uvicorn, worker processes, --workers, a
+# process count or a thread-pool size. `streamlit run` starts one Tornado
+# server, and that is the entire production serving story; the vendor's own
+# Docker tutorial confirms it with a bare `streamlit run` as the ENTRYPOINT.
+# There is no in-process concurrency knob to tune, so vertical scaling is the
+# only documented way to serve more concurrent sessions.
+#
+# It replicates only with session affinity, and the vendor says so outright:
+# "If you use load balancing or replication in your deployment, some Streamlit
+# features won't work without session affinity or stickiness", and "In
+# deployments with multiple server replicas or load balancers, the HTTP request
+# for the media file might be routed to a different server than the one handling
+# the user's WebSocket connection". Session State "exists for as long as the tab
+# is open", lives in that process's memory, and "is not persisted".
+#
+# So this ships one replica. Raising it is a deliberate decision that comes with
+# sticky sessions in the proxy, which both the nginx and the Apache config
+# recipes under infra/ carry ready to switch on.
+#
+# A web server in front is a separate choice: add `nginx` or `apache`.
+# See docs/infra/streamlit.md.
+commands:
+  # --build so a changed Dockerfile actually rebuilds.
+  start: "docker compose up -d --build"
+  # Where the project can be opened once the build finishes.
+  site_url: "http://localhost:{{http_port}}"
+  # How this environment tears itself down. Used when a build fails partway:
+  # keel removes the directory it created, and without this the containers,
+  # volumes and network it started stay behind holding a bind mount to a
+  # path that no longer exists. The next attempt then reuses that container
+  # and dies with "current working directory is outside of container mount
+  # namespace root".
+  down: "docker compose down -v --remove-orphans"
+  restart: "docker compose restart"
+  create: "docker compose build"
+  # -T because these run from scripts and CI, where there is no TTY.
+  exec: "docker compose exec -T app"
+smoke:
+  - "docker compose ps"
+files:
+  - path: Dockerfile
+    content: |
+      # Two kinds of image, and the distinction is not cosmetic.
+      #
+      # `dev` is what compose builds. It carries no application code and no
+      # dependencies, because the project is bind-mounted from the host: `uv
+      # sync` run through keel writes .venv and uv.lock to your working tree
+      # where they belong, and an edit is live without a rebuild.
+      #
+      # The stages after it build the production image, which copies the source
+      # in and installs without dev dependencies. Build it explicitly with
+      # `docker build --target runtime .`.
+      #
+      # Pointing compose at the production stage instead would look like it
+      # works and would not: with no bind mount, everything uv writes lands in
+      # a layer that the next `--build` discards.
+      FROM python:{{pin.python_version}}-slim-bookworm AS dev
+      COPY --from=ghcr.io/astral-sh/uv:0.12.3 /uv /uvx /bin/
+      WORKDIR /app
+      # The venv lives in the bind-mounted tree, exactly as it would on the
+      # host, so an editor and a shell outside the container see the same
+      # interpreter and the same packages.
+      ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
+          PATH="/app/.venv/bin:$PATH" \
+          PYTHONUNBUFFERED=1
+      # uid 1000, matching the default first user on a Linux or WSL host, so
+      # files created in the bind mount are owned by you rather than by root.
+      RUN useradd --create-home --uid 1000 dev
+      USER dev
+      EXPOSE 8501
+      # The same probe the production stage uses. Without it here, a web server
+      # depending on `condition: service_healthy` can never start: compose
+      # reports "container has no healthcheck configured" and gives up.
+      # start-period is longer than production's because the first run installs
+      # dependencies into the bind mount before the app can serve anything.
+      HEALTHCHECK --interval=10s --timeout=5s --start-period=180s --retries=10 \
+        CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health', timeout=3).status == 200 else 1)"
+      # The bind mount has no .venv on a first run, and the framework itself
+      # lives in it, so `uv run` would fail and `restart: unless-stopped` would
+      # turn that into a restart loop that `docker compose exec` cannot attach
+      # to. Wait for the install keel is about to run, then exec the real
+      # server so it still receives SIGTERM as PID 1.
+      CMD ["sh", "-c", "until [ -d .venv ]; do echo 'waiting for dependencies'; sleep 2; done; exec uv run streamlit run streamlit_app.py --server.address=0.0.0.0 --server.port=8501 --server.headless=true"]
+
+      # keel-generated.
+      #
+      # Streamlit ships a real Dockerfile in its Docker tutorial. This departs
+      # from it in four ways, each on purpose: the tutorial's `git clone` of the
+      # example repo becomes a COPY of this project; build-essential and git are
+      # dropped, because they are only needed when a dependency compiles or
+      # installs from a git URL and they cost a lot of image; curl is dropped
+      # because the healthcheck uses Python, which is already here; and the
+      # single stage becomes two.
+      #
+      # The base is pinned to a patch release rather than 3.13-slim, so an
+      # unrelated rebuild cannot become an unreviewed Python upgrade. Streamlit
+      # supports "version 3.10 to 3.14", a closed range, so 3.13 is inside it.
+      FROM python:{{pin.python_version}}-slim-bookworm AS build
+
+      # uv pinned, per uv's own Docker guidance. :latest would mean a different
+      # installer on every build.
+      COPY --from=ghcr.io/astral-sh/uv:0.12.3 /uv /uvx /bin/
+
+      WORKDIR /app
+      ENV UV_COMPILE_BYTECODE=1 \
+          UV_LINK_MODE=copy \
+          UV_PROJECT_ENVIRONMENT=/app/.venv
+
+      # Dependencies before application code, so editing the app does not
+      # invalidate the dependency layer.
+      COPY pyproject.toml uv.lock* ./
+      # --frozen fails when the lockfile is out of date instead of quietly
+      # resolving a different tree. Streamlit's own advice points the same way:
+      # "always be aware of the Python version used in your development
+      # environment, and select the same version for your deployment
+      # environment".
+      # A freshly scaffolded project has no uv.lock yet, so the first build
+      # creates one; commit it, and from then on --frozen is a real guarantee
+      # rather than a formality. The branch exists so that a lockfile which IS
+      # present is never silently regenerated.
+      RUN if [ -f uv.lock ]; then \
+            uv sync --frozen --no-dev --no-install-project; \
+          else \
+            uv lock && uv sync --frozen --no-dev --no-install-project; \
+          fi
+      COPY . .
+      RUN uv sync --frozen --no-dev
+
+      FROM python:{{pin.python_version}}-slim-bookworm AS runtime
+      # A non-root user with a real home directory, and for Streamlit the home
+      # directory is a requirement rather than hygiene: its Kubernetes tutorial
+      # creates an `appuser` with one precisely because "Streamlit apps cannot be
+      # run from the root directory" in 1.10.0 and later, and Streamlit writes
+      # its own config and credentials under $HOME.
+      #
+      # The working directory stays /app rather than moving into that home. /app
+      # already satisfies the not-the-root-directory rule, and the virtualenv
+      # built in the previous stage has /app baked into the shebang of every
+      # console script it contains: relocating it would break `streamlit` before
+      # the container ever started.
+      RUN useradd --create-home --uid 10001 --home-dir /home/app app
+      # uv in the runtime stage too: keel's task vocabulary runs `uv run` inside
+      # this container. One pinned static binary; the dev dependency tree is
+      # still absent from the image.
+      COPY --from=ghcr.io/astral-sh/uv:0.12.3 /uv /uvx /bin/
+      WORKDIR /app
+      COPY --from=build --chown=app:app /app /app
+      ENV PATH="/app/.venv/bin:$PATH" \
+          PYTHONUNBUFFERED=1 \
+          PYTHONDONTWRITEBYTECODE=1 \
+          UV_PROJECT_ENVIRONMENT=/app/.venv \
+          HOME=/home/app
+      USER app
+      EXPOSE 8501
+
+      # Streamlit is the only framework in this set with a documented health
+      # endpoint. /_stcore/health is what the vendor's own Dockerfile probes
+      # ("HEALTHCHECK CMD curl --fail http://localhost:8501/_stcore/health") and
+      # what its Kubernetes tutorial uses for both readiness and liveness. A 200
+      # from it proves the Tornado server is serving, not just listening.
+      #
+      # urllib rather than curl, because Python is already in the image and the
+      # vendor only reaches for curl because its tutorial installs it anyway.
+      HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=5 \
+        CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health', timeout=3).status == 200 else 1)"
+
+      # The vendor's ENTRYPOINT, with the script name this project actually
+      # ships and two additions.
+      #
+      # --server.address=0.0.0.0 is not optional in a container: the config
+      # default is unset and the vendor passes it explicitly for exactly this
+      # reason. --server.port=8501 restates the documented default so the number
+      # matches EXPOSE and the healthcheck above.
+      # --server.headless=true stops Streamlit trying to open a browser on start
+      # ("If false, will attempt to open a browser window on start"), which in a
+      # container is at best noise.
+      # --browser.gatherUsageStats=false is keel's choice, not a vendor
+      # recommendation: a production deployment should not phone home by default.
+      #
+      # There is deliberately no --workers here, because no such flag exists.
+      CMD ["streamlit", "run", "streamlit_app.py", \
+           "--server.address=0.0.0.0", \
+           "--server.port=8501", \
+           "--server.headless=true", \
+           "--browser.gatherUsageStats=false"]
+
+      # Two settings worth knowing about and not set here:
+      #   --server.baseUrlPath=/sub  when proxying to a subfolder, matching the
+      #     proxy location exactly.
+      #   --server.enableWebsocketCompression=false  if the proxy strips the
+      #     Sec-WebSocket-Extensions header. The config default is already false,
+      #     so this only matters where it has been turned on.
+  - path: compose.yaml
+    content: |
+      # keel-generated.
+      services:
+        app:
+          build:
+            context: .
+            # dev, not a production stage. See the note at the top of the
+            # Dockerfile: without the bind mount below, anything installed into
+            # this container is discarded by the next build.
+            target: dev
+          volumes:
+            # The project itself, so uv writes .venv and uv.lock to the host and
+            # an edit takes effect without a rebuild.
+            - .:/app
+          restart: unless-stopped
+          env_file:
+            # required: false so a checkout without a .env still comes up.
+            # Listing a missing env_file the short way is a hard compose error.
+            - path: .env
+              required: false
+          # expose, not ports: the web server is the only ingress. Streamlit's
+          # knowledge base notes that when apps do not load remotely "the most
+          # likely culprit is the Streamlit port not being exposed"; the answer
+          # to that is to publish the proxy, not this.
+          expose: ["8501"]
+          # One replica, deliberately. See the note at the top of this recipe:
+          # replicating Streamlit without sticky sessions breaks file uploads,
+          # media serving and Session State. The proxy configs under infra/ have
+          # the affinity block ready if you raise this.
+          deploy:
+            replicas: 1
+          # Whether Streamlit handles SIGTERM cleanly is not documented: its
+          # Kubernetes tutorial mentions an entrypoint script that traps signals,
+          # but does not reproduce it. 30s is keel's allowance for the Tornado
+          # server to close its websockets rather than have them cut, and it is
+          # not a vendor number.
+          stop_grace_period: 30s
+          # There is deliberately no volume here. Streamlit documents no on-disk
+          # location for uploaded files: st.file_uploader hands the app an
+          # in-memory object, and the replica holding the websocket is the only
+          # one that has it, which is exactly why the vendor demands session
+          # affinity. Session State is likewise in-process and "is not persisted.
+          # If the Streamlit server crashes, then everything stored in Session
+          # State gets wiped." Anything that must outlive a restart or be visible
+          # to another replica has to be written to a database by the app itself,
+          # and Streamlit documents none.
+
+        # The database, when one is selected. Every field that differs between
+        # Postgres, MySQL and MariaDB comes from the chosen db recipe as a var,
+        # so this one definition serves all three.
+        db:
+          image: {{db.type}}:{{db.version}}
+          restart: unless-stopped
+          environment: {{db.compose_env}}
+          volumes:
+            - dbdata:{{db.data_dir}}
+            - {{db.config_mount}}
+          {{db.command}}
+          healthcheck:
+            test: {{db.healthcheck}}
+            interval: 10s
+            timeout: 5s
+            retries: 12
+            start_period: 30s
+
+      volumes:
+        dbdata:
+  - path: .dockerignore
+    content: |
+      .git
+      .github
+      .venv
+      .keel
+      # The web server's own config and the compose files: mounted by the proxy
+      # container, never needed inside the application image.
+      docker/
+      compose.yaml
+      compose.override.yaml
+      Dockerfile
+      __pycache__
+      *.pyc
+      .env
+      .streamlit/secrets.toml
+      .pytest_cache
+      .ruff_cache
+      .mypy_cache

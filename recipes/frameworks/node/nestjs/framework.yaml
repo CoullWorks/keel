@@ -1,0 +1,137 @@
+id: nestjs
+kind: framework
+label: NestJS (enterprise TypeScript backend)
+lang: node
+provides: [node, nestjs, self-serving]
+default: false
+updated: 2026-08-07
+pins:
+  nestjs: ^11.0.0
+# The Node line is a choice. Only the versions this framework actually
+# supports are offered; the note says what each one costs you.
+versions:
+  node_version:
+    label: Node.js version
+    recommended: "22"
+    options:
+      - value: "20"
+        label: "Node 20 LTS"
+        note: "maintenance only, ends Apr 2026"
+      - value: "22"
+        label: "Node 22 LTS"
+        note: "active LTS, the safe default"
+      - value: "24"
+        label: "Node 24 LTS"
+        note: "newest LTS"
+install:
+  # The stack has to be up before anything can exec into it. Under a native
+  # env {{start}} renders empty and the engine drops the no-op step.
+  - "{{start}}"
+  - "{{exec}} npm install"
+  # The app started before its dependencies existed, so bring it back up now
+  # that they are installed. Renders empty, and is dropped, on a native env.
+  - "{{restart}}"
+smoke:
+  - "{{exec}} npm run build"
+files:
+  # The test script is `node --test`, not jest. jest was named here but never
+  # appeared in devDependencies, so `npm test` died with "jest: not found" on
+  # every NestJS project. Node's own runner needs no dependency and exits 0 with
+  # no test files; the Vitest add-on replaces the script with `vitest run` when
+  # it is selected, which it is by default.
+  - path: package.json
+    content: |
+      {
+        "name": "app",
+        "private": true,
+        "scripts": {
+          "dev": "nest start --watch",
+          "build": "nest build",
+          "start": "node dist/main",
+          "test": "node --test"
+        },
+        "dependencies": {
+          "@nestjs/common": "^11.0.0",
+          "@nestjs/core": "^11.0.0",
+          "@nestjs/platform-express": "^11.0.0",
+          "reflect-metadata": "^0.2.2",
+          "rxjs": "^7.8.1"
+        },
+        "devDependencies": {
+          "@nestjs/cli": "^11.0.0",
+          "@nestjs/schematics": "^11.0.0",
+          "typescript": "^5.6.0",
+          "@types/node": "^22.0.0"
+        }
+      }
+  - path: nest-cli.json
+    content: |
+      {
+        "$schema": "https://json.schemastore.org/nest-cli",
+        "collection": "@nestjs/schematics",
+        "sourceRoot": "src"
+      }
+  - path: tsconfig.json
+    content: |
+      {
+        "compilerOptions": {
+          "module": "commonjs",
+          "target": "ES2022",
+          "experimentalDecorators": true,
+          "emitDecoratorMetadata": true,
+          "outDir": "./dist",
+          "baseUrl": "./",
+          "sourceMap": true,
+          "declaration": false,
+          "skipLibCheck": true,
+          "strictNullChecks": true
+        }
+      }
+  - path: src/main.ts
+    content: |
+      import { NestFactory } from "@nestjs/core";
+      import { AppModule } from "./app.module";
+
+      async function bootstrap() {
+        const app = await NestFactory.create(AppModule);
+        await app.listen(process.env.PORT ?? 3000);
+      }
+      bootstrap();
+  - path: src/app.module.ts
+    content: |
+      import { Module } from "@nestjs/common";
+      import { AppController } from "./app.controller";
+
+      @Module({ controllers: [AppController] })
+      export class AppModule {}
+  - path: src/app.controller.ts
+    content: |
+      import { Controller, Get } from "@nestjs/common";
+
+      @Controller()
+      export class AppController {
+        // The route keel's own URL points at. Without it a freshly built project
+        // answers 404 at the address the build prints, which reads as a broken
+        // stack rather than an empty one. Nest's own `nest new` starter has the
+        // same route for the same reason.
+        @Get()
+        index() {
+          return { app: "keel NestJS", db: process.env.KEEL_DB ?? "sqlite" };
+        }
+
+        @Get("health")
+        health() {
+          return { status: "healthy" };
+        }
+      }
+  - path: .gitignore
+    content: |
+      node_modules/
+      dist/
+      .env
+tasks:
+  lint: "{{exec}} npx eslint ."
+  dev: "{{exec}} npm run dev"
+  build: "{{exec}} npm run build"
+  start: "{{exec}} npm run start"
+  test: "{{exec}} npm test"

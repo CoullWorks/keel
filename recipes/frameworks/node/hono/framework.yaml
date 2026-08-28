@@ -1,0 +1,110 @@
+id: hono
+kind: framework
+label: Hono (edge/serverless-first, TypeScript)
+lang: node
+provides: [node, hono, self-serving]
+default: false
+family: hono
+variant: TypeScript
+updated: 2026-08-07
+pins:
+  hono: ^4.6.0
+# The Node line is a choice. Only the versions this framework actually
+# supports are offered; the note says what each one costs you.
+versions:
+  node_version:
+    label: Node.js version
+    recommended: "22"
+    options:
+      - value: "20"
+        label: "Node 20 LTS"
+        note: "maintenance only, ends Apr 2026"
+      - value: "22"
+        label: "Node 22 LTS"
+        note: "active LTS, the safe default"
+      - value: "24"
+        label: "Node 24 LTS"
+        note: "newest LTS"
+install:
+  # The stack has to be up before anything can exec into it. Under a native
+  # env {{start}} renders empty and the engine drops the no-op step.
+  - "{{start}}"
+  - "{{exec}} npm install"
+  # The app started before its dependencies existed, so bring it back up now
+  # that they are installed. Renders empty, and is dropped, on a native env.
+  - "{{restart}}"
+smoke:
+  - "{{exec}} npx tsc --noEmit"
+files:
+  - path: package.json
+    content: |
+      {
+        "name": "app",
+        "private": true,
+        "type": "module",
+        "scripts": {
+          "dev": "tsx watch src/index.ts",
+          "build": "tsc",
+          "start": "node dist/index.js",
+          "typecheck": "tsc --noEmit"
+        },
+        "dependencies": {
+          "hono": "^4.6.0",
+          "@hono/node-server": "^1.13.0"
+        },
+        "devDependencies": {
+          "tsx": "^4.19.0",
+          "typescript": "^5.6.0",
+          "@types/node": "^22.0.0"
+        }
+      }
+  - path: tsconfig.json
+    content: |
+      {
+        "compilerOptions": {
+          "target": "ES2022",
+          "module": "ESNext",
+          "moduleResolution": "bundler",
+          "strict": true,
+          "skipLibCheck": true,
+          "outDir": "dist",
+          "types": ["node"]
+        },
+        "include": ["src"]
+      }
+  - path: src/index.ts
+    content: |
+      import { Hono } from "hono";
+      import { serve } from "@hono/node-server";
+
+      const app = new Hono();
+
+      // The route keel's own URL points at. Without it a freshly built project
+      // answers 404 at the address the build prints, which reads as a broken
+      // stack rather than an empty one.
+      app.get("/", (c) =>
+        c.json({ app: "keel Hono", db: process.env.KEEL_DB ?? "sqlite" }),
+      );
+
+      app.get("/health", (c) => c.json({ status: "healthy" }));
+
+      const port = Number(process.env.PORT) || 3000;
+      serve({ fetch: app.fetch, port });
+
+      export default app;
+  - path: .env.example
+    content: |
+      # Copy to .env and fill in. Generate secrets with: keel secrets sync
+      PORT=3000
+  - path: .gitignore
+    content: |
+      node_modules/
+      dist/
+      .env
+tasks:
+  test: "{{exec}} npx vitest run"
+  lint: "{{exec}} npx eslint ."
+  dev: "{{exec}} npm run dev"
+  build: "{{exec}} npm run build"
+  start: "{{exec}} npm run start"
+  typecheck: "{{exec}} npm run typecheck"

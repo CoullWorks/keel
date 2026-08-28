@@ -1,0 +1,41 @@
+id: nextjs-playwright
+schema_version: 2
+kind: addon
+label: Playwright (end-to-end browser tests)
+appliesTo: [nextjs]
+provides: [e2e-tests]
+updated: 2026-08-22
+# The E2E half of the Next.js test suite: Vitest (baked into the base) covers
+# units, Playwright drives a real browser against the running app. Kept separate
+# from vitest so a project can take one without the other; the tests-nextjs stack
+# generator applies both together.
+install:
+  - "{{exec}} npm install -D @playwright/test"
+  # One place names the e2e task, so `keel run test:e2e` has something to run.
+  - "{{exec}} npm pkg set scripts.test:e2e=\"playwright test\""
+smoke:
+  # The install is what this recipe owns; a full browser run needs the app up,
+  # which the boot verify step already proves. `--version` confirms the runner
+  # resolved without pulling a browser during the offline smoke.
+  - "{{exec}} npx playwright --version"
+files:
+  - path: playwright.config.ts
+    content: |
+      import { defineConfig } from "@playwright/test";
+
+      // keel-generated. Points Playwright at the port the stack publishes on, so
+      // `keel run test:e2e` hits the same app the compose file brings up.
+      export default defineConfig({
+        testDir: "./e2e",
+        use: { baseURL: "http://localhost:{{http_port}}" },
+      });
+  - path: e2e/home.spec.ts
+    content: |
+      import { expect, test } from "@playwright/test";
+
+      // keel-generated. Proves the runner, the config and the app agree. Delete
+      // it once you have a real end-to-end flow.
+      test("the home page loads", async ({ page }) => {
+        const res = await page.goto("/");
+        expect(res?.ok()).toBeTruthy();
+      });

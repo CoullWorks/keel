@@ -1,0 +1,342 @@
+id: sveltekit-better-auth
+schema_version: 2
+kind: addon
+label: "Auth (better-auth: email + password, sessions, protected routes)"
+category: Auth
+appliesTo: [sveltekit]
+requires: [sveltekit]
+provides: [auth]
+updated: 2026-08-24
+pins:
+  better-auth: ^1.6.0
+  better-sqlite3: ^13.0.0
+# better-auth is the current framework-agnostic auth library and the one its own
+# docs target for SvelteKit (Lucia, the old choice, is deprecated). It ships an
+# email + password flow, server-side sessions, and a SvelteKit handler out of the
+# box. The database here is a STUB: a local better-sqlite3 file so the whole flow
+# boots with zero external service. better-auth talks to SQLite through Kysely, so
+# swapping in Postgres/MySQL later is a one-line change in src/lib/auth.ts. See
+# AUTH-SETUP.md for the one-time schema step and how to move off SQLite.
+install:
+  # better-auth is the library; better-sqlite3 is the zero-setup local database
+  # driver (the STUB store). Both are runtime deps. The @better-auth/cli schema
+  # step is deliberately NOT run here: it writes tables to the database, which is
+  # a setup action, not an install action. It is documented in AUTH-SETUP.md.
+  - "{{exec}} npm install better-auth better-sqlite3"
+smoke:
+  # `npm run build` compiles hooks.server.ts, the auth instance, the catch-all
+  # route and every page: a typo in any of them fails the build here. It mirrors
+  # how the Next.js auth addon proves its routes at build time. Under a native
+  # env {{exec}} renders empty and the step is dropped.
+  - "{{exec}} npm run build"
+files:
+  # The better-auth instance: the single source of truth for providers, the
+  # database and the session config. Imported by the hook, the catch-all route
+  # and any server code that needs auth.api.
+  - path: src/lib/auth.ts
+    content: |
+      // keel-generated. The better-auth server instance. This is the single
+      // source of truth for how auth works in the app.
+      //
+      // The database is a STUB: a local better-sqlite3 file (auth.db) so the whole
+      // flow boots with zero external service. better-auth speaks to SQLite through
+      // Kysely, so moving to Postgres/MySQL later is a one-line change here (pass a
+      // pg/mysql2 pool instead of the Database). Do NOT ship the SQLite file to
+      // production.
+      //
+      // One-time setup: after install, create the tables with
+      //   npx @better-auth/cli migrate
+      // (see AUTH-SETUP.md). Until you run it, sign-up will fail because the
+      // user/session tables do not exist yet.
+      import Database from "better-sqlite3";
+      import { betterAuth } from "better-auth";
+      import { sveltekitCookies } from "better-auth/svelte-kit";
+      import { getRequestEvent } from "$app/server";
+
+      export const auth = betterAuth({
+        // STUB store. Swap for your real database before you ship, e.g.
+        //   import { Pool } from "pg";
+        //   database: new Pool({ connectionString: process.env.DATABASE_URL }),
+        database: new Database("auth.db"),
+        // Email + password is the zero-setup flow: no OAuth app or mail provider
+        // needed to prove sign-up and sign-in work. Add socialProviders later.
+        emailAndPassword: { enabled: true },
+        // sveltekitCookies must be the LAST plugin: it makes better-auth set
+        // cookies correctly through SvelteKit's response. Required for sessions.
+        plugins: [sveltekitCookies(getRequestEvent)],
+      });
+  # The browser client. Components call authClient.signIn / signUp / signOut and
+  # read the reactive session with authClient.useSession().
+  - path: src/lib/auth-client.ts
+    content: |
+      // keel-generated. The better-auth browser client. Svelte components import
+      // this to sign in, sign up, sign out and read the reactive session store.
+      // baseURL is inferred from the current origin, so no config is needed for
+      // localhost or production.
+      import { createAuthClient } from "better-auth/svelte";
+
+      export const authClient = createAuthClient();
+  # The SvelteKit server hook. It serves better-auth's endpoints and, on every
+  # request, reads the session and puts the user on event.locals so +page.server
+  # and +layout.server loaders can gate access.
+  - path: src/hooks.server.ts
+    content: |
+      // keel-generated. Runs on every server request. Two jobs:
+      //  1. svelteKitHandler serves every better-auth endpoint under /api/auth/*.
+      //  2. It reads the current session and puts user + session on event.locals,
+      //     so server loaders (e.g. src/routes/dashboard/+page.server.ts) can gate
+      //     access. better-auth does NOT populate event.locals by itself, so this
+      //     step is required.
+      import { building } from "$app/environment";
+      import { svelteKitHandler } from "better-auth/svelte-kit";
+      import type { Handle } from "@sveltejs/kit";
+
+      import { auth } from "$lib/auth";
+
+      export const handle: Handle = async ({ event, resolve }) => {
+        const session = await auth.api.getSession({
+          headers: event.request.headers,
+        });
+        if (session) {
+          event.locals.session = session.session;
+          event.locals.user = session.user;
+        }
+        return svelteKitHandler({ event, resolve, auth, building });
+      };
+  # Type the extra fields we put on event.locals so loaders get real types.
+  - path: src/app.d.ts
+    content: |
+      // keel-generated. Declares the user + session that hooks.server.ts adds to
+      // event.locals, so server loaders read them with full types. `any` is used
+      // to avoid pinning to a specific better-auth type version; tighten it to
+      // better-auth's inferred User/Session types when you are ready.
+      declare global {
+        namespace App {
+          interface Locals {
+            user: unknown | null;
+            session: unknown | null;
+          }
+        }
+      }
+
+      export {};
+  # The catch-all that serves every better-auth HTTP endpoint:
+  # /api/auth/sign-in, /sign-up, /sign-out, /get-session, /callback/... etc.
+  - path: src/routes/api/auth/[...all]/+server.ts
+    content: |
+      // keel-generated. Every better-auth HTTP endpoint is served from this one
+      // catch-all: /api/auth/sign-in/email, /sign-up/email, /sign-out,
+      // /get-session, and OAuth callbacks. The auth handler owns both verbs.
+      import { auth } from "$lib/auth";
+      import type { RequestHandler } from "./$types";
+
+      export const GET: RequestHandler = ({ request }) => auth.handler(request);
+      export const POST: RequestHandler = ({ request }) => auth.handler(request);
+  # Pure route guard, no SvelteKit imports, so it is unit-testable under plain
+  # Vitest. +page.server loaders call it to decide access.
+  - path: src/lib/guard.ts
+    content: |
+      // keel-generated. A pure guard helper with no SvelteKit imports, so it is
+      // trivially unit-testable. Given the current locals, it returns whether the
+      // request is authenticated. Server loaders use its result to redirect.
+      export interface GuardLocals {
+        user?: unknown | null;
+        session?: unknown | null;
+      }
+
+      // True only when both a user and a live session are present.
+      export function isAuthenticated(locals: GuardLocals): boolean {
+        return Boolean(locals.user) && Boolean(locals.session);
+      }
+  # The sign-in / sign-up page. Uses the better-auth client. Submitting either
+  # form calls the client, which hits the catch-all route above and sets the
+  # session cookie, then sends the user to /dashboard.
+  - path: src/routes/login/+page.svelte
+    content: |
+      <!-- keel-generated. Sign-in and sign-up in one page, driven by the
+           better-auth Svelte client. Both call the client, which posts to the
+           /api/auth catch-all and sets the session cookie, then navigate to the
+           protected /dashboard. -->
+      <script lang="ts">
+        import { goto } from "$app/navigation";
+        import { authClient } from "$lib/auth-client";
+
+        let email = $state("");
+        let password = $state("");
+        let name = $state("");
+        let mode = $state<"sign-in" | "sign-up">("sign-in");
+        let error = $state("");
+
+        async function submit(event: Event) {
+          event.preventDefault();
+          error = "";
+          const result =
+            mode === "sign-in"
+              ? await authClient.signIn.email({ email, password })
+              : await authClient.signUp.email({ email, password, name });
+          if (result.error) {
+            error = result.error.message ?? "Something went wrong.";
+            return;
+          }
+          await goto("/dashboard");
+        }
+      </script>
+
+      <main style="font-family: system-ui, sans-serif; max-width: 360px; margin: 80px auto">
+        <h1>{mode === "sign-in" ? "Sign in" : "Create account"}</h1>
+        <form onsubmit={submit}>
+          {#if mode === "sign-up"}
+            <input bind:value={name} placeholder="Name" required style="display:block;width:100%;margin:8px 0" />
+          {/if}
+          <input bind:value={email} type="email" placeholder="Email" required style="display:block;width:100%;margin:8px 0" />
+          <input bind:value={password} type="password" placeholder="Password (8+ chars)" required style="display:block;width:100%;margin:8px 0" />
+          <button type="submit">{mode === "sign-in" ? "Sign in" : "Register"}</button>
+        </form>
+        {#if error}<p style="color:#b00020">{error}</p>{/if}
+        <p style="margin-top:16px">
+          {#if mode === "sign-in"}
+            <button type="button" onclick={() => (mode = "sign-up")}>Need an account? Register</button>
+          {:else}
+            <button type="button" onclick={() => (mode = "sign-in")}>Have an account? Sign in</button>
+          {/if}
+        </p>
+      </main>
+  # The protected route. Its server loader redirects to /login when there is no
+  # session (event.locals was filled by the hook). Proof the whole flow works.
+  - path: src/routes/dashboard/+page.server.ts
+    content: |
+      // keel-generated. Guards /dashboard. The hook filled event.locals with the
+      // user + session; this loader redirects an unauthenticated request to
+      // /login, and otherwise hands the user down to the page. This is the
+      // canonical SvelteKit way to protect a route (server-side, before render).
+      import { redirect } from "@sveltejs/kit";
+      import { isAuthenticated } from "$lib/guard";
+      import type { PageServerLoad } from "./$types";
+
+      export const load: PageServerLoad = ({ locals }) => {
+        if (!isAuthenticated(locals)) {
+          throw redirect(303, "/login");
+        }
+        return { user: locals.user };
+      };
+  - path: src/routes/dashboard/+page.svelte
+    content: |
+      <!-- keel-generated. The protected page. It only renders when the server
+           loader let the request through, and it uses the reactive session store
+           from the client to show who is signed in and to sign out. -->
+      <script lang="ts">
+        import { goto } from "$app/navigation";
+        import { authClient } from "$lib/auth-client";
+
+        const session = authClient.useSession();
+
+        async function signOut() {
+          await authClient.signOut();
+          await goto("/login");
+        }
+      </script>
+
+      <main style="font-family: system-ui, sans-serif; max-width: 480px; margin: 80px auto">
+        <h1>Dashboard</h1>
+        <p>Signed in as <strong>{$session.data?.user?.email ?? "unknown"}</strong>.</p>
+        <button type="button" onclick={signOut}>Sign out</button>
+      </main>
+  # A focused test that proves the guard logic without a browser or a DB. It runs
+  # under the framework's Vitest (`keel run test`) with no SvelteKit aliases,
+  # because guard.ts has no SvelteKit imports.
+  - path: src/lib/guard.test.ts
+    content: |
+      // keel-generated. Proves the route guard: a request with no session is
+      // treated as unauthenticated (so /dashboard redirects), and a request with
+      // both a user and a session is let through. Pure logic, so it runs under
+      // plain Vitest (`keel run test`) with no DB or browser.
+      import { expect, test } from "vitest";
+
+      import { isAuthenticated } from "./guard";
+
+      test("blocks a request with no session", () => {
+        expect(isAuthenticated({})).toBe(false);
+        expect(isAuthenticated({ user: null, session: null })).toBe(false);
+      });
+
+      test("blocks a user without a live session", () => {
+        expect(isAuthenticated({ user: { id: "1" }, session: null })).toBe(false);
+      });
+
+      test("allows a user with a live session", () => {
+        expect(isAuthenticated({ user: { id: "1" }, session: { id: "s1" } })).toBe(true);
+      });
+  # The env keys better-auth needs. BETTER_AUTH_SECRET signs and encrypts
+  # sessions; without it better-auth refuses to start. Written to .env
+  # (git-ignored by the framework's .gitignore) AND documented in .env.example.
+  - path: .env
+    content: |
+      # keel-generated. better-auth reads these. BETTER_AUTH_SECRET signs and
+      # encrypts sessions: keep it out of git (the framework's .gitignore ignores
+      # .env). Generate a real one with: openssl rand -base64 32
+      BETTER_AUTH_SECRET=change-me-min-32-chars-long-please
+      # The canonical origin, used to build callback and cookie URLs. Set to your
+      # real URL in production (e.g. https://app.example.com).
+      BETTER_AUTH_URL=http://localhost:5173
+  - path: .env.example
+    content: |
+      # Copy to .env and fill in. Generate secrets with: keel secrets sync
+      # better-auth: session signing/encryption secret (min 32 chars) and origin.
+      BETTER_AUTH_SECRET=change-me-min-32-chars-long-please
+      BETTER_AUTH_URL=http://localhost:5173
+      # Only needed once you swap the SQLite stub for a real database in
+      # src/lib/auth.ts (e.g. Postgres).
+      DATABASE_URL=postgresql://app:secret@localhost:5432/app
+  - path: AUTH-SETUP.md
+    content: |
+      <!-- keel-generated -->
+      # Auth (better-auth) - wired by keel
+
+      keel scaffolded better-auth into this SvelteKit app: email + password
+      sign-in/sign-up, server-side sessions, and a protected `/dashboard`.
+      Everything below is already in place. There is ONE required one-time step
+      (creating the database tables) and then some work before you ship.
+
+      ## What's wired
+      - `src/lib/auth.ts` - the better-auth instance. Database is a **STUB**: a
+        local `auth.db` SQLite file (via `better-sqlite3`) so it boots with zero
+        external service. `emailAndPassword` is enabled.
+      - `src/lib/auth-client.ts` - the browser client (`better-auth/svelte`).
+      - `src/hooks.server.ts` - serves every `/api/auth/*` endpoint and puts the
+        user + session on `event.locals` for server loaders.
+      - `src/routes/api/auth/[...all]/+server.ts` - the catch-all auth route.
+      - `src/routes/login/+page.svelte` - sign-in + sign-up in one page.
+      - `src/routes/dashboard/+page.server.ts` - guards `/dashboard`, redirecting
+        to `/login` when there is no session. `src/lib/guard.ts` holds the pure
+        guard logic and has a focused test (`src/lib/guard.test.ts`).
+      - `.env` - `BETTER_AUTH_SECRET` (session signing) + `BETTER_AUTH_URL`.
+
+      ## Required one-time step: create the tables
+      The STUB SQLite database has no tables until you run better-auth's schema
+      command. Do this once after install (it needs the database, which is why
+      keel does NOT run it during `keel add`):
+
+      ```
+      npx @better-auth/cli migrate
+      ```
+
+      Prefer to review the SQL first, or using a non-Kysely adapter later? Use:
+
+      ```
+      npx @better-auth/cli generate
+      ```
+
+      which writes the schema/migration file for you to inspect and apply. Until
+      one of these has run, sign-up returns an error because the `user` and
+      `session` tables do not exist.
+
+      ## Before you ship
+      1. Generate a real secret: `openssl rand -base64 32`, set it as
+         `BETTER_AUTH_SECRET` in `.env`.
+      2. Swap the SQLite STUB in `src/lib/auth.ts` for your real database (pass a
+         `pg` / `mysql2` pool instead of the `better-sqlite3` `Database`), then
+         re-run `npx @better-auth/cli migrate`. Do NOT ship `auth.db`.
+      3. Tighten the `App.Locals` types in `src/app.d.ts` to better-auth's
+         inferred `User` / `Session` types.
+      4. Add social providers, email verification, or password reset as needed
+         (all first-class in better-auth).

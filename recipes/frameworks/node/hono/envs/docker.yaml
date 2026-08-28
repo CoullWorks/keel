@@ -1,0 +1,184 @@
+id: hono-docker
+schema_version: 2
+kind: env
+env_family: compose
+label: Docker (compose)
+appliesTo: [hono]
+provides: [env, docker]
+priority: -10
+# Written from docs/infra/hono.md, and Hono is the one where the research
+# changed what this file has to do rather than just how it is written.
+#
+# Hono documents NO trust-proxy handling and NO graceful shutdown. Not a
+# different name for them: nothing. getConnInfo returns the socket peer, so
+# behind a reverse proxy every client IP is the proxy, and Hono's docs never
+# mention X-Forwarded-For. There is no vendor-provided validation to lean on.
+#
+# That means two things a Hono deployment must supply itself, and the framework
+# recipe does:
+#   - parsing X-Forwarded-For and enforcing the trusted hop, rather than
+#     trusting the header, which is spoofable by any client when unvalidated
+#   - a SIGTERM handler. serve() does return the Node http.Server, so close()
+#     and closeIdleConnections() are available; the handler is ours to write.
+#
+# Hono's official Node template is TypeScript, so npm ci --omit=dev before the
+# build removes the compiler. Prune after building, as with NestJS.
+commands:
+  start: "docker compose up -d --build"
+  # Where the project can be opened once the build finishes.
+  site_url: "http://localhost:{{http_port}}"
+  # How this environment tears itself down. Used when a build fails partway:
+  # keel removes the directory it created, and without this the containers,
+  # volumes and network it started stay behind holding a bind mount to a
+  # path that no longer exists. The next attempt then reuses that container
+  # and dies with "current working directory is outside of container mount
+  # namespace root".
+  down: "docker compose down -v --remove-orphans"
+  restart: "docker compose restart"
+  exec: "docker compose exec -T app"
+  create: "docker compose build"
+smoke:
+  - "docker compose ps"
+files:
+  - path: Dockerfile
+    content: |
+      # Two kinds of image, and the distinction is not cosmetic.
+      #
+      # `dev` is what compose builds. It carries no application code and no
+      # dependencies, because the project is bind-mounted from the host: `npm
+      # install` run through keel writes node_modules and package-lock.json to
+      # your working tree where they belong, and an edit is live without a
+      # rebuild.
+      #
+      # The stages after it build the production image, which copies the source
+      # in and installs without dev dependencies. Build it explicitly with
+      # `docker build --target runtime .`.
+      #
+      # Pointing compose at the production stage instead would look like it
+      # works and would not: with no bind mount, every file npm writes lands in
+      # a layer that the next `--build` discards.
+      FROM node:{{pin.node_version}}-slim AS dev
+      WORKDIR /app
+      # uid 1000 in the node image, which matches the default first user on a
+      # Linux or WSL host, so files created in the bind mount are owned by you
+      # rather than by root.
+      USER node
+      EXPOSE 3000
+      # The bind mount is empty of dependencies on a first run, and most dev
+      # servers are themselves a dependency: `nest start` or `vite` simply is
+      # not there yet, the process exits, and `restart: unless-stopped` turns
+      # that into a restart loop that `docker compose exec` cannot attach to.
+      # So wait for the install keel is about to run, then exec into the real
+      # server so it still receives SIGTERM as PID 1.
+      #
+      # The marker is node_modules/.package-lock.json, not the node_modules
+      # directory: npm creates the directory at the START of an install, so
+      # testing for it starts the dev server mid-install and the binary it
+      # needs is not there yet. npm writes the hidden lockfile only once the
+      # tree is fully reified.
+      CMD ["sh", "-c", "until [ -f node_modules/.package-lock.json ]; do echo \"waiting for dependencies\"; sleep 2; done; exec npm run dev"]
+
+      FROM node:{{pin.node_version}}-slim AS runtime
+      ENV NODE_ENV=production
+      WORKDIR /app
+      # package-lock.json* (glob) so a freshly scaffolded project, which has no
+      # lockfile yet, still builds. Commit the lock and npm ci becomes a real
+      # guarantee rather than a formality.
+      COPY package.json package-lock.json* ./
+      # Full install here (not --omit=dev): the TypeScript variant needs its
+      # compiler to build. devDependencies are pruned again once the build has run,
+      # so the JavaScript variant (no build script) ends up with the same lean tree.
+      RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
+      COPY --chown=node:node . .
+      # --if-present so the JavaScript variant, which has no build script, skips
+      # this while the TypeScript variant compiles src/ to dist/.
+      RUN npm run build --if-present && npm prune --omit=dev && npm cache clean --force
+      USER node
+      EXPOSE 3000
+      # npm start, so each language variant runs its own start script: the
+      # JavaScript source directly, or the compiled output a TypeScript build wrote.
+      CMD ["npm", "start"]
+  - path: compose.yaml
+    content: |
+      services:
+        app:
+          build:
+            context: .
+            # dev, not a production stage. See the note at the top of the
+            # Dockerfile: without the bind mount below, anything installed into
+            # this container is discarded by the next build.
+            target: dev
+          volumes:
+            # The project itself, so npm writes node_modules and the lockfile to
+            # the host and an edit takes effect without a rebuild.
+            - .:/app
+          restart: unless-stopped
+          env_file:
+            # required: false so a fresh scaffold comes up before anyone has written
+            # a .env. The short form (env_file: [.env]) is a hard compose error when
+            # the file is absent, and these recipes ship .env.example, not .env.
+            - path: .env
+              required: false
+          environment:
+            # @hono/node-server binds all interfaces by default, unlike Fastify,
+            # but this is set explicitly so the behaviour is stated rather than
+            # inherited.
+            HOST: "0.0.0.0"
+            PORT: "3000"
+            # Consumed by the forwarded-header handling in the app. Hono gives
+            # no built-in for this, so the value is only meaningful because the
+            # framework recipe reads it.
+            #
+            # Read from .env, defaulting to 0: with nothing in front of the app,
+            # X-Forwarded-For is entirely client-supplied and must be ignored.
+            # The nginx and Apache service recipes in infra/ set it to 1 and, at
+            # the same time, make the proxy overwrite the header so the single
+            # entry is true by construction. Those two changes only make sense
+            # together, which is why neither is pinned here.
+            TRUSTED_PROXY_HOPS: "${TRUSTED_PROXY_HOPS:-0}"
+          expose: ["3000"]
+          healthcheck:
+            test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+            interval: 15s
+            timeout: 5s
+            retries: 5
+            start_period: 15s
+          stop_grace_period: 30s
+
+        # The database, when one is selected.
+        #
+        # Every field that differs between Postgres, MySQL and MariaDB comes from
+        # the chosen db recipe as a var, so this one definition serves all three.
+        # Writing it per engine is what left the Node frameworks with no database
+        # service at all: the compose file only ever had `app`, the db recipe's
+        # overlay had no image, and compose does not auto-merge that overlay, so
+        # picking a database silently produced nothing.
+        db:
+          image: {{db.type}}:{{db.version}}
+          restart: unless-stopped
+          environment: {{db.compose_env}}
+          volumes:
+            - dbdata:{{db.data_dir}}
+            # The tuned configuration the db recipe wrote. Mounted here rather
+            # than left in an overlay file compose never reads.
+            - {{db.config_mount}}
+          {{db.command}}
+          healthcheck:
+            # The app waits on this, so it must answer only once the server
+            # really accepts connections rather than when the port opens.
+            test: {{db.healthcheck}}
+            interval: 10s
+            timeout: 5s
+            retries: 12
+            start_period: 30s
+
+      volumes:
+        dbdata:
+  - path: .dockerignore
+    content: |
+      node_modules
+      dist
+      .git
+      .env
+      npm-debug.log
+      coverage

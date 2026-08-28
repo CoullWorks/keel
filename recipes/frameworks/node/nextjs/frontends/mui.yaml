@@ -1,0 +1,76 @@
+id: nextjs-mui
+kind: addon
+label: MUI (Material UI React components)
+category: UI kit
+appliesTo: [nextjs]
+requires: [nextjs]
+provides: [mui, ui-library]
+priority: 42
+# MUI is a standalone React component library (Emotion styling — an alternative
+# to Tailwind).
+install:
+  - "{{exec}} npm install @mui/material @emotion/react @emotion/styled"
+smoke:
+  - "{{exec}} npm run build"
+files:
+  - path: app/page.tsx
+    content: |
+      // keel: a production-ready landing page built from Material UI components.
+      "use client";
+
+      import Box from "@mui/material/Box";
+      import Button from "@mui/material/Button";
+      import Card from "@mui/material/Card";
+      import CardContent from "@mui/material/CardContent";
+      import Chip from "@mui/material/Chip";
+      import Container from "@mui/material/Container";
+      import Stack from "@mui/material/Stack";
+      import Typography from "@mui/material/Typography";
+
+      const features = [
+        ["Material UI", "A complete React component library."],
+        ["Emotion styling", "Themeable design tokens via the sx prop."],
+        ["keel-managed", "keel run dev · test · build, one vocabulary."],
+      ];
+
+      export default function Home() {
+        return (
+          <Container maxWidth="md" sx={{ py: 10 }}>
+            <Chip label="running" color="success" size="small" />
+            <Typography variant="h3" component="h1" sx={{ mt: 3, fontWeight: 700 }}>
+              Your Next.js app is running
+            </Typography>
+            <Typography color="text.secondary" sx={{ mt: 2, fontSize: "1.1rem" }}>
+              Built with Material UI, scaffolded by keel. Edit <code>app/page.tsx</code> to make it
+              yours.
+            </Typography>
+            <Stack direction="row" spacing={2} sx={{ mt: 4 }}>
+              <Button variant="contained" href="https://coullworks.com/tools/keel">
+                keel docs
+              </Button>
+              <Button variant="outlined" href="https://mui.com/material-ui/">
+                MUI docs
+              </Button>
+            </Stack>
+            <Box
+              sx={{
+                mt: 6,
+                display: "grid",
+                gap: 2,
+                gridTemplateColumns: { xs: "1fr", sm: "repeat(3, 1fr)" },
+              }}
+            >
+              {features.map(([title, body]) => (
+                <Card key={title} variant="outlined">
+                  <CardContent>
+                    <Typography sx={{ fontWeight: 600 }}>{title}</Typography>
+                    <Typography variant="body2" color="text.secondary">
+                      {body}
+                    </Typography>
+                  </CardContent>
+                </Card>
+              ))}
+            </Box>
+          </Container>
+        );
+      }

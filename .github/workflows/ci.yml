@@ -1,0 +1,62 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly anti-rot: the recipes depend on upstream installers that change
+    # underneath us, so a green build on Monday is information even with no commits.
+    - cron: "0 6 * * 1"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+      - name: vet
+        run: go vet ./...
+      - name: lint recipes
+        run: go run ./cmd/keel recipes lint
+      - name: gofmt
+        run: test -z "$(gofmt -l $(git ls-files '*.go'))" || (gofmt -l $(git ls-files '*.go'); exit 1)
+      - name: test (unit + BDD + dry e2e)
+        run: go test ./...
+      - name: build
+        run: go build ./...
+
+  # The studio UI (internal/studio/web) is a React app whose built output
+  # (web/dist) is committed and embedded into the binary via go:embed. Both the
+  # GoReleaser release and `go install ...@latest` compile from that committed
+  # dist without a Node toolchain, so a dist that has drifted from its source
+  # would ship a stale studio to everyone. This job rebuilds the dist from source
+  # and fails if it differs from what is committed — the guarantee that the
+  # embedded studio always matches internal/studio/web.
+  studio-dist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: rebuild the embedded studio
+        working-directory: internal/studio/web
+        run: pnpm install --frozen-lockfile && pnpm build
+      - name: fail if the committed dist is stale
+        run: |
+          if ! git diff --quiet -- internal/studio/web/dist; then
+            echo "::error::internal/studio/web/dist is out of date with its source."
+            echo "Run 'make web' (or: cd internal/studio/web && pnpm build) and commit the result."
+            git diff --stat -- internal/studio/web/dist
+            exit 1
+          fi
+          echo "studio dist is in sync with its source."
+
+# Booting each stack for real lives in verify-stacks.yml, which runs the native,
+# DDEV and container tiers on a schedule and on demand.

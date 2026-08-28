@@ -1,0 +1,82 @@
+id: astro-tailwind
+kind: addon
+label: Tailwind CSS v4
+category: UI kit
+appliesTo: [astro]
+requires: [astro]
+provides: [tailwind, css]
+priority: 40 # after the framework's own files + npm install
+# Tailwind v4 wires into Astro via the Vite plugin (no config file, no PostCSS).
+install:
+  - "{{exec}} npm install tailwindcss @tailwindcss/vite"
+smoke:
+  - "{{exec}} npm run build"
+files:
+  - path: astro.config.mjs
+    content: |
+      import { defineConfig } from "astro/config";
+      import tailwindcss from "@tailwindcss/vite";
+
+      // https://astro.build/config
+      export default defineConfig({
+        vite: { plugins: [tailwindcss()] },
+      });
+  - path: src/styles/global.css
+    content: |
+      @import "tailwindcss";
+  - path: src/pages/index.astro
+    content: |
+      ---
+      // keel: a production-ready landing page that proves Tailwind is wired.
+      import "../styles/global.css";
+      const features = [
+        ["Tailwind CSS v4", "Utility-first styling, compiled via the Vite plugin."],
+        ["Astro islands", "Ships zero JS by default, hydrate only where you need it."],
+        ["keel-managed", "keel run dev · test · build, one vocabulary."],
+      ];
+      ---
+
+      <html lang="en">
+        <head>
+          <meta charset="utf-8" />
+          <meta name="viewport" content="width=device-width, initial-scale=1" />
+          <title>Astro + Tailwind</title>
+        </head>
+        <body class="min-h-screen bg-slate-950 text-slate-100">
+          <main class="mx-auto max-w-3xl px-6 py-20">
+            <span class="inline-flex items-center gap-2 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-300">
+              <span class="size-1.5 rounded-full bg-emerald-400"></span> running
+            </span>
+            <h1 class="mt-6 text-4xl font-bold tracking-tight sm:text-5xl">
+              Your Astro app is running
+            </h1>
+            <p class="mt-4 text-lg text-slate-400">
+              Built with Tailwind CSS, scaffolded by keel. Edit
+              <code class="rounded bg-slate-800 px-1.5 py-0.5 text-sm">src/pages/index.astro</code>
+              to make it yours.
+            </p>
+            <div class="mt-8 flex flex-wrap gap-3">
+              <a
+                href="https://coullworks.com/tools/keel"
+                class="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-emerald-400"
+              >
+                keel docs
+              </a>
+              <a
+                href="https://tailwindcss.com"
+                class="rounded-lg border border-slate-700 px-4 py-2 text-sm font-semibold hover:bg-slate-900"
+              >
+                Tailwind docs
+              </a>
+            </div>
+            <div class="mt-12 grid gap-4 sm:grid-cols-3">
+              {features.map(([title, body]) => (
+                <div class="rounded-xl border border-slate-800 bg-slate-900/50 p-5">
+                  <h2 class="font-semibold">{title}</h2>
+                  <p class="mt-1 text-sm text-slate-400">{body}</p>
+                </div>
+              ))}
+            </div>
+          </main>
+        </body>
+      </html>

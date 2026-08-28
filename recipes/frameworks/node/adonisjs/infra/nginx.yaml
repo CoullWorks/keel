@@ -1,0 +1,165 @@
+id: nginx-adonisjs
+schema_version: 2
+kind: config
+label: AdonisJS server block for NGINX
+updated: 2026-08-12
+# Written from docs/infra/adonisjs.md. AdonisJS publishes an nginx
+# configuration, so the proxy_set_header set below is the vendor's four lines
+# verbatim; the rest is marked where it is not.
+#
+# One vendor number is wrong and this recipe does not copy it. AdonisJS says
+# "you need to change AdonisJS server's keepAliveTimeout to larger than Nginx's
+# proxy_read_timeout (50s by default)" and prescribes 55000 ms. nginx documents
+# proxy_read_timeout's default as 60s, not 50s, so 55000 ms is BELOW it and does
+# not close the gap it is meant to close. See the note in the location block.
+#
+# Division of labour. The shared NGINX service (recipes/infra/web/nginx.yaml)
+# owns .keel/nginx/nginx.conf: worker and http-level tuning, the log format,
+# gzip and its type list, server_tokens off, the default security headers,
+# real_ip from the trusted proxy, and the default client_max_body_size and
+# proxy timeouts. This recipe owns one server block and the compose wiring.
+when:
+  framework: adonisjs
+  uses: nginx
+patch:
+  - file: .env
+    # AdonisJS is the only framework here whose shipped default is already
+    # correct for this topology. config/app.ts ships
+    # `trustProxy: proxyAddr.compile(['loopback', 'uniquelocal'])` with the
+    # vendor's own comment "This is safe for most deployment scenarios where
+    # your proxy runs on the same machine or private network", and a sibling
+    # container on the compose bridge network is exactly that private network.
+    # Set explicitly so the value is visible rather than assumed.
+    #
+    # Never `() => true`. AdonisJS labels that "Trust all proxies (not
+    # recommended for production)", which is stronger wording than Express or
+    # Fastify use for the same hole.
+    set:
+      TRUST_PROXY: "loopback,uniquelocal"
+files:
+  - path: docker/nginx/conf.d/app.conf
+    content: |
+      # AdonisJS, proxied. Included by the shared nginx.conf from
+      # /etc/nginx/conf.d/*.conf; everything http-level lives there.
+      server {
+        listen 80;
+        server_name _;
+
+        # Overrides the shared default (nginx documents client_max_body_size
+        # 1m) only by restating it. AdonisJS's bodyparser limit is not covered
+        # by any page the research fetched, so this is keel's number, not a
+        # match to a verified framework default. docs/infra/adonisjs.md lists it
+        # as an open question; check config/bodyparser.ts and align the two.
+        client_max_body_size 1m;
+
+        location / {
+          # AdonisJS's published config listens on 3333, and so does the app
+          # container. This is the one framework here that is not on 3000.
+          proxy_pass http://app:3333;
+
+          # These four are AdonisJS's published nginx block, unchanged.
+          proxy_set_header Host              $host;
+          proxy_set_header X-Real-IP         $remote_addr;
+          proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+
+          # Append, not overwrite: nginx adds the real peer to whatever the
+          # client sent, and the framework walks the list from the right
+          # discarding trusted hops, so a client-supplied prefix is dropped
+          # before it can become the client IP. That holds while the real client
+          # is outside the trusted ranges, which is the internet-facing case. If
+          # this app only ever serves traffic that is itself inside those ranges,
+          # switch to `$remote_addr` here so the header is true by construction,
+          # which is what the Hono recipe has to do because Hono has no walk at
+          # all. Keep the append form if a CDN or load balancer sits in front and
+          # you need its hop preserved, and widen the trusted set to match.
+
+          proxy_set_header X-Forwarded-Proto $scheme;
+          # Not in the vendor block. Added because request.hostname reads
+          # X-Forwarded-Host once trustProxy is set, and because setting it here
+          # replaces any copy the client sent.
+          proxy_set_header X-Forwarded-Host  $host;
+
+          # Not in the vendor block either: it ships no proxy_http_version and
+          # no Upgrade or Connection headers, so as published it will not pass a
+          # WebSocket upgrade. This is nginx's simple documented form. It sends
+          # Connection: upgrade on every request; the general alternative is a
+          # `map $http_upgrade $connection_upgrade` at http level, which only
+          # the shared nginx.conf can declare because map is an http-context
+          # directive.
+          proxy_set_header Upgrade    $http_upgrade;
+          proxy_set_header Connection "upgrade";
+
+          # Buffering left at the shared default (nginx documents
+          # proxy_buffering on). AdonisJS makes no streaming statement.
+
+          # No `upstream { keepalive N; }` is declared, so nginx opens a fresh
+          # connection per request and the 502 AdonisJS documents cannot occur:
+          # "When Nginx tries to reuse an old connection it thinks is open, but
+          # Node.js has already silently closed it, Nginx throws 502 Bad Gateway
+          # errors." If you add upstream keep-alive here, set the app's
+          # keepAliveTimeout above nginx's proxy_read_timeout. Use 65000 ms, not
+          # the 55000 ms the vendor prescribes: that number was computed against
+          # a 50s read timeout and nginx documents 60s.
+        }
+
+        # Static offloading. AdonisJS's published config points root at
+        # build/public and does `try_files $uri @adonis`, so Vite output is
+        # served by nginx rather than by Node: "Every static file request
+        # handled by your Node.js process is a request that cannot be spent on
+        # dynamic work."
+        #
+        # It is not wired up here because in this compose topology build/public
+        # lives inside the app image and this container cannot see it. To enable
+        # it, share the directory (a named volume mounted at /app/public in both
+        # services, or a bind mount of the built assets), then add
+        # `root /srv/public;` to this server and
+        # `location / { try_files $uri @adonis; }` with a
+        # `location @adonis { proxy_pass http://app:3333; ... }` companion. The
+        # documented alternative is a CDN via assetsUrl in config/vite.ts.
+
+        # Answered by nginx, so the web tier's liveness does not depend on the
+        # app. add_header at this level stops the shared http-level add_header
+        # directives being inherited into it, which is nginx's documented
+        # behaviour and is harmless for a health endpoint. Keep it distinct from
+        # the framework's own /ready, which runs the health checks.
+        location = /healthz {
+          access_log off;
+          add_header Content-Type text/plain;
+          return 200 "ok\n";
+        }
+      }
+provision:
+  compose:
+    files:
+      - path: compose.override.yaml
+        content: |
+          # Compose merges compose.override.yaml over compose.yaml with no extra
+          # flags, so the app service written by the env recipe is untouched.
+          services:
+            nginx:
+              image: nginx:1.27-alpine
+              restart: unless-stopped
+              depends_on:
+                app:
+                  condition: service_healthy
+              # The app service stays on `expose` only, so this is the single
+              # route in, which is what makes the loopback/uniquelocal trust
+              # setting sound.
+              ports:
+                - "${HTTP_PORT:-8080}:80"
+              volumes:
+                # Shared, owned by recipes/infra/web/nginx.yaml.
+                - ./.keel/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+                # This framework's server block, owned by this recipe.
+                - ./docker/nginx/conf.d:/etc/nginx/conf.d:ro
+              healthcheck:
+                test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+                interval: 15s
+                timeout: 5s
+                retries: 5
+                start_period: 10s
+              stop_grace_period: 30s
+  # Native env: no container to add. The server block above still applies, but
+  # change proxy_pass to http://127.0.0.1:3333 because there is no `app` host.
+  # That is what the vendor's own published config does.
+  local: {}

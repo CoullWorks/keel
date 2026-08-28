@@ -1,0 +1,40 @@
+id: laravel-telescope
+kind: addon
+label: Telescope (local debug dashboard)
+appliesTo: [laravel]
+# No `requires: [db]`. Telescope stores its entries in whatever connection the
+# application is configured with, and a fresh Laravel app is configured with
+# SQLite, so it works on a native environment where keel has started no database
+# server of its own.
+provides: [telescope]
+default: true
+# Left on auto-discovery on purpose, and a note on why, because the tempting
+# change here is wrong twice over.
+#
+# Laravel documents a local-only installation that adds laravel/telescope to
+# composer.json's dont-discover and registers the provider by hand in
+# AppServiceProvider::register(). Both halves are needed and keel can only do
+# the first: its file patching understands dotenv files, not PHP. Adding
+# dont-discover alone was tried, and it produced the worst outcome available -
+# the package installs, the migration runs, and /telescope answers 404 forever,
+# because the provider that registers the routes and the watchers is the one
+# discovery was just told to skip.
+#
+# It also has to come after telescope:install, since that command is registered
+# by the same provider. Ordering it first fails with "There are no commands
+# defined in the telescope namespace".
+#
+# The crash that prompted the attempt was never Telescope's: the queue worker
+# was creating storage/logs/laravel.log as root, so when Telescope reported a
+# missing table during install, Laravel could not write the log entry and the
+# real error was replaced by a stream failure. That is fixed where it belonged,
+# in the compose file.
+install:
+  - "{{composer}} require laravel/telescope --dev"
+  - "{{artisan}} telescope:install"
+  - "{{artisan}} migrate --force"
+smoke:
+  # Both halves: the table exists, and the dashboard is actually mounted. The
+  # second is what catches an install that registered nothing.
+  - "{{artisan}} tinker --execute=\"DB::table('telescope_entries')->count();\""
+  - "{{artisan}} route:list --path=telescope"

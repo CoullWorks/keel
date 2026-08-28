@@ -1,0 +1,92 @@
+id: nextjs-chakra
+kind: addon
+label: Chakra UI (React components)
+category: UI kit
+appliesTo: [nextjs]
+requires: [nextjs]
+provides: [chakra, ui-library]
+priority: 42
+# Chakra UI v3 is a standalone React component library (Emotion styling).
+install:
+  - "{{exec}} npm install @chakra-ui/react @emotion/react"
+smoke:
+  - "{{exec}} npm run build"
+files:
+  - path: app/provider.tsx
+    content: |
+      "use client";
+
+      import { ChakraProvider, defaultSystem } from "@chakra-ui/react";
+
+      export function Provider({ children }: { children: React.ReactNode }) {
+        return <ChakraProvider value={defaultSystem}>{children}</ChakraProvider>;
+      }
+  - path: app/layout.tsx
+    content: |
+      import { Provider } from "./provider";
+
+      export const metadata = { title: "app", description: "Next.js + Chakra UI (keel)" };
+
+      export default function RootLayout({ children }: { children: React.ReactNode }) {
+        return (
+          <html lang="en" suppressHydrationWarning>
+            <body>
+              <Provider>{children}</Provider>
+            </body>
+          </html>
+        );
+      }
+  - path: app/page.tsx
+    content: |
+      // keel: a production-ready landing page built from Chakra UI v3 components.
+      import {
+        Badge,
+        Button,
+        Card,
+        Container,
+        Heading,
+        SimpleGrid,
+        Stack,
+        Text,
+      } from "@chakra-ui/react";
+
+      const features = [
+        ["Chakra UI v3", "A modular, accessible React component library."],
+        ["Design tokens", "Themeable system with semantic color palettes."],
+        ["keel-managed", "keel run dev · test · build, one vocabulary."],
+      ];
+
+      export default function Home() {
+        return (
+          <Container maxW="3xl" py="20">
+            <Badge colorPalette="green">running</Badge>
+            <Heading size="3xl" mt="6">
+              Your Next.js app is running
+            </Heading>
+            <Text color="fg.muted" mt="4" fontSize="lg">
+              Built with Chakra UI, scaffolded by keel. Edit <code>app/page.tsx</code> to make it
+              yours.
+            </Text>
+            <Stack direction="row" gap="3" mt="8">
+              <Button colorPalette="teal" asChild>
+                <a href="https://coullworks.com/tools/keel">keel docs</a>
+              </Button>
+              <Button variant="outline" asChild>
+                <a href="https://chakra-ui.com">Chakra docs</a>
+              </Button>
+            </Stack>
+            <SimpleGrid columns={{ base: 1, sm: 3 }} gap="4" mt="12">
+              {features.map(([title, body]) => (
+                <Card.Root key={title}>
+                  <Card.Body>
+                    <Heading size="sm">{title}</Heading>
+                    <Text fontSize="sm" color="fg.muted" mt="1">
+                      {body}
+                    </Text>
+                  </Card.Body>
+                </Card.Root>
+              ))}
+            </SimpleGrid>
+          </Container>
+        );
+      }

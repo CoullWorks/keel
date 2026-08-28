@@ -1,0 +1,48 @@
+id: mysql-laravel
+schema_version: 2
+kind: config
+label: Laravel wiring for MySQL
+when:
+  framework: laravel
+  uses: mysql
+provision:
+  ddev:
+    patch:
+      - file: .env
+        set:
+          DB_CONNECTION: mysql
+          DB_HOST: "{{db.host}}"
+          DB_PORT: "{{db.port}}"
+          DB_DATABASE: "{{db.name}}"
+          DB_USERNAME: "{{db.user}}"
+          DB_PASSWORD: "{{db.password}}"
+  sail:
+    patch:
+      - file: .env
+        set:
+          DB_CONNECTION: mysql
+          DB_HOST: mysql
+          DB_PORT: "3306"
+          DB_DATABASE: laravel
+          DB_USERNAME: sail
+          DB_PASSWORD: password
+  compose:
+    patch:
+      - file: .env
+        set:
+          DB_CONNECTION: mysql
+          DB_HOST: db
+          DB_PORT: "3306"
+          DB_DATABASE: app
+          DB_USERNAME: app
+          DB_PASSWORD: secret
+  local:
+    patch:
+      - file: .env
+        set:
+          DB_CONNECTION: mysql
+          DB_HOST: 127.0.0.1
+          DB_PORT: "{{db.localPort}}"
+          DB_DATABASE: "{{db.name}}"
+          DB_USERNAME: "{{db.user}}"
+          DB_PASSWORD: "{{db.password}}"

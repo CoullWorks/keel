@@ -1,0 +1,8 @@
+id: magento-coding-standard
+kind: addon
+label: Magento Coding Standard (phpcs ruleset)
+appliesTo: [magento, magento-mageos]
+provides: [coding-standard]
+default: true
+install:
+  - "{{composer}} require magento/magento-coding-standard --dev"

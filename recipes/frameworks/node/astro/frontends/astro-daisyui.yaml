@@ -1,0 +1,66 @@
+id: astro-daisyui
+kind: addon
+label: DaisyUI (Tailwind component library)
+category: UI kit
+appliesTo: [astro]
+requires: [astro, tailwind]
+provides: [daisyui, ui-library]
+priority: 41 # after the Tailwind addon (40) — its CSS import must win
+# DaisyUI v5 is a Tailwind v4 plugin: add it via @plugin in the CSS.
+install:
+  - "{{exec}} npm install daisyui"
+smoke:
+  - "{{exec}} npm run build"
+files:
+  - path: src/styles/global.css
+    content: |
+      @import "tailwindcss";
+      @plugin "daisyui";
+  - path: src/pages/index.astro
+    content: |
+      ---
+      // keel: a production-ready landing page built from daisyUI components.
+      import "../styles/global.css";
+      const features = [
+        ["daisyUI", "Semantic component classes on top of Tailwind."],
+        ["Astro islands", "Ships zero JS by default, hydrate only where you need it."],
+        ["keel-managed", "keel run dev · test · build, one vocabulary."],
+      ];
+      ---
+
+      <html lang="en">
+        <head>
+          <meta charset="utf-8" />
+          <meta name="viewport" content="width=device-width, initial-scale=1" />
+          <title>Astro + daisyUI</title>
+        </head>
+        <body class="min-h-screen bg-base-200 text-base-content">
+          <main class="mx-auto max-w-3xl px-6 py-20">
+            <div class="badge badge-success gap-2">running</div>
+            <h1 class="mt-6 text-4xl font-bold">Your Astro app is running</h1>
+            <p class="mt-4 text-base-content/70">
+              Built with daisyUI, scaffolded by keel. Edit
+              <code class="rounded bg-base-300 px-1.5 py-0.5">src/pages/index.astro</code>
+              to make it yours.
+            </p>
+            <div class="mt-8 flex flex-wrap gap-3">
+              <a href="https://coullworks.com/tools/keel" class="btn btn-primary">
+                keel docs
+              </a>
+              <a href="https://daisyui.com/components/" class="btn btn-outline">
+                daisyUI components
+              </a>
+            </div>
+            <div class="mt-12 grid gap-4 sm:grid-cols-3">
+              {features.map(([title, body]) => (
+                <div class="card bg-base-100 shadow-sm">
+                  <div class="card-body">
+                    <h2 class="card-title text-base">{title}</h2>
+                    <p class="text-sm text-base-content/70">{body}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </main>
+        </body>
+      </html>

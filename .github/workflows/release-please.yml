@@ -1,0 +1,22 @@
+name: release-please
+
+# Auto-versioning: on every push to main, release-please reads the Conventional
+# Commit messages since the last release and maintains a "release PR" that bumps
+# the version + updates the CHANGELOG. Merging that PR tags the version, which
+# triggers release.yml (GoReleaser) to build and publish. See
+# docs/PLUGIN-STANDARD.md.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        with:
+          release-type: go

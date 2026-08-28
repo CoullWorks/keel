@@ -1,0 +1,65 @@
+id: magento-docker
+schema_version: 2
+kind: env
+env_family: compose
+label: Docker (compose, PHP-FPM)
+appliesTo: [magento, magento-mageos]
+provides: [env, docker, db-mariadb] # this stack brings up MariaDB itself
+priority: -10 # bring php/db/opensearch/redis up before the app is created
+updated: 2026-08-12
+# This env owns the command vocabulary. The stack it talks to is written by
+# recipes/frameworks/php/magento/infra/php-fpm.yaml (the Dockerfile, compose.yaml,
+# Adobe's php.ini values, the FPM pool and the mandatory crontab) and by the
+# shared PHP baseline in recipes/frameworks/php/shared/php-production.yaml.
+#
+# There is no web server in the stack until you pick one. That is how keel models
+# the choice: the nginx and Apache service recipes in recipes/infra/web/ are
+# single-select and mutually exclusive, and picking one injects Magento's own
+# server block or VirtualHost from magento/infra/nginx.yaml or
+# magento/infra/apache.yaml, along with a compose.override.yaml that adds the
+# container and publishes port 80.
+#
+#   keel new magento --env magento-docker --with nginx
+#   keel new magento --env magento-docker --with apache
+#
+# Magento's nginx.conf.sample and its pub/.htaccess are genuinely different
+# postures, not two spellings of the same rules, so read the header of whichever
+# of those two files you end up with.
+commands:
+  start: "docker compose up -d --build"
+  # How this environment tears itself down. Used when a build fails partway:
+  # keel removes the directory it created, and without this the containers,
+  # volumes and network it started stay behind holding a bind mount to a
+  # path that no longer exists. The next attempt then reuses that container
+  # and dies with "current working directory is outside of container mount
+  # namespace root".
+  down: "docker compose down -v --remove-orphans"
+  restart: "docker compose restart"
+  # --user: the dev stage runs as root so it can write to the bind-mounted host
+  # tree, which means composer and artisan would create root-owned files in your
+  # working directory. keel then cannot patch its own .env ("permission denied")
+  # and you cannot edit the project without sudo. Running exec as the invoking
+  # user keeps everything written here owned by you.
+  #
+  # It applies to all of them, not just exec. composer and the console ran as
+  # root until they were fixed, and those are the steps that write the most:
+  # every add-on that installs a package or publishes a config left root-owned
+  # files behind, after which the app could not write its own cache or log and
+  # answered 500 on every request.
+  #
+  # COMPOSER_HOME and HOME point at /tmp because an arbitrary uid has no home
+  # directory inside the image, and composer refuses to start without one.
+  exec: 'docker compose exec -T --user "$(id -u):$(id -g)" -e COMPOSER_HOME=/tmp -e HOME=/tmp php'
+  composer: 'docker compose exec -T --user "$(id -u):$(id -g)" -e COMPOSER_HOME=/tmp -e HOME=/tmp php composer'
+  magento: 'docker compose exec -T --user "$(id -u):$(id -g)" -e COMPOSER_HOME=/tmp -e HOME=/tmp php bin/magento'
+  site_url: "http://localhost:{{http_port}}"
+  settings_reenable: ""
+  # Cron sits behind a compose profile so `start` does not bring it up: see the
+  # note on the cron service in magento/infra/php-fpm.yaml for why it must not
+  # run while the store is being installed. This starts it once the build is
+  # done, and is the command to run by hand after a `docker compose up`.
+  cron_start: "docker compose --profile cron up -d cron"
+  # OpenSearch, Redis and MariaDB are already services in compose.yaml, so the
+  # add-on tokens other recipes template render empty here and those steps skip.
+smoke:
+  - "docker compose ps"

@@ -1,0 +1,143 @@
+id: sveltekit-ts
+kind: framework
+label: SvelteKit (Svelte meta-framework, TypeScript)
+lang: node
+provides: [node, sveltekit, svelte, self-serving]
+default: false
+family: sveltekit
+variant: TypeScript
+updated: 2026-08-25
+pins:
+  sveltekit: ^2.0.0
+  svelte: ^5.0.0
+# The Node line is a choice. Only the versions this framework actually
+# supports are offered; the note says what each one costs you.
+versions:
+  node_version:
+    label: Node.js version
+    recommended: "22"
+    options:
+      - value: "20"
+        label: "Node 20 LTS"
+        note: "maintenance only, ends Apr 2026"
+      - value: "22"
+        label: "Node 22 LTS"
+        note: "active LTS, the safe default"
+      - value: "24"
+        label: "Node 24 LTS"
+        note: "newest LTS"
+# Minimal SvelteKit written directly. `svelte-kit sync` (run on postinstall)
+# generates .svelte-kit (and its tsconfig this variant extends) so dev/build and
+# svelte-check work without the interactive `sv create`.
+install:
+  # The stack has to be up before anything can exec into it. Under a native
+  # env {{start}} renders empty and the engine drops the no-op step.
+  - "{{start}}"
+  - "{{exec}} npm install"
+  # The app started before its dependencies existed, so bring it back up now
+  # that they are installed. Renders empty, and is dropped, on a native env.
+  - "{{restart}}"
+smoke:
+  - "{{exec}} npm run build"
+files:
+  - path: package.json
+    content: |
+      {
+        "name": "app",
+        "private": true,
+        "type": "module",
+        "scripts": {
+          "dev": "vite dev",
+          "build": "vite build",
+          "preview": "vite preview",
+          "prepare": "svelte-kit sync",
+          "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json"
+        },
+        "devDependencies": {
+          "@sveltejs/adapter-auto": "^3.3.0",
+          "@sveltejs/kit": "^2.8.0",
+          "@sveltejs/vite-plugin-svelte": "^4.0.0",
+          "svelte": "^5.0.0",
+          "svelte-check": "^4.0.0",
+          "typescript": "^5.5.0",
+          "vite": "^5.4.0"
+        }
+      }
+  - path: svelte.config.js
+    content: |
+      import adapter from "@sveltejs/adapter-auto";
+      import { vitePreprocess } from "@sveltejs/vite-plugin-svelte";
+
+      /** @type {import('@sveltejs/kit').Config} */
+      export default {
+        preprocess: vitePreprocess(),
+        kit: { adapter: adapter() },
+      };
+  - path: vite.config.ts
+    content: |
+      import { sveltekit } from "@sveltejs/kit/vite";
+      import { defineConfig } from "vite";
+
+      export default defineConfig({ plugins: [sveltekit()] });
+  - path: tsconfig.json
+    content: |
+      {
+        "extends": "./.svelte-kit/tsconfig.json",
+        "compilerOptions": {
+          "allowJs": true,
+          "checkJs": true,
+          "esModuleInterop": true,
+          "forceConsistentCasingInFileNames": true,
+          "resolveJsonModule": true,
+          "skipLibCheck": true,
+          "sourceMap": true,
+          "strict": true,
+          "moduleResolution": "bundler"
+        }
+      }
+  - path: src/app.d.ts
+    content: |
+      // See https://svelte.dev/docs/kit/types#app.d.ts
+      declare global {
+        namespace App {
+          // interface Error {}
+          // interface Locals {}
+          // interface PageData {}
+          // interface Platform {}
+        }
+      }
+
+      export {};
+  - path: src/app.html
+    content: |
+      <!doctype html>
+      <html lang="en">
+        <head>
+          <meta charset="utf-8" />
+          <link rel="icon" href="%sveltekit.assets%/favicon.png" />
+          <meta name="viewport" content="width=device-width, initial-scale=1" />
+          %sveltekit.head%
+        </head>
+        <body data-sveltekit-preload-data="hover">
+          <div style="display: contents">%sveltekit.body%</div>
+        </body>
+      </html>
+  - path: src/routes/+page.svelte
+    content: |
+      <main style="font-family: system-ui, sans-serif; padding: 40px; max-width: 640px">
+        <h1>SvelteKit</h1>
+        <p>Scaffolded by keel. Edit <code>src/routes/+page.svelte</code>.</p>
+      </main>
+  - path: .gitignore
+    content: |
+      node_modules/
+      .svelte-kit/
+      build/
+      .env
+tasks:
+  test: "{{exec}} npx vitest run"
+  lint: "{{exec}} npx eslint ."
+  check: "{{exec}} npm run check"
+  dev: "{{exec}} npm run dev -- --port ${PORT:-5173}"
+  build: "{{exec}} npm run build"
+  preview: "{{exec}} npm run preview"

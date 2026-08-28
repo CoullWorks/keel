@@ -1,0 +1,46 @@
+id: example-local
+schema_version: 2
+kind: env
+# An env recipe teaches keel a local-development environment: how the project runs
+# on your machine. It is the recipe every OTHER recipe templates its commands
+# against, so a framework's install steps work under any env without knowing which.
+#
+# This one is the `local` family — native, no containers — so most command tokens
+# are empty (there is nothing to `start`). A container env (the `compose` family)
+# would fill start/stop/exec with `docker compose ...`. Because a framework recipe
+# writes `{{start}}` / `{{exec}}` / `{{composer}}` and never `docker compose`
+# directly, the SAME framework recipe works under this env and under a compose one.
+label: "Local (native, no containers — added by the example pack)"
+# env_family groups envs that provision the same way, so a db or service can
+# describe how it comes up once per family (see the `provision:` blocks in the db
+# and addon recipes) instead of once per env. It must be one of: ddev, compose,
+# sail, local.
+env_family: local
+appliesTo: ["*"]
+# `provides` lets a db/service's provision map find this env's family. An env
+# usually provides its family name so `uses:`/`env:` matches can key off it.
+provides: [local]
+default: false
+updated: 2026-08-22
+# The command vocabulary other recipes template against. Keys are the canonical
+# verbs (start/stop/exec/composer/...); values are how THIS env runs them. Empty
+# means "this env has no such step" — keel renders the token away and skips it,
+# rather than leaving a literal {{start}} in a command. A native env starts
+# nothing, so start/stop are empty; exec runs a command directly with no wrapper.
+commands:
+  start: ""
+  stop: ""
+  restart: ""
+  exec: ""
+  down: ""
+files:
+  - path: "EXAMPLE-ENV.md"
+    content: |
+      # Local env (added by the example pack)
+
+      <!-- keel-generated -->
+
+      This project runs natively — no containers. `keel run dev` maps to the
+      framework's own dev command with no wrapper. A pack that shipped a
+      containerised env would set the compose commands here and set
+      `env_family: compose` so services provision as compose sidecars.

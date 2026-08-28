@@ -1,0 +1,35 @@
+id: django-storages
+kind: addon
+label: django-storages (S3/GCS/Azure)
+appliesTo: [django]
+provides: [storages]
+install:
+  - '{{exec}} uv add "django-storages[s3]"'
+files:
+  - path: config/settings.d/70-storages.py
+    content: |
+      # django-storages only takes effect once STORAGES names one of its
+      # backends. Installed and unreferenced, uploads still go to local disk.
+      #
+      # Configured from the environment so the same image runs against MinIO
+      # locally and S3 in production. With no bucket set, local disk is kept
+      # rather than pointing at a bucket that does not exist.
+      import os
+
+      _BUCKET = os.environ.get("AWS_STORAGE_BUCKET_NAME", "")
+      if _BUCKET:
+          STORAGES = {
+              "default": {
+                  "BACKEND": "storages.backends.s3.S3Storage",
+                  "OPTIONS": {
+                      "bucket_name": _BUCKET,
+                      "endpoint_url": os.environ.get("AWS_S3_ENDPOINT_URL") or None,
+                      "region_name": os.environ.get("AWS_S3_REGION_NAME", "us-east-1"),
+                      # MinIO and some S3-compatible services need path style.
+                      "addressing_style": os.environ.get("AWS_S3_ADDRESSING_STYLE", "auto"),
+                  },
+              },
+              "staticfiles": {
+                  "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+              },
+          }

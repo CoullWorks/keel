@@ -1,0 +1,315 @@
+id: dash-docker
+schema_version: 2
+kind: env
+env_family: compose
+label: Docker (compose)
+appliesTo: [dash]
+provides: [env]
+priority: -10
+updated: 2026-08-12
+# Dash is a Flask application, so most of Flask's and gunicorn's documentation
+# applies directly. Two things are Dash's own and both are load-bearing here.
+#
+# First, the import string changed at 3.1.0: `gunicorn app:app` from 3.1.0
+# onward, `gunicorn app:server` on 3.0.4 and earlier, where `server = app.server`
+# has to be declared. Getting it wrong fails at start with a bare "Failed to
+# find attribute", which is one of the commonest Dash deployment failures.
+#
+# Second, Dash publishes an actual worker figure, which is unusual: "Individual
+# apps only need between 2 and 4 workers. A test app might use 2 workers, while
+# a production app with higher expected traffic might use 4." Higher counts risk
+# "resource thrashing issues at the system level". That is lower than gunicorn's
+# generic formula, and it is Dash-specific, so it wins.
+#
+# Dash "was designed to be a stateless framework" with "independent sessions",
+# so it scales behind an ordinary load balancer with no session affinity. That
+# is the opposite of Streamlit, Gradio and Reflex. The condition is that the app
+# respects the contract: with several workers "their memory is not shared", so a
+# mutated global "would affect the next user's session", and any cache has to
+# move to Flask-Caching backed by Redis or the filesystem.
+#
+# A web server in front is a separate choice: add `nginx` or `apache` and the
+# config recipe under infra/ drops in the server block or VirtualHost.
+# See docs/infra/dash.md.
+commands:
+  # --build so a changed Dockerfile actually rebuilds.
+  start: "docker compose up -d --build"
+  # Where the project can be opened once the build finishes.
+  site_url: "http://localhost:{{http_port}}"
+  # How this environment tears itself down. Used when a build fails partway:
+  # keel removes the directory it created, and without this the containers,
+  # volumes and network it started stay behind holding a bind mount to a
+  # path that no longer exists. The next attempt then reuses that container
+  # and dies with "current working directory is outside of container mount
+  # namespace root".
+  down: "docker compose down -v --remove-orphans"
+  restart: "docker compose restart"
+  create: "docker compose build"
+  # -T because these run from scripts and CI, where there is no TTY.
+  exec: "docker compose exec -T app"
+smoke:
+  - "docker compose ps"
+files:
+  - path: Dockerfile
+    content: |
+      # Two kinds of image, and the distinction is not cosmetic.
+      #
+      # `dev` is what compose builds. It carries no application code and no
+      # dependencies, because the project is bind-mounted from the host: `uv
+      # sync` run through keel writes .venv and uv.lock to your working tree
+      # where they belong, and an edit is live without a rebuild.
+      #
+      # The stages after it build the production image, which copies the source
+      # in and installs without dev dependencies. Build it explicitly with
+      # `docker build --target runtime .`.
+      #
+      # Pointing compose at the production stage instead would look like it
+      # works and would not: with no bind mount, everything uv writes lands in
+      # a layer that the next `--build` discards.
+      FROM python:{{pin.python_version}}-slim-bookworm AS dev
+      COPY --from=ghcr.io/astral-sh/uv:0.12.3 /uv /uvx /bin/
+      WORKDIR /app
+      # The venv lives in the bind-mounted tree, exactly as it would on the
+      # host, so an editor and a shell outside the container see the same
+      # interpreter and the same packages.
+      ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
+          PATH="/app/.venv/bin:$PATH" \
+          PYTHONUNBUFFERED=1
+      # uid 1000, matching the default first user on a Linux or WSL host, so
+      # files created in the bind mount are owned by you rather than by root.
+      # A separate stage does not inherit the runtime stage's ENV, and Dash
+      # takes the bind address from these: app.run() defaults to 127.0.0.1:8050,
+      # which in a container is both the wrong port and unreachable from the
+      # proxy. The healthcheck below probes 8000, so they have to agree.
+      ENV HOST=0.0.0.0 \
+          PORT=8000
+      RUN useradd --create-home --uid 1000 dev
+      USER dev
+      EXPOSE 8000
+      # The same probe the production stage uses. Without it here, a web server
+      # depending on `condition: service_healthy` can never start: compose
+      # reports "container has no healthcheck configured" and gives up.
+      # start-period is longer than production's because the first run installs
+      # dependencies into the bind mount before the app can serve anything.
+      HEALTHCHECK --interval=10s --timeout=5s --start-period=180s --retries=10 \
+        CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/_dash-layout', timeout=3).status == 200 else 1)"
+      # The bind mount has no .venv on a first run, and the framework itself
+      # lives in it, so `uv run` would fail and `restart: unless-stopped` would
+      # turn that into a restart loop that `docker compose exec` cannot attach
+      # to. Wait for the install keel is about to run, then exec the real
+      # server so it still receives SIGTERM as PID 1.
+      CMD ["sh", "-c", "until [ -d .venv ]; do echo 'waiting for dependencies'; sleep 2; done; exec uv run python app.py"]
+
+      # keel-generated.
+      #
+      # Multi-stage: the build layer carries uv and the lockfile, the runtime
+      # layer carries neither.
+      #
+      # The base is pinned to a patch release rather than 3.13-slim, so an
+      # unrelated rebuild cannot become an unreviewed Python upgrade. Dash's
+      # installation page still says "Dash requires Python v3.8 or later" while
+      # reporting Dash 4.x; 3.8 has been end of life since October 2024, so that
+      # floor is treated as stale and 3.13 is keel's choice.
+      FROM python:{{pin.python_version}}-slim-bookworm AS build
+
+      # uv pinned, per uv's own Docker guidance. :latest would mean a different
+      # installer on every build.
+      COPY --from=ghcr.io/astral-sh/uv:0.12.3 /uv /uvx /bin/
+
+      WORKDIR /app
+      ENV UV_COMPILE_BYTECODE=1 \
+          UV_LINK_MODE=copy \
+          UV_PROJECT_ENVIRONMENT=/app/.venv
+
+      # Dependencies before application code, so editing a callback does not
+      # invalidate the dependency layer. Dash recommends "pip over Conda
+      # buildpacks for faster deployments"; uv is the same idea, further along.
+      COPY pyproject.toml uv.lock* ./
+      # --frozen fails when the lockfile is out of date instead of quietly
+      # resolving a different tree. pandas and numpy pins matter here more than
+      # most: they are the difference between a wheel and a compiler.
+      # A freshly scaffolded project has no uv.lock yet, so the first build
+      # creates one; commit it, and from then on --frozen is a real guarantee
+      # rather than a formality. The branch exists so that a lockfile which IS
+      # present is never silently regenerated.
+      RUN if [ -f uv.lock ]; then \
+            uv sync --frozen --no-dev --no-install-project; \
+          else \
+            uv lock && uv sync --frozen --no-dev --no-install-project; \
+          fi
+      COPY . .
+      RUN uv sync --frozen --no-dev
+
+      FROM python:{{pin.python_version}}-slim-bookworm AS runtime
+      # Non-root. Dash inherits Flask's rule here: gunicorn "should not be run as
+      # root because it would cause your application code to run as root, which
+      # is not secure", which is also why it cannot hold port 80 itself.
+      RUN useradd --create-home --uid 10001 app
+      # uv in the runtime stage too: keel's task vocabulary runs `uv run` inside
+      # this container. One pinned static binary; the dev dependency tree is
+      # still absent from the image.
+      COPY --from=ghcr.io/astral-sh/uv:0.12.3 /uv /uvx /bin/
+      WORKDIR /app
+      COPY --from=build --chown=app:app /app /app
+      ENV PATH="/app/.venv/bin:$PATH" \
+          PYTHONUNBUFFERED=1 \
+          PYTHONDONTWRITEBYTECODE=1 \
+          UV_PROJECT_ENVIRONMENT=/app/.venv
+      USER app
+      EXPOSE 8000
+
+      # Dash publishes no health endpoint on any documented page, so this probes
+      # /_dash-layout. That is the JSON endpoint the browser fetches to build the
+      # page, so a 200 proves the Dash object is constructed and serialisable,
+      # not merely that Flask is up. Probing / would render the whole shell for
+      # the same answer.
+      #
+      # This endpoint is real but undocumented in the deployment pages, so treat
+      # it as keel's inference: if a future Dash renames it, change this line.
+      HEALTHCHECK --interval=15s --timeout=5s --start-period=25s --retries=5 \
+        CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/_dash-layout', timeout=3).status == 200 else 1)"
+
+      # app:app is the import string for Dash 3.1.0 and later. On 3.0.4 and
+      # earlier this must be app:server, and app.py must declare
+      # `server = app.server`. The pin in pyproject.toml decides which; there is
+      # no version-agnostic form.
+      #
+      # --workers 4 is Dash's own upper figure, not gunicorn's (2 x cores) + 1.
+      # Dash warns that going higher risks "resource thrashing issues at the
+      # system level". Drop to 2 for a test app. WEB_CONCURRENCY overrides it.
+      # --access-logfile -: gunicorn shows "only worker info and errors" by
+      # default, so without this the container barely logs requests.
+      # --graceful-timeout 30: explicit, so the drain window is a decision;
+      # compose sets stop_grace_period longer than it below.
+      # --timeout 120 rather than gunicorn's default 30: a Dash callback that
+      # queries a warehouse or renders a large figure legitimately takes longer,
+      # and a killed worker loses the request. Long work belongs in a background
+      # callback instead (see compose.yaml).
+      # --max-requests with jitter bounds leak growth in the data stack and
+      # staggers the restarts.
+      # --worker-tmp-dir /dev/shm: gunicorn's own note is that os.fchmod on the
+      # heartbeat file "may block workers on disk-backed filesystems".
+      # --forwarded-allow-ips: gunicorn defaults to 127.0.0.1,::1 and would
+      # ignore X-Forwarded-* from a proxy in another container. "*" is only safe
+      # because this port is never published.
+      #
+      # No debug and no dev tools: "Displaying serverside tracebacks is a
+      # security vulnerability", and dev bundles carry a performance cost. Running
+      # under gunicorn rather than `app.run()` is what turns them off.
+      CMD ["gunicorn", "app:app", \
+           "--bind", "0.0.0.0:8000", \
+           "--workers", "4", \
+           "--graceful-timeout", "30", \
+           "--timeout", "120", \
+           "--max-requests", "1000", \
+           "--max-requests-jitter", "100", \
+           "--worker-tmp-dir", "/dev/shm", \
+           "--forwarded-allow-ips", "*", \
+           "--access-logfile", "-", \
+           "--error-logfile", "-"]
+  - path: compose.yaml
+    content: |
+      # keel-generated.
+      services:
+        app:
+          build:
+            context: .
+            # dev, not a production stage. See the note at the top of the
+            # Dockerfile: without the bind mount below, anything installed into
+            # this container is discarded by the next build.
+            target: dev
+          volumes:
+            # The project itself, so uv writes .venv and uv.lock to the host and
+            # an edit takes effect without a rebuild.
+            - .:/app
+          restart: unless-stopped
+          env_file:
+            # required: false so a checkout without a .env still comes up.
+            # Listing a missing env_file the short way is a hard compose error.
+            - path: .env
+              required: false
+          environment:
+            # Dash's performance page: "Dash apps are frequently deployed across
+            # multiple processes or threads. In these cases, each process or
+            # thread contains its own memory, it doesn't share memory across
+            # instances." functools.lru_cache will not share results between
+            # workers. Redis is here so Flask-Caching has somewhere to go, which
+            # is Dash's own recommendation.
+            REDIS_URL: "redis://redis:6379"
+          # expose, not ports. gunicorn's sync worker "Requires a buffering
+          # proxy (nginx, HAProxy) for production", and publishing 8000 would
+          # let a client bypass that proxy.
+          expose: ["8000"]
+          depends_on:
+            redis:
+              condition: service_healthy
+          # Longer than gunicorn's --graceful-timeout of 30s, so a callback
+          # finishing inside the drain window is not SIGKILLed halfway.
+          stop_grace_period: 45s
+
+        redis:
+          image: redis:7-alpine
+          restart: unless-stopped
+          healthcheck:
+            test: ["CMD", "redis-cli", "ping"]
+            interval: 10s
+            timeout: 3s
+            retries: 5
+
+        # Background callbacks. Dash documents two managers and is explicit about
+        # which belongs here: DiskcacheManager "is not recommended for
+        # production", CeleryManager "is recommended for production as, unlike
+        # Disk Cache, it queues the background callbacks, running them one-by-one
+        # in the order that they were received by dedicated Celery worker(s)".
+        # Uncomment once the app declares a celery_app.
+        # worker:
+        #   build: .
+        #   restart: unless-stopped
+        #   environment:
+        #     REDIS_URL: "redis://redis:6379"
+        #   command: ["celery", "-A", "app:celery_app", "worker", "--loglevel=INFO", "--concurrency=2"]
+        #   depends_on:
+        #     redis:
+        #       condition: service_healthy
+        #   # Celery drains its current task on SIGTERM; give it room.
+        #   stop_grace_period: 60s
+
+        # The database, when one is selected. Every field that differs between
+        # Postgres, MySQL and MariaDB comes from the chosen db recipe as a var,
+        # so this one definition serves all three.
+        db:
+          image: {{db.type}}:{{db.version}}
+          restart: unless-stopped
+          environment: {{db.compose_env}}
+          volumes:
+            - dbdata:{{db.data_dir}}
+            - {{db.config_mount}}
+          {{db.command}}
+          healthcheck:
+            test: {{db.healthcheck}}
+            interval: 10s
+            timeout: 5s
+            retries: 12
+            start_period: 30s
+
+      volumes:
+        dbdata:
+  - path: .dockerignore
+    content: |
+      .git
+      .github
+      .venv
+      .keel
+      # The web server's own config and the compose files: mounted by the proxy
+      # container, never needed inside the application image.
+      docker/
+      compose.yaml
+      compose.override.yaml
+      Dockerfile
+      __pycache__
+      *.pyc
+      .env
+      cache/
+      .pytest_cache
+      .ruff_cache
+      .mypy_cache

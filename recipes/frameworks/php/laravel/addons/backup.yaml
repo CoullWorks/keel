@@ -1,0 +1,8 @@
+id: laravel-backup
+kind: addon
+label: Spatie Backup (DB + files backup)
+appliesTo: [laravel]
+provides: [backup]
+install:
+  - "{{composer}} require spatie/laravel-backup"
+  - "{{artisan}} vendor:publish --tag=backup-config"

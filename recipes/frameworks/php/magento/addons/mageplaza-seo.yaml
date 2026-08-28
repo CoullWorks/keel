@@ -1,0 +1,9 @@
+id: magento-mageplaza-seo
+kind: addon
+label: Mageplaza SEO (free edition)
+appliesTo: [magento, magento-mageos]
+provides: [mageplaza-seo]
+install:
+  # Free edition, key-less via public Packagist (paid Pro/Ultimate tiers are extra).
+  - "{{composer}} require mageplaza/module-core mageplaza/magento-2-seo-extension mageplaza/module-sitemap"
+  - "{{magento}} setup:upgrade"

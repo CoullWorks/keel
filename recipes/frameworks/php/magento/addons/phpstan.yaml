@@ -1,0 +1,8 @@
+id: magento-phpstan
+kind: addon
+label: PHPStan for Magento (static analysis)
+appliesTo: [magento, magento-mageos]
+provides: [phpstan]
+default: true
+install:
+  - "{{composer}} require bitexpert/phpstan-magento --dev"

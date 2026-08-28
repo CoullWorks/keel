@@ -1,0 +1,160 @@
+id: apache-adonisjs
+schema_version: 2
+kind: config
+label: AdonisJS VirtualHost for Apache
+updated: 2026-08-12
+# Written from docs/infra/adonisjs.md plus the Apache 2.4 module reference.
+# AdonisJS publishes an nginx configuration and no Apache one, so this is keel's
+# translation of the same intent: forward the four X-Forwarded-* values its
+# trustProxy setting reads, and keep the socket timeout above the app's
+# keep-alive so a reused connection is never closed underneath the proxy.
+#
+# Division of labour. The shared Apache service (recipes/infra/web/apache.yaml)
+# owns .keel/apache/keel-tuning.conf: MPM event tuning, the LoadModule lines for the
+# proxy modules, global compression, mod_expires, ServerTokens Prod,
+# ServerSignature Off, TraceEnable Off, the global security headers, and the
+# `IncludeOptional conf.d/app-*.conf` that pulls this file in.
+#
+# mod_remoteip is deliberately not configured: Apache is the edge here. Behind
+# a load balancer, RemoteIPHeader plus RemoteIPInternalProxy belong in the
+# shared httpd.conf.
+when:
+  framework: adonisjs
+  uses: apache
+patch:
+  - file: .env
+    # AdonisJS ships `trustProxy: proxyAddr.compile(['loopback',
+    # 'uniquelocal'])` with the vendor's own comment that it "is safe for most
+    # deployment scenarios where your proxy runs on the same machine or private
+    # network". A sibling container on the compose bridge network is that
+    # private network, so the shipped default is already right; it is set here
+    # explicitly so the value is visible. Never `() => true`, which the vendor
+    # labels "not recommended for production".
+    set:
+      TRUST_PROXY: "loopback,uniquelocal"
+files:
+  - path: docker/apache/conf.d/app-adonisjs.conf
+    content: |
+      # AdonisJS, proxied. Included by the shared keel-tuning.conf.
+      <VirtualHost *:80>
+          ServerName localhost
+
+          ProxyRequests Off
+
+          # mod_proxy_http adds X-Forwarded-For, X-Forwarded-Host and
+          # X-Forwarded-Server itself, and warns they "will contain more than
+          # one (comma-separated) value if the original request already
+          # contained one of these headers". proxy-addr walks that list from the
+          # right and stops at the first untrusted hop, so a client-supplied
+          # prefix is not directly exploitable, but leaving it there makes
+          # request.ip depend on what the client sent. Clearing them first is
+          # the Apache spelling of real-IP-from-the-trusted-proxy-only.
+          RequestHeader unset X-Forwarded-For
+          RequestHeader unset X-Forwarded-Host
+          RequestHeader unset X-Forwarded-Server
+          # mod_proxy_http does NOT add X-Forwarded-Proto; the documented list
+          # is For, Host and Server only. AdonisJS session cookies ship with
+          # `secure: app.inProduction`, and a secure cookie is silently not set
+          # if the app does not believe the request was HTTPS. Change to "https"
+          # when TLS terminates at this vhost.
+          RequestHeader set X-Forwarded-Proto "http"
+
+          ProxyPreserveHost On
+
+          # upgrade=websocket rather than mod_proxy_wstunnel, which the vendor
+          # marks Deprecated: "Since Apache HTTP Server 2.4.47, protocol Upgrade
+          # (tunneling) can be better handled by mod_proxy_http." The
+          # httpd:2.4-alpine image is 2.4.68. AdonisJS documents no WebSocket
+          # support and its published nginx block cannot pass an upgrade at all,
+          # so this is keel's addition rather than a translation.
+          #
+          # Port 3333, not 3000: AdonisJS is the one framework here that is not
+          # on 3000.
+          #
+          # timeout=75 is above the app's keepAliveTimeout so that an idle
+          # pooled connection is closed by Apache rather than found already
+          # closed by Node, which is the mechanism behind the 502 AdonisJS
+          # documents. Unlike nginx, Apache pools backend connections by
+          # default, so this matters here even though the nginx recipe can rely
+          # on a fresh connection per request. Set the app's keepAliveTimeout to
+          # 65000 ms and keep this above it. Note the vendor's own number
+          # (55000 ms) was computed against a 50s nginx read timeout, and nginx
+          # actually documents 60s.
+          ProxyPass        / http://app:3333/ upgrade=websocket connectiontimeout=5 timeout=75 ttl=60
+          ProxyPassReverse / http://app:3333/
+
+          # LimitRequestBody alone does NOT cap a proxied request, and this is
+          # not a guess: it was tested against httpd 2.4.68 in this exact
+          # topology. With LimitRequestBody set on the vhost, a POST an order of
+          # magnitude over the limit still reached the backend with a 200. The
+          # directive is enforced when Apache itself serves the request, not
+          # when mod_proxy_http streams the body through to a backend. So the
+          # rewrite below is what actually rejects it. [R=413] aborts with that
+          # status rather than redirecting, because mod_rewrite treats any code
+          # outside 300-399 as an abort.
+          #
+          # Caveat worth knowing: this reads the declared Content-Length, so a
+          # chunked upload that sends none is not caught. nginx's
+          # client_max_body_size covers both cases. Keep the application's own
+          # body limit as the backstop either way.
+          RewriteEngine On
+          RewriteCond expr "%{HTTP:Content-Length} -gt 1048576"
+          RewriteRule ^ - [R=413,L]
+          # LimitRequestBody defaults to 0, unlimited. AdonisJS's bodyparser
+          # limit is not covered by any page the research fetched, so 1048576 is
+          # keel's number rather than a match to a verified framework default.
+          # docs/infra/adonisjs.md lists it as an open question; check
+          # config/bodyparser.ts and align the two.
+          LimitRequestBody 1048576
+
+          # Static offloading. AdonisJS's published nginx config points its root
+          # at build/public and falls back to the app, because "Every static
+          # file request handled by your Node.js process is a request that
+          # cannot be spent on dynamic work." It is not wired up here because in
+          # this compose topology build/public lives inside the app image and
+          # this container cannot see it. To enable it, share the directory,
+          # then add DocumentRoot plus `ProxyPass /assets !` style exclusions
+          # ahead of the catch-all above. The documented alternative is a CDN
+          # via assetsUrl in config/vite.ts.
+      </VirtualHost>
+
+      # Apache has no one-line equivalent of nginx's `return 200`, so there is
+      # no proxy-local health endpoint. The container health check probes the
+      # app through this vhost, which proves the whole proxy path.
+provision:
+  compose:
+    files:
+      - path: compose.override.yaml
+        content: |
+          # Compose merges compose.override.yaml over compose.yaml with no extra
+          # flags, so the app service written by the env recipe is untouched.
+          services:
+            apache:
+              image: httpd:2.4-alpine
+              # The stock httpd.conf is left in place: it loads mpm_event and the base
+              # module set. -c appends this directive after it is read, pulling in the
+              # shared tuning and this framework's VirtualHost. Without it the image
+              # starts on stock config and serves its default page - it does not fail.
+              command: ["httpd-foreground", "-c", "Include conf/keel-tuning.conf"]
+              restart: unless-stopped
+              depends_on:
+                app:
+                  condition: service_healthy
+              ports:
+                - "${HTTP_PORT:-8080}:80"
+              volumes:
+                # Shared, owned by recipes/infra/web/apache.yaml.
+                - ./.keel/apache/keel-tuning.conf:/usr/local/apache2/conf/keel-tuning.conf:ro
+                # This framework's VirtualHost, owned by this recipe.
+                - ./docker/apache/conf.d:/usr/local/apache2/conf.d:ro
+              healthcheck:
+                test: ["CMD", "wget", "-qO-", "http://127.0.0.1/health"]
+                interval: 15s
+                timeout: 5s
+                retries: 5
+                start_period: 10s
+              stop_grace_period: 30s
+  # Native env: no container to add. The VirtualHost above still applies, but
+  # change the ProxyPass target to http://127.0.0.1:3333/, which is what the
+  # vendor's own published nginx config does.
+  local: {}

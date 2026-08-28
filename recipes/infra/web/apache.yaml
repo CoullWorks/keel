@@ -1,0 +1,446 @@
+id: apache
+schema_version: 2
+kind: service
+label: Apache httpd 2.4 (shared global tuning, MPM event + PHP-FPM)
+category: Web
+aliases: [laravel-apache, magento-apache, woocommerce-apache]
+appliesTo: ["*"] # any app can be fronted by a web server; the config is what differs
+#
+# SCOPE. This file owns the global server configuration: the MPM, the modules,
+# compression, expiry, the security headers and the identity directives. It owns
+# no VirtualHost, no DocumentRoot, no RewriteRule and no SetHandler for a
+# particular application. Those name a framework's paths and live with the
+# framework, which drops a VirtualHost into sites-enabled/ that inherits
+# everything here.
+#
+# A trap to avoid when writing those per-framework configs: php_value directives
+# in a .htaccess only take effect under mod_php. Magento's shipped pub/.htaccess
+# wraps memory_limit 756M and max_execution_time 18000 in <IfModule mod_php.c>
+# and <IfModule mod_php7.c>, so under PHP-FPM with mod_proxy_fcgi neither module
+# is loaded, both silently fall back to php.ini defaults, and nothing reports it.
+# The nginx sample sets the same values with fastcgi_param PHP_VALUE and does
+# work. An Apache config for a PHP-FPM stack must set these in the pool
+# (php_admin_value[memory_limit]) or in php.ini, never by copying the vendor's
+# .htaccess and assuming it applies. See docs/infra/magento.md.
+provides: [webserver, front-controller, apache]
+conflicts: [nginx]
+updated: 2026-08-12
+vars:
+  apache.version: "2.4"
+files:
+  - path: .keel/apache/keel-tuning.conf
+    content: |
+      # keel-generated: Apache httpd 2.4 global configuration.
+      #
+      # Include this from httpd.conf (or drop it in conf.d / conf-enabled). It
+      # contains no VirtualHost: those live with the framework and inherit
+      # everything here.
+      #
+      # Sources, all fetched 2026-08-12:
+      #   [1] MPM common directives  https://httpd.apache.org/docs/2.4/mod/mpm_common.html
+      #   [2] event MPM              https://httpd.apache.org/docs/2.4/mod/event.html
+      #   [3] mod_proxy_fcgi         https://httpd.apache.org/docs/2.4/mod/mod_proxy_fcgi.html
+      #   [4] mod_proxy              https://httpd.apache.org/docs/2.4/mod/mod_proxy.html
+      #   [5] mod_deflate            https://httpd.apache.org/docs/2.4/mod/mod_deflate.html
+      #   [6] mod_expires            https://httpd.apache.org/docs/2.4/mod/mod_expires.html
+      #   [7] mod_headers            https://httpd.apache.org/docs/2.4/mod/mod_headers.html
+      #   [8] core                   https://httpd.apache.org/docs/2.4/mod/core.html
+      #   [9] mod_remoteip           https://httpd.apache.org/docs/2.4/mod/mod_remoteip.html
+      #  [10] .htaccess howto        https://httpd.apache.org/docs/2.4/howto/htaccess.html
+      #  [11] PHP: Apache 2.x on Unix https://www.php.net/manual/en/install.unix.apache2.php
+
+      # ------------------------------------------------------------------ modules
+      # Paths as used by the official httpd image. On Debian and Ubuntu
+      # (including DDEV's web container) modules are enabled with a2enmod
+      # instead, and this whole block is replaced by:
+      #   a2enmod mpm_event proxy proxy_fcgi proxy_http proxy_wstunnel \
+      #           headers deflate expires rewrite remoteip setenvif filter
+      # mpm_prefork and php_module must be disabled first (a2dismod), because
+      # only one MPM can be loaded and mod_php pins you to prefork.
+      #
+      # mod_php is not in this list and must not be. PHP's own documentation:
+      # "We do not recommend using a threaded MPM in production with Apache 2.
+      # Use the prefork MPM" [11]. mod_php therefore forces prefork, which means
+      # one process per concurrent connection, each carrying a full PHP
+      # interpreter, including for static files and idle keep-alive connections.
+      # PHP-FPM behind mod_proxy_fcgi keeps the two pools separate and lets the
+      # event MPM do its job.
+      LoadModule mpm_event_module      modules/mod_mpm_event.so
+      LoadModule proxy_module          modules/mod_proxy.so
+      LoadModule proxy_fcgi_module     modules/mod_proxy_fcgi.so
+      LoadModule proxy_http_module     modules/mod_proxy_http.so
+      LoadModule proxy_wstunnel_module modules/mod_proxy_wstunnel.so
+      LoadModule headers_module        modules/mod_headers.so
+      LoadModule deflate_module        modules/mod_deflate.so
+      LoadModule filter_module         modules/mod_filter.so
+      LoadModule expires_module        modules/mod_expires.so
+      LoadModule rewrite_module        modules/mod_rewrite.so
+      LoadModule remoteip_module       modules/mod_remoteip.so
+      LoadModule setenvif_module       modules/mod_setenvif.so
+      # mod_logio supplies %I and %O, the actual bytes read and written
+      # including headers. The keel_combined LogFormat below uses %O, and
+      # without this module Apache does not warn and fall back: it refuses to
+      # start with "Unrecognized LogFormat directive %O".
+      LoadModule logio_module          modules/mod_logio.so
+
+      # ---------------------------------------------------------------- identity
+      # Default is Full, which advertises the httpd version, the OS and every
+      # module version [8]. Prod is the minimum: it emits "Server: Apache".
+      # Note what it does NOT do: the Server header is still sent, and it hides
+      # nothing PHP adds. Set expose_php = Off in php.ini for X-Powered-By.
+      # ServerTokens is server-config only, so it cannot vary per VirtualHost [8].
+      ServerTokens Prod
+      # Default is Off in 2.4 [8]; stated because it is what keeps the version
+      # and hostname off generated error pages and directory listings.
+      ServerSignature Off
+      # Default is On [8]. "Despite the usefulness of this method, it can
+      # sometimes be considered a security risk because it allows clients to see
+      # sensitive header information such as cookies or authentication data that
+      # may be sent as part of the request" [8]. Off returns 405.
+      TraceEnable Off
+
+      # ------------------------------------------------------- MPM event tuning
+      # The arithmetic, and it is not optional reading: "For threaded and hybrid
+      # MPMs, the default value is 16 (ServerLimit) multiplied by the value of 25
+      # (ThreadsPerChild). Therefore, to increase MaxRequestWorkers to a value
+      # that requires more than 16 processes, you must also raise ServerLimit" [1].
+      # httpd also rounds you down and warns: "MaxRequestWorkers of 90 is not an
+      # integer multiple of ThreadsPerChild of 25, decreasing to nearest multiple
+      # 75" [1].
+      #
+      # This block:
+      #   ServerLimit 8 x ThreadsPerChild 25 = MaxRequestWorkers 200
+      #
+      # Why 200 and not the default 400, for a PHP-FPM stack. Each PHP request
+      # occupies one Apache thread for its whole duration: the event MPM's own
+      # limitation section says that for FCGI content "the MPM can't predict the
+      # end of the response and a worker thread has to finish its work before
+      # returning the control to the listener" [2]. So Apache threads are the
+      # front door, and the number that matters behind them is pm.max_children in
+      # the FPM pool.
+      #
+      # Worked example against a 40-child FPM pool:
+      #   200 Apache threads accept up to 200 concurrent connections
+      #   40 of them can be executing PHP at once
+      #   the rest are serving static files, idling in keep-alive, or waiting on
+      #   the FPM socket
+      # Setting MaxRequestWorkers to 400 against the same pool does not make the
+      # site serve more PHP; it makes 360 requests queue instead of 160, which
+      # turns a fast 503 into a slow timeout.
+      #
+      # And the warning that decides the ceiling, from mod_proxy_fcgi [3]:
+      # "Under HTTP/1.1 load it will likely cause the creation of up to
+      # MaxRequestWorkers connections to the FCGI backend" and "The maximum
+      # number of PHP-FPM worker processes needs to be configured wisely, since
+      # there is the chance that they will all end up "busy" handling idle
+      # persistent connections, without any room for new ones to be established,
+      # and the end user experience will be a pile of HTTP request timeouts."
+      #
+      # Memory check before raising anything: 200 threads across 8 processes is
+      # cheap on the Apache side (threads, not interpreters). The cost is in FPM,
+      # at roughly 60-100 MB per child for a framework application.
+      <IfModule mpm_event_module>
+          # Default 3 [1]. Processes started at boot; the MPM adds more as needed.
+          StartServers             3
+          # Defaults 75 and 250 [1]. The spare-thread band is server-wide for
+          # event and worker. "For worker and event, the value must be greater or
+          # equal to the sum of MinSpareThreads and ThreadsPerChild" [1], so
+          # MaxSpareThreads must be at least 25 + 25 here.
+          MinSpareThreads          25
+          MaxSpareThreads          75
+          # Default 64 [1]. Must be >= ThreadsPerChild and cannot be raised
+          # without a restart.
+          ThreadLimit              64
+          # Default 25 [1]. Left alone: it is the unit the arithmetic above is
+          # built from, and changing it changes every derived number.
+          ThreadsPerChild          25
+          # 8 x 25. Raising MaxRequestWorkers past this needs ServerLimit raised
+          # first, or httpd caps it and logs a warning [1].
+          MaxRequestWorkers        200
+          # Default 16 [1]. "If ServerLimit is set to a value much higher than
+          # necessary, extra, unused shared memory will be allocated" [1], so it
+          # is set to what the arithmetic actually needs rather than left high.
+          ServerLimit              8
+          # Default 0, "the process will never expire" [1]. A non-zero value
+          # "limits the amount of memory that a process can consume by
+          # (accidental) memory leakage" [1]. Apache itself rarely leaks; the
+          # modules loaded into it sometimes do.
+          MaxConnectionsPerChild   10000
+          # Default 2 [2]. It decides the real concurrency ceiling: "When all the
+          # worker threads are idle, then absolute maximum numbers of concurrent
+          # connections can be calculated in a simpler way:
+          # (AsyncRequestWorkerFactor + 1) * MaxRequestWorkers" [2], so
+          # (2 + 1) x 200 = 600 connections that can be held while only 200 are
+          # being processed. That headroom is exactly what keep-alive needs and
+          # what prefork cannot do.
+          # "Tuning AsyncRequestWorkerFactor requires knowledge about the traffic
+          # handled by httpd in each specific use case, so changing the default
+          # value requires extensive testing and data gathering from
+          # mod_status" [2]. Left at the default for that reason.
+          AsyncRequestWorkerFactor 2
+      </IfModule>
+
+      # ------------------------------------------------------------- connections
+      # Default 300 [8]. It bounds how long httpd waits for a client to send its
+      # request or its POST body, so it is a slow-client exposure, not a
+      # backend one.
+      Timeout 60
+      KeepAlive On
+      # Default 5 [8]; "The default value of 5 gives a good compromise" [8].
+      KeepAliveTimeout 5
+      # Default 100 [8]. "We recommend keeping this value set to a high value for
+      # maximum performance and throughput" [8], and with the event MPM an idle
+      # keep-alive connection does not hold a worker thread.
+      MaxKeepAliveRequests 500
+      # Default is the value of Timeout [4]. This is the one that bounds the
+      # BACKEND: how long httpd waits for PHP-FPM or an app server to answer.
+      # It must be longer than the backend's own limit (PHP-FPM's
+      # request_terminate_timeout, or the app server's request timeout), or
+      # Apache abandons the connection while the backend is still working and the
+      # log shows a 502 with no matching error on the other side. Neither project
+      # documents that ordering; it follows from what each timeout measures.
+      ProxyTimeout 120
+
+      # ------------------------------------------------------------ compression
+      # "The DEFLATE filter is always inserted after RESOURCE filters like PHP or
+      # SSI" [5], so this compresses application output as well as files.
+      <IfModule mod_deflate.c>
+          # httpd's own documented type list [5], plus the modern JSON and font
+          # types. Nothing already compressed appears here: images, fonts in
+          # woff2, archives and video are compressed formats and re-compressing
+          # them costs CPU for nothing.
+          AddOutputFilterByType DEFLATE text/html text/plain text/xml text/css \
+              text/javascript application/javascript application/json \
+              application/ld+json application/manifest+json application/rss+xml \
+              application/xml application/xhtml+xml application/wasm image/svg+xml
+          # Default is zlib's own [5]; range 1 to 9, "the higher the value, the
+          # better the compression, but the more CPU time is required" [5].
+          DeflateCompressionLevel 5
+          # httpd's documented exclusion for already-compressed media [5].
+          SetEnvIfNoCase Request_URI \.(?:gif|jpe?g|png|webp|avif|ico|zip|gz|bz2|rar|7z|mp4|webm|woff2?)$ no-gzip
+          # mod_deflate "sends a Vary: Accept-Encoding HTTP response header to
+          # alert proxies that a cached response should be sent only to clients
+          # that send the appropriate Accept-Encoding request header" [5], which
+          # is what stops a shared cache handing a gzipped body to a client that
+          # cannot read it.
+      </IfModule>
+
+      # ---------------------------------------------------------------- expiry
+      # Default is Off, and "this directive does not guarantee that an Expires or
+      # Cache-Control header will be generated. If the criteria aren't met, no
+      # header will be sent" [6].
+      <IfModule mod_expires.c>
+          ExpiresActive On
+          # "access plus 1 year" is the documented readable form [6]. Safe only
+          # for fingerprinted assets (app.4f21c9.css); a framework serving
+          # unversioned files must shorten this in its own VirtualHost.
+          ExpiresByType text/css                  "access plus 1 year"
+          ExpiresByType application/javascript    "access plus 1 year"
+          ExpiresByType text/javascript           "access plus 1 year"
+          ExpiresByType image/svg+xml             "access plus 1 year"
+          ExpiresByType image/webp                "access plus 1 year"
+          ExpiresByType image/avif                "access plus 1 year"
+          ExpiresByType image/png                 "access plus 1 year"
+          ExpiresByType image/jpeg                "access plus 1 year"
+          ExpiresByType font/woff2                "access plus 1 year"
+          ExpiresByType application/wasm          "access plus 1 year"
+          # Documents are not cached by default: HTML is where a stale copy is
+          # visible to a customer, and the application should send its own
+          # Cache-Control for it.
+          ExpiresByType text/html                 "access plus 0 seconds"
+          ExpiresByType application/json          "access plus 0 seconds"
+          # Note the base-time trap: an "M" (modification) based rule "will not
+          # be added to content that does not come from a file on disk" [6], so
+          # M-based rules do nothing for PHP responses. Everything above is
+          # access based.
+      </IfModule>
+
+      # ------------------------------------------------- security headers
+      # `always`, not the default `onsuccess`, and the reason is specific to this
+      # stack: the always table's headers "are added to the response even on
+      # error", and "You're modifying or removing a header generated by a CGI
+      # script or by mod_proxy_fcgi, in which case the CGI scripts' headers are
+      # in the table corresponding to always and not in the default table" [7].
+      # With plain `Header set`, error pages and redirects go out with no
+      # security headers at all.
+      #
+      # The duplication trap, which is worth reading before adding a header the
+      # application also sends: httpd's own example is a PHP backend that emits
+      # X-Foo, where `Header set X-Foo baz` "ends up in the wrong result, namely
+      # having the header duplicated with both values". The documented fix is to
+      # unset in the onsuccess table first [7]:
+      #     Header onsuccess unset X-Frame-Options
+      #     Header always set X-Frame-Options "SAMEORIGIN"
+      <IfModule mod_headers.c>
+          Header always set X-Content-Type-Options "nosniff"
+          Header always set X-Frame-Options "SAMEORIGIN"
+          Header always set Referrer-Policy "strict-origin-when-cross-origin"
+          Header always set Cross-Origin-Opener-Policy "same-origin"
+          # Two more belong on a real deployment and not in a shared default:
+          #   Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains"
+          # HSTS is remembered by the browser for a year, so enabling it on a
+          # development hostname or before every subdomain serves HTTPS locks
+          # people out of things that still work.
+          #   Header always set Content-Security-Policy "default-src 'self'; ..."
+          # A CSP has to be written against the application's own scripts and
+          # third parties, so it belongs with the framework, and it should start
+          # as Content-Security-Policy-Report-Only.
+      </IfModule>
+
+      # ------------------------------------------------------------- client IP
+      # Behind a load balancer or a CDN, %a in the log and Require ip both see
+      # the proxy rather than the visitor.
+      #
+      # httpd states the risk plainly: "It is critical to only enable this
+      # behavior from intermediate hosts (proxies, etc) which are trusted by this
+      # server, since it is trivial for the remote useragent to impersonate
+      # another useragent" [9]. And the footgun if you set only the header:
+      # "Unless these other directives are used, mod_remoteip will trust all
+      # hosts presenting a RemoteIPHeader IP value" [9].
+      #
+      # RemoteIPInternalProxy is used rather than RemoteIPTrustedProxy because a
+      # container stack's proxy address IS private: with RemoteIPTrustedProxy,
+      # "any intranet or private IP address reported by such proxies ... are not
+      # trusted as the useragent IP" [9], which is the wrong behaviour on a
+      # bridge network. On a public deployment, narrow these to the actual proxy
+      # addresses and delete the rest.
+      <IfModule mod_remoteip.c>
+          RemoteIPHeader X-Forwarded-For
+          RemoteIPInternalProxy 10.0.0.0/8
+          RemoteIPInternalProxy 172.16.0.0/12
+          RemoteIPInternalProxy 192.168.0.0/16
+          RemoteIPInternalProxy fc00::/7
+      </IfModule>
+      # The real client IP is then %a in a LogFormat; the proxy's own address
+      # stays available as %{c}a [9].
+      LogFormat "%a %l %u %t \"%r\" %>s %O \"%{Referer}i\" \"%{User-Agent}i\" %D" keel_combined
+
+      # ------------------------------------------------------------- filesystem
+      # Deny by default; a framework's VirtualHost opens its own document root.
+      # "For security and performance reasons, do not set AllowOverride to
+      # anything other than None in your <Directory "/"> block" [8].
+      <Directory />
+          AllowOverride None
+          Require all denied
+          Options None
+      </Directory>
+
+      # .htaccess is off everywhere by default, and it should stay off wherever
+      # you control the server config. "When AllowOverride is set to allow the
+      # use of .htaccess files, httpd will look in every directory for .htaccess
+      # files. Thus, permitting .htaccess files causes a performance hit, whether
+      # or not you actually even use them! Also, the .htaccess file is loaded
+      # every time a document is requested" [10], and it walks every parent
+      # directory doing it: for /www/htdocs/example that is four extra filesystem
+      # lookups per request even when no such file exists [10].
+      #
+      # The second reason is the one that bites a PHP stack: php_value and
+      # php_flag in a .htaccess are mod_php directives. Under PHP-FPM they are
+      # not applied and nothing warns you, so a vendor .htaccess that "sets"
+      # memory_limit silently does not. Set those in the FPM pool
+      # (php_admin_value[memory_limit] = 768M) or php.ini.
+
+      # EnableSendfile default is Off since 2.3.9 [8], and it stays off here:
+      # "With a network-mounted DocumentRoot (e.g., NFS, SMB, CIFS, FUSE), the
+      # kernel may be unable to serve the network file through its own cache" [8],
+      # which covers a bind-mounted volume on Docker Desktop.
+      EnableSendfile Off
+      # Default On [8]. Off because of the deployment pattern this is used with:
+      # "Deleting or truncating a file while httpd has it memory-mapped can cause
+      # httpd to crash with a segmentation fault" [8], and a symlink-swap release
+      # does exactly that to files httpd may still hold.
+      EnableMMAP Off
+
+      # ------------------------------------------- framework VirtualHosts
+      # Everything specific to an application lives here: its VirtualHost,
+      # DocumentRoot, rewrite rules and its SetHandler/ProxyPass to PHP-FPM or an
+      # app server. Each inherits every default above.
+      #
+      # The FastCGI handler pattern a framework should use [3]:
+      #     <FilesMatch "\.php$">
+      #         SetHandler "proxy:fcgi://php:9000"
+      #     </FilesMatch>
+      #     <Proxy "fcgi://php:9000" enablereuse=on max=25>
+      #     </Proxy>
+      # The <Proxy> block is not decoration. "mod_proxy_fcgi disables connection
+      # reuse by default, so after a request has been completed the connection
+      # will NOT be held open by that httpd child process and won't be reused" [3],
+      # which means a TCP connect and an FPM accept for every single PHP request.
+      # enablereuse=on is opt-in for fcgi specifically [4].
+      IncludeOptional sites-enabled/*.conf
+      IncludeOptional conf.d/app-*.conf
+  - path: APACHE.md
+    content: |
+      # Apache httpd (scaffolded by keel)
+
+      `.keel/apache/keel-tuning.conf` is the shared half: MPM, modules,
+      compression, expiry, security headers, identity and client-IP handling. It
+      contains no VirtualHost on purpose.
+
+      ## Include it
+
+      Official httpd image:
+
+          Include conf/keel-tuning.conf     # in httpd.conf
+
+      Debian, Ubuntu and DDEV's web container: drop it in `conf-enabled/`, and
+      replace the `LoadModule` block with
+
+          a2dismod php* mpm_prefork
+          a2enmod mpm_event proxy proxy_fcgi proxy_http proxy_wstunnel \
+                  headers deflate expires rewrite remoteip setenvif filter
+
+      ## The arithmetic you will want to redo
+
+          ServerLimit 8 x ThreadsPerChild 25 = MaxRequestWorkers 200
+
+      Raising `MaxRequestWorkers` past `ServerLimit x ThreadsPerChild` does not
+      work: httpd caps it and logs a warning. Raise `ServerLimit` first.
+
+      Size it against PHP-FPM, not against traffic. Each PHP request holds one
+      Apache thread for its whole duration, and with `enablereuse=on` httpd can
+      open up to `MaxRequestWorkers` connections to the FPM pool. More Apache
+      threads than FPM children turns a fast rejection into a slow timeout.
+
+      ## mod_php is not an option here
+
+      PHP's own documentation says mod_php needs the prefork MPM, and prefork
+      means one full interpreter per connection, including for static files and
+      idle keep-alives. This config loads `mpm_event` plus `mod_proxy_fcgi` and
+      talks to PHP-FPM.
+
+      One consequence to remember: **`php_value` and `php_flag` in a `.htaccess`
+      do nothing under PHP-FPM.** They are mod_php directives. Magento's shipped
+      `pub/.htaccess` sets `memory_limit 756M` that way, inside
+      `<IfModule mod_php.c>`, so on a PHP-FPM stack it is silently ignored. Set
+      those in the pool (`php_admin_value[memory_limit] = 768M`) or in php.ini.
+
+      ## Security headers
+
+      They are `Header always set`, not `Header set`, so they also appear on
+      error responses and redirects. If the application itself emits one of these
+      headers, unset it in the `onsuccess` table first or the response carries
+      the header twice.
+provision:
+  ddev:
+    install:
+      - "{{webserver_apache}}" # ddev config --webserver-type=apache-fpm
+      - "{{restart}}"
+  compose:
+    install:
+      # The service is declared in a compose file this recipe has just written,
+      # so the stack has to be brought up again for it to exist. Without this
+      # the config lands on disk and no web server is ever created.
+      - "{{start}}"
+    # No compose fragment here on purpose. This recipe writes the tuning; the
+    # framework's VirtualHost recipe declares the apache service, mounts this
+    # file and starts httpd with an explicit `Include` of it.
+    #
+    # There used to be a docker-compose.apache.yml here mounting the same file
+    # into conf/conf.d/, described as being picked up by httpd.conf's
+    # IncludeOptional. Both halves were wrong: compose merges only
+    # compose.override.yaml, so the file was never read, and the official httpd
+    # image has no conf.d and no IncludeOptional line to read it with. Hence
+    # the explicit Include on the command line.
+  sail: {}
+  local: {}

@@ -1,0 +1,188 @@
+id: apache-gradio
+schema_version: 2
+kind: config
+label: Gradio VirtualHost for Apache
+updated: 2026-08-12
+# Written from docs/infra/gradio.md plus the Apache 2.4 module reference. Gradio
+# publishes an nginx config and NO Apache config, so this VirtualHost is keel's
+# translation of the vendor's nginx block, directive by directive:
+#
+#   nginx (vendor)                      Apache (keel's equivalent)
+#   proxy_http_version 1.1              implicit; mod_proxy_http speaks 1.1
+#   proxy_set_header Upgrade ...        upgrade=websocket on ProxyPass, or
+#   proxy_set_header Connection ...       mod_proxy_wstunnel below 2.4.47
+#   proxy_buffering off                 no direct equivalent; see the vhost
+#   proxy_redirect off                  Apache does not rewrite bodies
+#   proxy_set_header Host $host         ProxyPreserveHost On
+#   proxy_set_header X-Forwarded-Host   set automatically by mod_proxy_http
+#   proxy_set_header X-Forwarded-Proto  RequestHeader set (Apache does NOT)
+#
+# The one that does not translate cleanly is proxy_buffering off, and it is the
+# most important line in the vendor config. See the note in the VirtualHost.
+#
+# The application server does not change between the nginx and the Apache
+# choice: `python app.py` still runs Gradio's own Uvicorn on 7860.
+#
+# Division of labour. The shared Apache service (recipes/infra/web/apache.yaml)
+# owns .keel/apache/keel-tuning.conf: MPM event tuning, the LoadModule lines for the
+# proxy modules, global compression, mod_expires, ServerTokens Prod,
+# ServerSignature Off, TraceEnable Off, the global security headers, and the
+# `IncludeOptional conf.d/app-*.conf` that pulls this file in.
+when:
+  framework: gradio
+  uses: apache
+files:
+  - path: docker/apache/conf.d/app-gradio.conf
+    content: |
+      # Gradio on its own Uvicorn, proxied. Included by the shared keel-tuning.conf.
+      <VirtualHost *:80>
+          ServerName localhost
+
+          # Stated rather than assumed. Apache: "Do not enable proxying with
+          # ProxyRequests until you have secured your server. Open proxy servers
+          # are dangerous both to your network and to the Internet at large."
+          ProxyRequests Off
+
+          # The Apache equivalent of the vendor's `proxy_set_header Host $host`.
+          # Apache defaults this Off and would send the upstream name instead.
+          ProxyPreserveHost On
+
+          # mod_proxy_http adds X-Forwarded-For, X-Forwarded-Host and
+          # X-Forwarded-Server itself, so the vendor's X-Forwarded-Host line
+          # needs no equivalent, and clearing the client's copy first makes
+          # Apache's value the only one the app can read. mod_proxy_http does NOT
+          # add X-Forwarded-Proto, which the vendor block does set, so that one
+          # is written here. Change to "https" when TLS terminates at this vhost.
+          #
+          # None of these is read by the app unless FORWARDED_ALLOW_IPS names
+          # this proxy; it defaults to 127.0.0.1, which is never a container
+          # peer's address.
+          RequestHeader unset X-Forwarded-For
+          RequestHeader unset X-Forwarded-Host
+          RequestHeader unset X-Forwarded-Server
+          RequestHeader set X-Forwarded-Proto "http"
+
+          # The equivalent of the vendor's `proxy_buffering off`, and the part
+          # that does not translate directly.
+          #
+          # mod_proxy_http streams a response back as it arrives rather than
+          # accumulating it, so there is no single "buffering off" switch to
+          # flip. Note that the flushpackets worker parameter is NOT the answer:
+          # Apache documents it as "in effect only for mod_proxy_ajp and
+          # mod_proxy_fcgi". What DOES reintroduce buffering is an output filter,
+          # and mod_deflate is the usual culprit, because it collects the
+          # response in order to compress it. That is exactly the frozen-UI
+          # symptom Gradio's proxy_buffering off exists to prevent, so
+          # compression is switched off for this vhost, overriding the global
+          # compression the shared apache.yaml sets up.
+          #
+          # proxy-sendchunked keeps the request side streaming too: it "allows
+          # request bodies to be sent to the backend using chunked transfer
+          # encoding", instead of Apache buffering a whole upload to compute a
+          # Content-Length.
+          #
+          # That mod_proxy_http streams rather than buffers is keel's reading of
+          # the module, not a statement either vendor makes.
+          <IfModule mod_deflate.c>
+              SetEnv no-gzip 1
+          </IfModule>
+          SetEnv proxy-sendchunked 1
+
+          # The upgrade, and everything else, on one rule. Apache 2.4.47 and
+          # later tunnels the upgrade end to end through mod_proxy_http: "the
+          # connection will be upgraded and tunneled by mod_proxy_http only if
+          # the origin server accepts/initiates the upgrade (HTTP response 101
+          # Switching Protocols)". That matches Gradio, where the same path
+          # serves the page and the upgraded connection. The httpd:2.4-alpine
+          # image is well past 2.4.47.
+          #
+          # timeout=3600 is keel's number and the Apache equivalent of the
+          # proxy_read_timeout the vendor nginx block also omits: it is the
+          # "number of seconds Apache httpd waits for data sent by / to the
+          # backend". Unset, it falls back to ProxyTimeout and then to Apache's
+          # Timeout of 300, so an inference longer than five minutes loses its
+          # connection. Gradio publishes no figure.
+          #
+          # Under the native env there is no `app` host: change these to
+          # http://127.0.0.1:7860/, which is what the vendor block shows.
+          ProxyPass        / http://app:7860/ upgrade=websocket connectiontimeout=5 timeout=3600
+          ProxyPassReverse / http://app:7860/
+
+          # On Apache 2.4.46 and earlier, use mod_proxy_wstunnel instead.
+          # Apache's own documented form for a backend whose websocket URLs are
+          # not known in advance, placed above the ProxyPass:
+          #   RewriteEngine on
+          #   RewriteCond %{HTTP:Upgrade} websocket [NC]
+          #   RewriteCond %{HTTP:Connection} upgrade [NC]
+          #   RewriteRule ^/?(.*) "ws://app:7860/$1" [P,L]
+
+          # LimitRequestBody alone does NOT cap a proxied request: the directive
+          # is enforced when Apache itself serves the request, not when
+          # mod_proxy_http streams the body through to a backend. The rewrite
+          # below is what actually rejects it. [R=413] aborts with that status
+          # rather than redirecting, because mod_rewrite treats any code outside
+          # 300-399 as an abort.
+          #
+          # Caveat: this reads the declared Content-Length, so a chunked upload
+          # that sends none is not caught.
+          RewriteEngine On
+          RewriteCond expr "%{HTTP:Content-Length} -gt 104857600"
+          RewriteRule ^ - [R=413,L]
+          # keel's number, not Gradio's: the vendor nginx block sets no
+          # body-size limit. Apache's LimitRequestBody default is 0, meaning
+          # unlimited, so the risk here runs opposite to nginx's.
+          LimitRequestBody 104857600
+      </VirtualHost>
+
+      # Serving from a subpath, which is the shape the vendor's nginx block
+      # actually shows. Set GRADIO_ROOT_PATH to exactly the same prefix: "you'll
+      # need to set the root_path to be the same as the subpath that you
+      # specified in your nginx configuration."
+      #   ProxyPass        /gradio-demo/ http://app:7860/ upgrade=websocket timeout=3600
+      #   ProxyPassReverse /gradio-demo/ http://app:7860/
+      #
+      # Apache has no one-line equivalent of nginx's `return 200`, so there is no
+      # proxy-local health endpoint. The container health check probes the app's
+      # root document through this vhost, which proves the whole proxy path.
+provision:
+  compose:
+    files:
+      - path: compose.override.yaml
+        content: |
+          # Compose merges compose.override.yaml over compose.yaml with no extra
+          # flags, so the app service written by the env recipe is untouched.
+          services:
+            apache:
+              image: httpd:2.4-alpine
+              # The stock httpd.conf is left in place: it loads mpm_event and the base
+              # module set. -c appends this directive after it is read, pulling in the
+              # shared tuning and this framework's VirtualHost. Without it the image
+              # starts on stock config and serves its default page - it does not fail.
+              command: ["httpd-foreground", "-c", "Include conf/keel-tuning.conf"]
+              restart: unless-stopped
+              depends_on:
+                app:
+                  condition: service_healthy
+              ports:
+                - "${HTTP_PORT:-8080}:80"
+              volumes:
+                # Shared, owned by recipes/infra/web/apache.yaml.
+                - ./.keel/apache/keel-tuning.conf:/usr/local/apache2/conf/keel-tuning.conf:ro
+                # This framework's VirtualHost, owned by this recipe.
+                - ./docker/apache/conf.d:/usr/local/apache2/conf.d:ro
+              healthcheck:
+                # Gradio publishes no health endpoint, so this is the root
+                # document through the proxy. depends_on already waits for the
+                # app to be healthy, which is where the long model-load
+                # start-period lives.
+                test: ["CMD", "wget", "-qO-", "http://127.0.0.1/"]
+                interval: 15s
+                timeout: 5s
+                retries: 5
+                start_period: 15s
+              # Matches the app's stop_grace_period, so the proxy is not killed
+              # while an inference it forwarded is still finishing.
+              stop_grace_period: 30s
+  # Native env: no container to add. The VirtualHost above still applies, but
+  # change the ProxyPass target to http://127.0.0.1:7860/.
+  local: {}

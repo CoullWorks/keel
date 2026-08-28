@@ -1,0 +1,56 @@
+id: laravel-docker
+schema_version: 2
+kind: env
+env_family: compose
+label: Docker (compose, PHP-FPM)
+appliesTo: [laravel]
+provides: [env, docker, db-mysql] # this stack brings up MySQL itself
+priority: -10 # write the compose files before the app is created
+updated: 2026-08-12
+# This env owns the command vocabulary. The stack it talks to is written by
+# recipes/frameworks/php/laravel/infra/php-fpm.yaml (the Dockerfile, compose.yaml,
+# the php.ini fragment and the FPM pool) and by the shared PHP baseline in
+# recipes/frameworks/php/shared/php-production.yaml.
+#
+# There is no web server in the stack until you pick one. That is deliberate and
+# it is how keel models the choice: the nginx and Apache service recipes in
+# recipes/infra/web/ are single-select and mutually exclusive, and picking one
+# injects this framework's own server block or VirtualHost from
+# laravel/infra/nginx.yaml or laravel/infra/apache.yaml, along with a
+# compose.override.yaml that adds the container and publishes port 80.
+#
+#   keel new laravel --env laravel-docker --with nginx
+#   keel new laravel --env laravel-docker --with apache
+#
+# The php service is on `expose` only, never `ports`. A PHP-FPM pool speaks
+# FastCGI, not HTTP, and publishing 9000 to the host would expose an unauthenticated
+# interface that will execute any script path it is handed.
+commands:
+  start: "docker compose up -d --build"
+  # How this environment tears itself down. Used when a build fails partway:
+  # keel removes the directory it created, and without this the containers,
+  # volumes and network it started stay behind holding a bind mount to a
+  # path that no longer exists. The next attempt then reuses that container
+  # and dies with "current working directory is outside of container mount
+  # namespace root".
+  down: "docker compose down -v --remove-orphans"
+  restart: "docker compose restart"
+  # --user, on all three: the image names no USER, so the container runs as root
+  # and the project is bind-mounted from the host, which means anything these
+  # commands write lands in your working tree owned by root. keel then cannot
+  # patch its own .env ("permission denied"), the application cannot write its
+  # own cache or log (500 on every request), and you cannot delete the project
+  # without sudo.
+  #
+  # exec carried this from the start and composer and artisan did not, which is
+  # the worst of both: the add-ons that install packages and publish config are
+  # exactly the steps that write the most files.
+  #
+  # COMPOSER_HOME and HOME point at /tmp because an arbitrary uid has no home
+  # directory inside the image, and composer refuses to start without one.
+  exec: 'docker compose exec -T --user "$(id -u):$(id -g)" -e COMPOSER_HOME=/tmp -e HOME=/tmp php'
+  composer: 'docker compose exec -T --user "$(id -u):$(id -g)" -e COMPOSER_HOME=/tmp -e HOME=/tmp php composer'
+  artisan: 'docker compose exec -T --user "$(id -u):$(id -g)" -e COMPOSER_HOME=/tmp -e HOME=/tmp php php artisan'
+  site_url: "http://localhost:{{http_port}}"
+smoke:
+  - "docker compose ps"

@@ -1,0 +1,86 @@
+id: nuxt
+kind: framework
+label: Nuxt (Vue meta-framework)
+lang: node
+provides: [node, nuxt, vue, self-serving]
+default: false
+family: nuxt
+variant: TypeScript
+updated: 2026-08-07
+pins:
+  nuxt: ^4.0.0
+  vue: ^3.5.0
+# The Node line is a choice. Only the versions this framework actually
+# supports are offered; the note says what each one costs you.
+versions:
+  node_version:
+    label: Node.js version
+    recommended: "22"
+    options:
+      - value: "20"
+        label: "Node 20 LTS"
+        note: "maintenance only, ends Apr 2026"
+      - value: "22"
+        label: "Node 22 LTS"
+        note: "active LTS, the safe default"
+      - value: "24"
+        label: "Node 24 LTS"
+        note: "newest LTS"
+# Minimal Nuxt 4 app written directly (create-nuxt is interactive); `npm install`
+# pulls Nuxt, which generates .nuxt on first dev/build.
+install:
+  # The stack has to be up before anything can exec into it. Under a native
+  # env {{start}} renders empty and the engine drops the no-op step.
+  - "{{start}}"
+  - "{{exec}} npm install"
+  # The app started before its dependencies existed, so bring it back up now
+  # that they are installed. Renders empty, and is dropped, on a native env.
+  - "{{restart}}"
+smoke:
+  - "{{exec}} npx nuxt prepare"
+files:
+  - path: package.json
+    content: |
+      {
+        "name": "app",
+        "private": true,
+        "type": "module",
+        "scripts": {
+          "dev": "nuxt dev",
+          "build": "nuxt build",
+          "generate": "nuxt generate",
+          "preview": "nuxt preview",
+          "postinstall": "nuxt prepare"
+        },
+        "dependencies": {
+          "nuxt": "^4.0.0",
+          "vue": "^3.5.0",
+          "vue-router": "^4.4.0"
+        }
+      }
+  - path: nuxt.config.ts
+    content: |
+      // https://nuxt.com/docs/api/configuration/nuxt-config
+      export default defineNuxtConfig({
+        devtools: { enabled: true },
+      });
+  - path: app.vue
+    content: |
+      <template>
+        <main style="font-family: system-ui, sans-serif; padding: 40px; max-width: 640px">
+          <h1>Nuxt</h1>
+          <p>Scaffolded by keel. Edit <code>app.vue</code> to get started.</p>
+        </main>
+      </template>
+  - path: .gitignore
+    content: |
+      node_modules/
+      .nuxt/
+      .output/
+      .env
+tasks:
+  test: "{{exec}} npx vitest run"
+  lint: "{{exec}} npx eslint ."
+  dev: "{{exec}} npm run dev"
+  build: "{{exec}} npm run build"
+  preview: "{{exec}} npm run preview"

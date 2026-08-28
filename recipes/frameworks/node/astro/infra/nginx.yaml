@@ -1,0 +1,107 @@
+id: nginx-astro
+schema_version: 2
+kind: config
+label: Astro server block for NGINX (static)
+updated: 2026-08-12
+# Written from docs/infra/astro.md. Astro is the one framework of the nine that
+# is not proxied: it is static by default, `astro build` emits dist/ as plain
+# files, and the right way to serve that is a web server rather than a Node
+# process in front of one. So this block has a root and a try_files, not a
+# proxy_pass, and there is no compose.override.yaml because there is no second
+# container: the web server IS the runtime image.
+#
+# The fallback is Astro's own, verbatim in intent: `try_files $uri
+# $uri/index.html =404`. Deliberately NOT an SPA catch-all. A prerendered
+# multi-page site has real 404s and should return them; writing
+# `try_files $uri $uri/ /index.html;` here would serve the home page for every
+# typo'd URL and destroy the 404 signal.
+#
+# Division of labour. The shared NGINX service (recipes/infra/web/nginx.yaml)
+# owns .keel/nginx/nginx.conf: worker and http-level tuning, the log format,
+# gzip and its type list (Astro publishes its own gzip block, and it belongs
+# there rather than repeated here), server_tokens off, the default security
+# headers, and the default client_max_body_size. This recipe owns one server
+# block.
+when:
+  framework: astro
+  uses: nginx
+patch:
+  - file: .env
+    # Selects the Dockerfile stage that copies the shared nginx.conf and this
+    # server block into the runtime image. The env recipe's default stage
+    # (`runtime`) uses the nginx image's own stock configuration, so a project
+    # with no web server chosen still boots.
+    set:
+      WEB_TARGET: "nginx-runtime"
+      # The static stages serve on 80; dev serves on 4321. These move together.
+      APP_PORT: "80"
+files:
+  - path: docker/nginx/conf.d/app.conf
+    content: |
+      # Astro, static. Included by the shared nginx.conf from
+      # /etc/nginx/conf.d/*.conf; everything http-level lives there, including
+      # the gzip block Astro publishes.
+      server {
+        # Astro's published config listens on 8080 because its Dockerfile
+        # EXPOSEs 8080. keel serves on 80 inside the container and publishes it
+        # on the host, so the port is the one thing here that diverges from the
+        # vendor sample.
+        listen 80;
+        server_name _;
+
+        root  /usr/share/nginx/html;
+        index index.html;
+
+        # Overrides the shared default (nginx documents client_max_body_size
+        # 1m). This is a static document root: nothing here accepts a request
+        # body, so the limit is set low deliberately rather than left at a value
+        # sized for an application.
+        client_max_body_size 64k;
+
+        # Astro's own fallback. =404 rather than /index.html: see the note at
+        # the top of this recipe.
+        location / {
+          try_files $uri $uri/index.html =404;
+        }
+
+        # Astro's published config pairs the =404 above with a real error page.
+        error_page 404 /404.html;
+        location = /404.html {
+          internal;
+        }
+
+        # /_astro/ is where Astro puts its content-hashed assets. The header
+        # value is Astro's own, documented for the standalone Node server's
+        # asset serving: "Assets in the dist/client/_astro/ folder are the ones
+        # that Astro has built" and receive
+        # Cache-Control: public, max-age=31536000, immutable. Applying it from
+        # nginx for a static build is keel's extrapolation, because the
+        # published nginx config contains no caching directives at all. Safe
+        # because the filenames are content-hashed.
+        #
+        # Scoped to this path and nowhere else. The HTML around these assets is
+        # not fingerprinted and must not be cached, which is why there is no
+        # blanket `expires` in this file.
+        #
+        # Note that declaring add_header in this location stops the shared
+        # http-level add_header directives being inherited into it, which is
+        # nginx's documented behaviour: if the shared nginx.conf sets security
+        # headers with add_header, repeat them here.
+        location /_astro/ {
+          try_files $uri =404;
+          add_header Cache-Control "public, max-age=31536000, immutable" always;
+        }
+
+        location = /healthz {
+          access_log off;
+          add_header Content-Type text/plain;
+          return 200 "ok\n";
+        }
+      }
+provision:
+  # No compose fragment: the web server is the runtime image, selected by
+  # WEB_TARGET above, so there is no extra container to add.
+  compose: {}
+  # Native env: serve dist/ from a host nginx. The block above applies with
+  # `root` changed to wherever dist/ was copied.
+  local: {}

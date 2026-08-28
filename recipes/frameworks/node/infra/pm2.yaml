@@ -1,0 +1,129 @@
+id: pm2
+schema_version: 2
+kind: service
+label: PM2 (process manager, keeps the Node server alive, clustered)
+category: Web
+# The ingress answer for a self-serving Node app. A Node framework IS its own
+# HTTP server (`node`, `next start`), so it does not need a front controller the
+# way a PHP or Python app does — what it needs is something to keep that server
+# running, restart it if it dies, and (optionally) fan it across CPU cores. That
+# is a process manager, and PM2 is the standard one.
+#
+# This recipe deliberately does NOT own the reverse proxy. Whether an nginx or a
+# CDN sits in front is a separate, optional question (nginx-node-proxy). PM2 on
+# its own already gives a reachable app: it binds the app's own port to the host.
+appliesTo: [express, fastify, hono, nestjs, adonisjs, nextjs, nuxt, sveltekit, astro]
+# Marks this as the process-manager shape of ingress. IsWebServer() sees the
+# process-manager capability and lists it in the single-select Web server step,
+# so a self-serving framework's "how is this served" answer is PM2 by default
+# rather than a PHP front controller that would never mount its language handler.
+provides: [process-manager, pm2]
+# The default ingress for a self-serving framework. apache/nginx-as-front-
+# controller are hidden for these frameworks (they self-serve), so the wizard's
+# framework default here is PM2 rather than an empty answer.
+defaultFor: [express, fastify, hono, nestjs, adonisjs, nextjs, nuxt, sveltekit, astro]
+updated: 2026-08-22
+pins:
+  pm2: ^6.0.0
+vars:
+  pm2.version: "6"
+files:
+  - path: ecosystem.config.cjs
+    content: |
+      // keel-generated: PM2 process file.
+      //
+      // PM2 reads this to know how to run and supervise the app. `.cjs` (not
+      // `.js`) on purpose: the Node scaffolds keel writes set "type":"module"
+      // in package.json, and PM2's config loader uses require(), which rejects
+      // an ESM file. The `.cjs` extension forces CommonJS regardless.
+      //
+      // Run it:
+      //   pm2 start ecosystem.config.cjs         # start (or --env production)
+      //   pm2 reload ecosystem.config.cjs        # zero-downtime redeploy
+      //   pm2 logs app                           # tail
+      //   pm2 save && pm2 startup                # survive a host reboot
+      //
+      // Sources, fetched 2026-08-22:
+      //   [1] Ecosystem file   https://pm2.keymetrics.io/docs/usage/application-declaration/
+      //   [2] Cluster mode     https://pm2.keymetrics.io/docs/usage/cluster-mode/
+      //   [3] Graceful reload  https://pm2.keymetrics.io/docs/usage/signals-clean-restart/
+      module.exports = {
+        apps: [
+          {
+            name: "app",
+            // The framework's own production entrypoint. Overriding scripts (a
+            // build step, a custom server) belongs in package.json, not here.
+            script: "npm",
+            args: "run start",
+
+            // Cluster mode fans the app across CPU cores behind PM2's built-in
+            // load balancer, "without any code modifications" [2]. "max" uses
+            // every available core; set a number to cap it. exec_mode must be
+            // cluster for instances to take effect [2].
+            instances: "max",
+            exec_mode: "cluster",
+
+            // Restart policy. A crash loop should back off rather than hammer
+            // the host: PM2 restarts, and min_uptime + max_restarts stop an app
+            // that dies immediately from restarting forever [1].
+            min_uptime: "10s",
+            max_restarts: 10,
+            // Recycle a worker if it leaks past this, rather than letting one
+            // grow unbounded [1]. Tune to the app; 512M is a safe scaffold value.
+            max_memory_restart: "512M",
+
+            // Zero-downtime reload. PM2 sends SIGINT and waits kill_timeout ms
+            // for the worker to close its server and drain in-flight requests
+            // before forcing it [3]. The app must handle SIGINT/SIGTERM by
+            // calling server.close(); the framework scaffold wires that.
+            kill_timeout: 5000,
+
+            env: { NODE_ENV: "development" },
+            env_production: { NODE_ENV: "production" },
+          },
+        ],
+      };
+  - path: PM2.md
+    content: |
+      # PM2 (scaffolded by keel)
+
+      PM2 keeps the Node server running and, in cluster mode, fans it across CPU
+      cores behind its own load balancer, no code change. It replaces the PHP
+      "web server as front controller" step, which a self-serving Node app has no
+      use for.
+
+      ## Run it
+
+          npm install                     # pm2 is a devDependency
+          npx pm2 start ecosystem.config.cjs --env production
+          npx pm2 reload ecosystem.config.cjs      # zero-downtime redeploy
+          npx pm2 logs app
+          npx pm2 save && npx pm2 startup          # survive a reboot
+
+      ## Do I also need nginx?
+
+      Not to be reachable, PM2 binds the app's own port. Add the optional
+      `nginx-node-proxy` recipe (a reverse proxy, not a front controller) when
+      you want TLS termination, a single ingress in front of the cluster, static
+      caching, or a CDN origin. The two compose cleanly: PM2 supervises the app,
+      nginx proxies to it.
+
+      ## Cluster mode needs a stateless app
+
+      In cluster mode there are N workers. In-memory sessions, per-process
+      caches and local file uploads break across them. Put that state in Redis,
+      the database, or object storage, the same discipline any horizontally
+      scaled Node app needs.
+provision:
+  # A native/local dev env: PM2 is a dev dependency, installed and run on the
+  # host. No container to add.
+  local:
+    install:
+      - "{{exec}} npm install --save-dev pm2"
+  # Under compose the app already runs in its own container via the env recipe's
+  # Dockerfile; PM2 is added as a dev dependency for parity with production and
+  # for the ecosystem file to be usable, but the container command stays the
+  # env's. No compose fragment: PM2 supervises the process, it is not a service.
+  compose:
+    install:
+      - "{{exec}} npm install --save-dev pm2"

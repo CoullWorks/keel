@@ -1,0 +1,55 @@
+id: postgres-laravel
+schema_version: 2
+kind: config
+label: Laravel wiring for PostgreSQL
+# A config recipe is never chosen: keel injects it when the resolved plan matches
+# `when`. This is where a framework's own database wiring lives, so the shared
+# postgres recipe does not need to know Laravel exists (and Laravel does not need
+# its own copy of Postgres).
+when:
+  framework: laravel
+  uses: postgres
+# The host differs per environment: DDEV names the service `db`, Sail names it
+# `pgsql`. Getting that wrong is why laravel + sail + postgres used to write an
+# .env pointing at a service that was never there.
+provision:
+  ddev:
+    patch:
+      - file: .env
+        set:
+          DB_CONNECTION: pgsql
+          DB_HOST: "{{db.host}}"
+          DB_PORT: "{{db.port}}"
+          DB_DATABASE: "{{db.name}}"
+          DB_USERNAME: "{{db.user}}"
+          DB_PASSWORD: "{{db.password}}"
+  sail:
+    patch:
+      - file: .env
+        set:
+          DB_CONNECTION: pgsql
+          DB_HOST: pgsql
+          DB_PORT: "5432"
+          DB_DATABASE: laravel
+          DB_USERNAME: sail
+          DB_PASSWORD: password
+  compose:
+    patch:
+      - file: .env
+        set:
+          DB_CONNECTION: pgsql
+          DB_HOST: db
+          DB_PORT: "5432"
+          DB_DATABASE: app
+          DB_USERNAME: app
+          DB_PASSWORD: secret
+  local:
+    patch:
+      - file: .env
+        set:
+          DB_CONNECTION: pgsql
+          DB_HOST: 127.0.0.1
+          DB_PORT: "{{db.localPort}}"
+          DB_DATABASE: "{{db.name}}"
+          DB_USERNAME: "{{db.user}}"
+          DB_PASSWORD: "{{db.password}}"

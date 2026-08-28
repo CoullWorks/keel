@@ -1,0 +1,49 @@
+id: django-debug-toolbar
+kind: addon
+label: Debug Toolbar (SQL/timing panels)
+appliesTo: [django]
+provides: [debug-toolbar]
+default: true
+install:
+  - "{{exec}} uv add --dev django-debug-toolbar"
+files:
+  - path: config/settings.d/10-debug-toolbar.py
+    content: |
+      # django-debug-toolbar does nothing until it is in INSTALLED_APPS, in
+      # MIDDLEWARE and the requesting IP is in INTERNAL_IPS. Installing the
+      # package alone is what "the toolbar never appears" looks like.
+      INSTALLED_APPS += ["debug_toolbar"]
+
+      # The vendor requires this as early as possible, and specifically before
+      # any middleware that encodes the response (GZip, for instance).
+      MIDDLEWARE.insert(0, "debug_toolbar.middleware.DebugToolbarMiddleware")
+
+      # The toolbar only renders for these addresses. In a container the request
+      # arrives from the compose network rather than 127.0.0.1, so the vendor's
+      # documented Docker workaround is used: derive the gateway from the
+      # container's own address.
+      INTERNAL_IPS = ["127.0.0.1", "::1"]
+      try:
+          import socket
+
+          _ips = socket.gethostbyname_ex(socket.gethostname())[2]
+          INTERNAL_IPS += [ip[: ip.rfind(".")] + ".1" for ip in _ips]
+      except OSError:
+          pass
+  - path: config/urls.d/10-debug-toolbar.py
+    content: |
+      # The toolbar is served from its own URL. Without this the middleware runs,
+      # the panel never renders, and nothing reports a problem.
+      #
+      # Only mounted in DEBUG: the toolbar exposes settings, SQL and request data,
+      # and is not something to serve from a production deployment.
+      #
+      # DEBUG is read from django.conf.settings, not referenced directly: this
+      # fragment runs in the urls module, where settings names do not exist.
+      from django.conf import settings as _settings
+
+      if _settings.DEBUG:
+          import debug_toolbar
+          from django.urls import include
+
+          urlpatterns += [path("__debug__/", include(debug_toolbar.urls))]

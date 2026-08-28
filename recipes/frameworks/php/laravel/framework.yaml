@@ -1,0 +1,138 @@
+id: laravel
+kind: framework
+label: Laravel
+lang: php
+provides: [php, laravel]
+default: true
+updated: 2026-08-07
+pins:
+  laravel: ^12.0
+  php: ">=8.3"
+# The PHP line is a choice, not a constraint. Laravel 12 supports 8.2 through
+# 8.5, so keel recommends one and offers the rest rather than deciding for you.
+# The Dockerfile reads the answer as {{pin.php_version}}.
+versions:
+  # php_version, not php: pins.php above is a Composer constraint (">=8.3"),
+  # while this is the concrete runtime the image is built on. Sharing one name
+  # would put ">=8.3" into a Docker ARG.
+  php_version:
+    label: PHP version
+    recommended: "8.4"
+    options:
+      - value: "8.2"
+        label: "PHP 8.2"
+        note: "security fixes only, ends Dec 2026"
+      - value: "8.3"
+        label: "PHP 8.3"
+        note: "active support ends Dec 2025, security to Dec 2027"
+      - value: "8.4"
+        label: "PHP 8.4"
+        note: "recommended: current, widest extension support"
+      - value: "8.5"
+        label: "PHP 8.5"
+        note: "newest; check your extensions have builds"
+# How the app is created per env (keyed by env id). Laravel 11 defaults to
+# SQLite, so the Local env needs no database service.
+create:
+  # Built in keeltmp and moved in, exactly as the sail and local creates below
+  # are, and for the same reason: by the time the framework runs, keel has
+  # already written into the project. Twelve recipes drop config under .keel/
+  # (the databases, redis, nginx, varnish and the rest), and `ddev composer
+  # create-project` refuses outright when the project root holds anything but
+  # public/ - "'.../.keel' is not allowed to be present".
+  #
+  # ddev exec runs composer inside the web container without DDEV's wrapper, so
+  # its cleanliness check does not apply. The container is already up: the env
+  # recipe's start ran first.
+  ddev: "ddev exec 'rm -rf keeltmp && composer create-project laravel/laravel keeltmp && cp -a keeltmp/. . && rm -rf keeltmp'"
+  # Sail installs the chosen database ({{db.sail}}), not a hardcoded one.
+  #
+  # laravel/sail is required explicitly because a fresh laravel/laravel no longer
+  # ships it. It used to be in the skeleton's require-dev, so `artisan
+  # sail:install` was simply there; it is not any more, and without this the
+  # build died on "There are no commands defined in the 'sail' namespace" - a
+  # message that names a namespace rather than the missing package, so it reads
+  # like a broken Laravel rather than an absent dependency.
+  #
+  # --dev because Sail is a local development environment, which is where the
+  # vendor puts it.
+  # Built in keeltmp and moved in, not created in place. `composer
+  # create-project` refuses a target that is not empty, and by the time the
+  # framework runs, keel has already written into the project: the database
+  # recipe is priority -5 and drops .keel/postgres/postgresql.conf there first.
+  # So this failed with "Project directory ... is not empty", which names
+  # composer's rule and not the file that broke it. Same shape as the Docker
+  # creates beside this one, and as AdonisJS's.
+  #
+  # APP_PORT is set because Sail's generated compose publishes '${APP_PORT:-80}'
+  # and port 80 is not keel's to take. Every other environment here publishes
+  # ${HTTP_PORT:-8080}, so Sail was the one stack that fought for a privileged
+  # port - and lost, on any machine already running something on 80. DDEV's own
+  # router is exactly that: `sail up` failed with "failed to bind host port
+  # 0.0.0.0:80: address already in use" for no reason a person would connect to
+  # Sail. Laravel's .env.example does not define APP_PORT, so this appends it.
+  sail: "rm -rf keeltmp && composer create-project laravel/laravel keeltmp && cp -a keeltmp/. . && rm -rf keeltmp && composer require laravel/sail --dev --no-interaction && php artisan sail:install --with={{db.sail}},redis --no-interaction && (grep -q '^APP_PORT=' .env || printf 'APP_PORT=%s\\n' '{{http_port}}' >> .env)"
+  # Same reason as sail above: the target is not empty by the time this runs.
+  laravel-local: "rm -rf keeltmp && composer create-project laravel/laravel keeltmp && cp -a keeltmp/. . && rm -rf keeltmp"
+  # Created inside the project's OWN php image, so the dependency tree is
+  # resolved against the PHP version that will actually run it.
+  #
+  # A standalone composer:2 container was used here, and it is a trap: that
+  # image ships its own PHP, so choosing an older line in the wizard produced a
+  # composer.lock resolved against a newer one. The project image then refused
+  # to install its own lock, and the error named whichever dev dependency
+  # happened to pull the newer requirement rather than the version mismatch that
+  # caused it. The Bedrock recipe hit exactly that (pest -> symfony/process ->
+  # php >= 8.4.1 against an 8.3 image) before it was moved here too.
+  #
+  # `build php` first because the dev stage COPYs no application files, so it
+  # builds happily before composer.json exists. Into /tmp because create-project
+  # refuses a non-empty target and the compose files are already written.
+  #
+  # --user: without it every file lands root-owned in your working tree, the
+  # cleanup fails with "Permission denied", and what is left is a project you
+  # cannot edit without sudo. COMPOSER_HOME and HOME move to /tmp because an
+  # arbitrary uid has no home directory in the image.
+  laravel-docker: "docker compose build php && docker compose run --rm -T --user \"$(id -u):$(id -g)\" -e COMPOSER_HOME=/tmp -e HOME=/tmp php sh -c 'composer create-project laravel/laravel /tmp/l && cp -a /tmp/l/. /var/www/html/ && rm -rf /tmp/l'"
+install:
+  - "{{create}}"
+  - "{{start}}"
+  # Configure the application, not just create it.
+  #
+  # `composer create-project` leaves a Laravel that cannot serve a request and
+  # cannot run a worker: without these the queue container exits immediately with
+  # "Base table or view not found: 1146 Table 'app.cache' doesn't exist", because
+  # Laravel 11+ keeps cache, sessions and jobs in the database by default and
+  # nothing has created those tables.
+  #
+  # --force because migrate refuses to run non-interactively in a production
+  # APP_ENV, and keel builds without a TTY.
+  - "{{artisan}} key:generate --force"
+  - "{{artisan}} migrate --force"
+  # The public disk is how uploaded files are served. Laravel documents the
+  # symlink as a step you run yourself; a scaffolded project should not need it.
+  - "{{artisan}} storage:link"
+smoke:
+  - "{{artisan}} --version"
+hooks:
+  post_build:
+    # Bring the stack back up at the very END of the build, not in install.
+    #
+    # The queue worker and the scheduler start with the stack, before any
+    # migration has run, and Laravel 11+ keeps cache, sessions and jobs in the
+    # database: the worker dies immediately on "Table 'app.cache' doesn't exist".
+    # Doing this inside install is too early, because add-ons like Telescope run
+    # their own migrations after the framework's steps.
+    #
+    # `up -d`, not `restart`: by this point the worker has already exhausted its
+    # restart backoff and is sitting in Exited, and `docker compose restart` does
+    # not bring an exited container back. `up -d` reconciles the stack against
+    # the compose file and starts whatever is not running, which is what this
+    # actually needs.
+    - run: "{{start}}"
+tasks:
+  dev: "{{start}}"
+  test: "{{exec}} php artisan test"
+  lint: "{{exec}} ./vendor/bin/pint"
+  migrate: "{{artisan}} migrate"
+  build: "{{exec}} npm run build"

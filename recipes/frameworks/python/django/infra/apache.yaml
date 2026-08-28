@@ -1,0 +1,209 @@
+id: apache-django
+schema_version: 2
+kind: config
+label: Django VirtualHost for Apache
+updated: 2026-08-12
+# Written from docs/infra/django.md plus the Apache 2.4 module reference.
+# Django publishes no VirtualHost, so this is keel's translation of the gunicorn
+# and Channels nginx blocks it does document.
+#
+# The application server does not change between the nginx and the Apache
+# choice: gunicorn still speaks HTTP on 8000 and Apache reverse-proxies to it
+# with mod_proxy_http. Django documents a second route, mod_wsgi, where Apache
+# runs the WSGI application itself; it is deliberately not used here, because it
+# would replace the app server as well as the proxy and the two options would
+# stop being comparable.
+#
+# Two things differ materially from the nginx block, and both are Apache's
+# doing: the static Alias needs an explicit `ProxyPass /static/ !` exclusion to
+# survive the catch-all, and LimitRequestBody does not actually cap a proxied
+# body (see the note in the vhost).
+#
+# Division of labour. The shared Apache service (recipes/infra/web/apache.yaml)
+# owns .keel/apache/keel-tuning.conf: MPM event tuning, the LoadModule lines for the
+# proxy modules, global compression, mod_expires, ServerTokens Prod,
+# ServerSignature Off, TraceEnable Off, the global security headers, and the
+# `IncludeOptional conf.d/app-*.conf` that pulls this file in.
+when:
+  framework: django
+  uses: apache
+files:
+  - path: docker/apache/conf.d/app-django.conf
+    content: |
+      # Django behind gunicorn, proxied. Included by the shared keel-tuning.conf.
+      <VirtualHost *:80>
+          ServerName localhost
+
+          # Stated rather than assumed. Apache's own warning: "Do not enable
+          # proxying with ProxyRequests until you have secured your server. Open
+          # proxy servers are dangerous both to your network and to the Internet
+          # at large."
+          ProxyRequests Off
+
+          # On, so Django sees the browser's Host. Apache documents Off as the
+          # normal setting; a Django backend is exactly the case where it is not,
+          # because ALLOWED_HOSTS and CSRF_TRUSTED_ORIGINS are checked against
+          # that header.
+          ProxyPreserveHost On
+
+          # mod_proxy_http adds X-Forwarded-For, X-Forwarded-Host and
+          # X-Forwarded-Server itself, and warns they "will contain more than one
+          # (comma-separated) value if the original request already contained one
+          # of these headers". Clearing the client's copy first makes the value
+          # Apache computes the only one the app can read.
+          RequestHeader unset X-Forwarded-For
+          RequestHeader unset X-Forwarded-Host
+          RequestHeader unset X-Forwarded-Server
+          # mod_proxy_http does NOT add X-Forwarded-Proto; the documented list is
+          # For, Host and Server only. Django reads this one for
+          # SECURE_PROXY_SSL_HEADER. Change to "https" when TLS terminates here.
+          RequestHeader set X-Forwarded-Proto "http"
+
+          # Static files served by Apache, not by WhiteNoise and not by gunicorn.
+          # Django's static-files how-to serves the collected STATIC_ROOT from
+          # the web server or a CDN in every documented option.
+          #
+          # The `ProxyPass ... !` exclusion is mandatory and is the classic
+          # Apache trap: rules are "checked in the order of configuration, the
+          # first rule that matches wins", so without this line the catch-all
+          # below swallows /static/ and the Alias never fires. nginx needs no
+          # equivalent, because a longer location prefix simply wins.
+          ProxyPass /static/ !
+          Alias /static/ /var/www/static/
+          <Directory "/var/www/static">
+              Require all granted
+              Options -Indexes -ExecCGI
+              AllowOverride None
+              # Hashed filenames from ManifestStaticFilesStorage can never change
+              # under a given URL.
+              <IfModule mod_expires.c>
+                  ExpiresActive On
+                  ExpiresDefault "access plus 30 days"
+              </IfModule>
+          </Directory>
+
+          # Uncomment together with a MEDIA_ROOT in settings.py and a media
+          # volume in compose.yaml. Django's deployment checklist: "Media files
+          # are uploaded by your users. They're untrusted! Make sure your web
+          # server never attempts to interpret them." SetHandler default-handler
+          # plus -ExecCGI and RemoveHandler is how Apache is told to hand the
+          # bytes back and never run them.
+          # ProxyPass /media/ !
+          # Alias /media/ /var/www/media/
+          # <Directory "/var/www/media">
+          #     Require all granted
+          #     Options -Indexes -ExecCGI
+          #     AllowOverride None
+          #     SetHandler default-handler
+          #     RemoveHandler .php .py .cgi .pl .phtml
+          #     Header always set X-Content-Type-Options "nosniff"
+          # </Directory>
+
+          # Django Channels only. Apache 2.4.47 and later carries a websocket end
+          # to end through mod_proxy_http: "the connection will be upgraded and
+          # tunneled by mod_proxy_http only if the origin server
+          # accepts/initiates the upgrade (HTTP response 101 Switching
+          # Protocols)". The httpd:2.4-alpine image is well past that. This must
+          # come before the catch-all, because the first matching ProxyPass wins.
+          #
+          # gunicorn's WSGI workers cannot serve a websocket, so it stays
+          # commented until the ASGI CMD in the Dockerfile is switched on.
+          #
+          # On 2.4.46 and earlier, mod_proxy_wstunnel is the fallback, in the
+          # rewrite form Apache documents:
+          #   RewriteCond %{HTTP:Upgrade} websocket [NC]
+          #   RewriteCond %{HTTP:Connection} upgrade [NC]
+          #   RewriteRule ^/?ws/(.*) "ws://app:8000/ws/$1" [P,L]
+          #
+          # timeout=3600 is keel's number, not Channels': an idle websocket sends
+          # nothing, and the socket timeout otherwise falls back to ProxyTimeout
+          # and then to Apache's Timeout of 300.
+          # ProxyPass        /ws/ http://app:8000/ws/ upgrade=websocket timeout=3600
+          # ProxyPassReverse /ws/ http://app:8000/ws/
+
+          # Everything else to gunicorn. Under the native env there is no `app`
+          # host: change these to http://127.0.0.1:8000/.
+          #
+          # connectiontimeout is the wait for the TCP connect, timeout the wait
+          # for data. 60 matches gunicorn's --timeout so both give up together;
+          # left unset, timeout falls back to ProxyTimeout and then to Apache's
+          # Timeout of 300, and a hung request holds a connection for five
+          # minutes. retry=5 shortens Apache's 60s default, so a worker just
+          # recycled by --max-requests is retried in seconds.
+          ProxyPass        / http://app:8000/ connectiontimeout=5 timeout=60 retry=5
+          ProxyPassReverse / http://app:8000/
+
+          # LimitRequestBody alone does NOT cap a proxied request: the directive
+          # is enforced when Apache itself serves the request, not when
+          # mod_proxy_http streams the body through to a backend. The rewrite
+          # below is what actually rejects it. [R=413] aborts with that status
+          # rather than redirecting, because mod_rewrite treats any code outside
+          # 300-399 as an abort.
+          #
+          # Caveat: this reads the declared Content-Length, so a chunked upload
+          # that sends none is not caught. nginx's client_max_body_size covers
+          # both cases. Keep Django's own DATA_UPLOAD_MAX_MEMORY_SIZE as the
+          # backstop either way.
+          RewriteEngine On
+          RewriteCond expr "%{HTTP:Content-Length} -gt 26214400"
+          RewriteRule ^ - [R=413,L]
+          # Apache's LimitRequestBody default is 0, meaning unlimited, which is a
+          # denial-of-service surface rather than a feature. 25 MiB, matching the
+          # nginx block.
+          LimitRequestBody 26214400
+      </VirtualHost>
+
+      # Apache has no one-line equivalent of nginx's `return 200`, so there is no
+      # proxy-local health endpoint. The container health check probes Django's
+      # admin login page through this vhost, which proves the whole proxy path.
+provision:
+  compose:
+    files:
+      - path: compose.override.yaml
+        content: |
+          # Compose merges compose.override.yaml over compose.yaml with no extra
+          # flags, so the app service written by the env recipe is untouched.
+          services:
+            apache:
+              image: httpd:2.4-alpine
+              # The stock httpd.conf is left in place: it loads mpm_event and the base
+              # module set. -c appends this directive after it is read, pulling in the
+              # shared tuning and this framework's VirtualHost. Without it the image
+              # starts on stock config and serves its default page - it does not fail.
+              command: ["httpd-foreground", "-c", "Include conf/keel-tuning.conf"]
+              restart: unless-stopped
+              depends_on:
+                app:
+                  condition: service_healthy
+              ports:
+                - "${HTTP_PORT:-8080}:80"
+              volumes:
+                # Shared, owned by recipes/infra/web/apache.yaml.
+                - ./.keel/apache/keel-tuning.conf:/usr/local/apache2/conf/keel-tuning.conf:ro
+                # This framework's VirtualHost, owned by this recipe.
+                - ./docker/apache/conf.d:/usr/local/apache2/conf.d:ro
+                # The collectstatic output, published by the Docker env as a
+                # named volume. Read-only: Apache serves these, it does not write
+                # them.
+                - static:/var/www/static:ro
+              healthcheck:
+                test: ["CMD", "wget", "-qO-", "http://127.0.0.1/admin/login/"]
+                interval: 15s
+                timeout: 5s
+                retries: 5
+                start_period: 20s
+              # Matches the app's stop_grace_period, so the proxy is not killed
+              # while gunicorn is still draining requests it forwarded.
+              stop_grace_period: 45s
+
+          volumes:
+            static:
+  # DDEV runs this project with --webserver-type=generic, so Traefik forwards
+  # straight to the runserver daemon on :8000 and no Apache is in the local
+  # path. The VirtualHost above is still written, so the deployment shape is
+  # version-controlled next to the code that assumes it.
+  ddev: {}
+  # Native env: no container to add. The VirtualHost above still applies, but
+  # change the ProxyPass target to http://127.0.0.1:8000/ and point the Alias at
+  # the real STATIC_ROOT on the host.
+  local: {}

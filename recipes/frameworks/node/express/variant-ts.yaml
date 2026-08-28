@@ -1,0 +1,112 @@
+id: express-ts
+kind: framework
+label: Express (Node API server, TypeScript)
+lang: node
+provides: [node, express, self-serving]
+default: false
+family: express
+variant: TypeScript
+updated: 2026-08-25
+pins:
+  express: ^5.1.0
+# The Node line is a choice. Only the versions this framework actually
+# supports are offered; the note says what each one costs you.
+versions:
+  node_version:
+    label: Node.js version
+    recommended: "22"
+    options:
+      - value: "20"
+        label: "Node 20 LTS"
+        note: "maintenance only, ends Apr 2026"
+      - value: "22"
+        label: "Node 22 LTS"
+        note: "active LTS, the safe default"
+      - value: "24"
+        label: "Node 24 LTS"
+        note: "newest LTS"
+install:
+  # The stack has to be up before anything can exec into it. Under a native
+  # env {{start}} renders empty and the engine drops the no-op step.
+  - "{{start}}"
+  - "{{exec}} npm install"
+  # The app started before its dependencies existed, so bring it back up now
+  # that they are installed. Renders empty, and is dropped, on a native env.
+  - "{{restart}}"
+smoke:
+  - "{{exec}} npx tsc --noEmit"
+files:
+  - path: package.json
+    content: |
+      {
+        "name": "app",
+        "private": true,
+        "type": "module",
+        "scripts": {
+          "dev": "tsx watch src/index.ts",
+          "build": "tsc",
+          "start": "node dist/index.js",
+          "typecheck": "tsc --noEmit",
+          "test": "node --test"
+        },
+        "dependencies": { "express": "^5.1.0" },
+        "devDependencies": {
+          "typescript": "^5",
+          "tsx": "^4.19.0",
+          "@types/node": "^22",
+          "@types/express": "^5.0.0"
+        }
+      }
+  - path: tsconfig.json
+    content: |
+      {
+        "compilerOptions": {
+          "target": "ES2022",
+          "module": "NodeNext",
+          "moduleResolution": "NodeNext",
+          "strict": true,
+          "esModuleInterop": true,
+          "skipLibCheck": true,
+          "outDir": "dist",
+          "rootDir": "src"
+        },
+        "include": ["src"]
+      }
+  - path: src/index.ts
+    content: |
+      import express, { type Request, type Response } from "express";
+
+      const app = express();
+      app.use(express.json());
+
+      // The route keel's own URL points at. Without it a freshly built project
+      // answers 404 at the address the build prints, which reads as a broken
+      // stack rather than an empty one.
+      app.get("/", (_req: Request, res: Response) => {
+        res.json({ app: "keel Express", db: process.env.KEEL_DB ?? "sqlite" });
+      });
+
+      app.get("/health", (_req: Request, res: Response) => {
+        res.json({ status: "healthy" });
+      });
+
+      const port = process.env.PORT ?? 3000;
+      app.listen(port, () => console.log(`listening on :${port}`));
+
+      export default app;
+  - path: .env.example
+    content: |
+      # Copy to .env and fill in. Generate secrets with: keel secrets sync
+      PORT=3000
+  - path: .gitignore
+    content: |
+      node_modules/
+      dist/
+      .env
+tasks:
+  lint: "{{exec}} npx eslint ."
+  dev: "{{exec}} npm run dev"
+  start: "{{exec}} npm run start"
+  build: "{{exec}} npm run build"
+  typecheck: "{{exec}} npm run typecheck"
+  test: "{{exec}} npm test"

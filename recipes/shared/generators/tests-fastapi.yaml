@@ -1,0 +1,11 @@
+# Test suite as a level: stack generator (FastAPI pytest). Points at the
+# fastapi-pytest addon (pytest + httpx TestClient + coverage).
+id: gen-tests-fastapi
+kind: generator
+level: stack
+label: "Test suite (pytest + httpx + coverage)"
+appliesTo: [fastapi]
+provides: [tests]
+apply: [fastapi-pytest]
+schema_version: 2
+updated: 2026-08-22

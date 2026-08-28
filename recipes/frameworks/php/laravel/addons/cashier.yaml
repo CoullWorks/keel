@@ -1,0 +1,9 @@
+id: laravel-cashier
+kind: addon
+label: Cashier (Stripe subscription billing)
+appliesTo: [laravel]
+provides: [cashier]
+install:
+  - "{{composer}} require laravel/cashier"
+  - "{{artisan}} vendor:publish --tag=cashier-migrations"
+  - "{{artisan}} migrate --force"

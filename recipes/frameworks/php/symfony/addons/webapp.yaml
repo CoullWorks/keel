@@ -1,0 +1,13 @@
+id: symfony-webapp
+schema_version: 2
+kind: addon
+label: Full-stack web app (Twig, forms, asset mapper)
+appliesTo: [symfony]
+provides: [templating, forms]
+default: true
+updated: 2026-08-10
+# The skeleton is deliberately minimal: no templating, no forms, no assets. This
+# is the one command that turns it into a web application, and it is what the
+# framework's own post-build message used to tell you to run by hand.
+install:
+  - "{{composer}} require webapp"

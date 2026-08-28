@@ -1,0 +1,372 @@
+id: mariadb
+schema_version: 2
+kind: db
+label: MariaDB 11.8 LTS (tuned)
+aliases: [django-mariadb]
+# woocommerce-bedrock is listed as well as woocommerce: it is its own framework
+# id, and while it was absent from every database recipe no db applied to it at
+# all, so a Bedrock project got whatever DDEV's default happened to be, with no
+# .ddev/config.db.yaml, no DB_* environment and none of the tuning below.
+appliesTo: [django, magento, magento-mageos, woocommerce, woocommerce-bedrock, symfony, express, fastify, hono, nestjs, adonisjs, nuxt, astro, sveltekit, flask, dash, streamlit, gradio]
+# MariaDB speaks the MySQL wire protocol, so anything wired for mysql (Doctrine's
+# driver, Laravel's DB_CONNECTION) works unchanged. Providing the capability
+# avoids a second copy of every mysql overlay.
+provides: [db, mariadb, mysql, db-mariadb]
+conflicts: [db-postgres, db-mysql, db-mongo]
+# Adobe and WordPress both publish MySQL/MariaDB requirements and neither
+# supports PostgreSQL, so these are MariaDB's and appear in no other recipe's
+# defaultFor. Everything else defaults to PostgreSQL; see postgres.yaml.
+# magento-mageos is the Mage-OS variant of magento (same family, provides
+# magento): it must default to MariaDB exactly like magento, and was previously
+# absent so it fell through to whichever db sorted first - a decision nobody made.
+defaultFor: [magento, magento-mageos, woocommerce, woocommerce-bedrock]
+priority: -5
+updated: 2026-08-12
+# The engine version is a choice. keel recommends one and the var below
+# reads the answer, so the compose image tag, the DDEV database type and
+# the tuning file all follow a single decision.
+versions:
+  mariadb_version:
+    label: mariadb version
+    recommended: "11.8"
+    options:
+      - value: "11.4"
+        label: "MariaDB 11.4 LTS"
+        note: "previous LTS, supported to May 2029"
+      - value: "11.8"
+        label: "MariaDB 11.8 LTS"
+        note: "current LTS, DDEV's default and Adobe's listed version"
+      - value: "12.3"
+        label: "MariaDB 12.3 LTS"
+        note: "newest LTS"
+vars:
+  db.type: mariadb
+  # 11.8 is the current LTS line, DDEV's own default, and the version Adobe
+  # lists for Magento 2.4.8-p5 (with 11.4 as the older LTS). See
+  # docs/infra/magento.md and https://docs.ddev.com/en/stable/users/extend/database-types/
+  # The database DDEV is configured with, set at `ddev config` time so the
+  # volume is created as this type. Written as a whole flag rather than a
+  # type and version, because not every database keel offers is a DDEV
+  # database type: Mongo runs as an add-on beside DDEV own, and declares
+  # this empty.
+  #
+  # The pin rather than {{db.version}}: a recipe own vars render in sorted
+  # key order, and db.ddev_flag sorts before db.version.
+  db.ddev_flag: "--database=mariadb:{{pin.mariadb_version}}"
+  db.version: "{{pin.mariadb_version}}"
+  db.host: db
+  db.port: "3306"
+  db.name: db
+  db.user: db
+  db.password: db
+  # Defined here, not borrowed from mysql.yaml. The two recipes conflict, so a
+  # MariaDB plan never contains mysql.yaml, and a token only that file defined
+  # reached the generated .env as the literal string "{{db.localPort}}".
+  db.localPort: "33306" # host port the native env publishes on (loopback only)
+  # The three vars below let ONE compose service definition serve any engine.
+  # Without them every framework has to hand-write a postgres service, a mysql
+  # service and a mariadb service, which is how nine Node frameworks ended up
+  # with no database service at all: nobody wrote the third copy.
+  #
+  # compose_env and healthcheck are YAML FLOW form (on one line) on purpose, so
+  # they can be substituted into a compose file without the caller having to
+  # know how deeply the block is indented.
+  #
+  # The credentials are written out rather than referencing db.name/db.user:
+  # a recipe's vars are rendered in sorted key order, so db.compose_env is
+  # resolved before db.name exists and the reference would survive as a
+  # literal token in the compose file.
+  db.compose_env: "{MARIADB_DATABASE: db, MARIADB_USER: db, MARIADB_PASSWORD: db, MARIADB_ROOT_PASSWORD: db}"
+  db.data_dir: /var/lib/mysql
+  db.healthcheck: "[\"CMD-SHELL\", \"healthcheck.sh --connect --innodb_initialized\"]"
+  # The tuned configuration this recipe writes, and how the server is told to
+  # read it. Published as vars so the framework's own compose service mounts
+  # them directly.
+  #
+  # They used to live in a separate docker-compose.<engine>.yml, which compose
+  # never merged (only compose.override.yaml is automatic). Every stack was
+  # therefore running on the image defaults while carrying a tuning file that
+  # nothing read.
+  db.config_mount: ./.keel/mariadb/my.cnf:/etc/mysql/conf.d/keel-mariadb.cnf:ro
+  # db.command carries the WHOLE line, key included, because only Postgres
+  # needs one and a recipe has no way to omit a line conditionally. Where it
+  # is empty the template renders a blank line, which YAML ignores.
+  db.command: ""
+  # MariaDB speaks the MySQL wire protocol, so both ORMs address it as MySQL.
+  db.prisma: mysql
+  db.drizzle: mysql
+  db.drizzle_driver: mysql2
+  db.url: "mysql://db:db@db:3306/db"
+files:
+  # One authoritative copy of the tuning. Each environment mounts or copies this
+  # same file rather than keeping its own drifting version of the same numbers.
+  - path: .keel/mariadb/my.cnf
+    content: |
+      # keel-generated: MariaDB 11.8 server configuration.
+      #
+      # Sized for a database container with 2 GB of RAM. Every derived value
+      # shows its arithmetic so you can redo the sums for a real node instead of
+      # guessing which numbers are safe to change.
+      #
+      # Sources, all fetched 2026-08-12:
+      #   [1] MariaDB Server: InnoDB System Variables
+      #       https://mariadb.com/docs/server/server-usage/storage-engines/innodb/innodb-system-variables
+      #   [2] MariaDB Server: Server System Variables
+      #       https://mariadb.com/docs/server/server-management/variables-and-modes/server-system-variables
+      #   [3] MariaDB Server: Using healthcheck.sh (Docker official image)
+      #       https://mariadb.com/docs/server/server-management/automated-mariadb-deployment-and-administration/docker-and-mariadb/using-healthcheck-sh
+      #   [4] MariaDB Server: Supported Character Sets and Collations
+      #       https://mariadb.com/docs/server/reference/data-types/string-data-types/character-sets/supported-character-sets-and-collations
+
+      [mysqld]
+
+      # ------------------------------------------------------------- character set
+      # utf8mb4 is the only character set here that stores the whole of Unicode.
+      # MariaDB's "utf8" is utf8mb3: three bytes per character, so no emoji and no
+      # astral plane, and an INSERT of either is an error or a silent truncation.
+      #
+      # Set at SERVER level on purpose. A CHARACTER SET on the database only
+      # covers tables created without one and says nothing about the connection,
+      # which is how a project ends up with utf8mb4 tables and a latin1 session.
+      character-set-server = utf8mb4
+
+      # Do NOT paste MySQL's utf8mb4_0900_ai_ci in here. MariaDB accepts the name,
+      # which is the trap: its collation table lists utf8mb4_0900_ai_ci as
+      # "Alias for utf8mb4_uca1400_nopad_ai_ci" [4]. So the server starts, the
+      # schema looks identical to the MySQL one it was copied from, and it is
+      # sorting by Unicode 14.0.0 with NO PAD semantics instead of MySQL's Unicode
+      # 9.0.0 with PAD SPACE. Trailing spaces stop comparing equal and ORDER BY
+      # returns a different order. A name that survives the copy while the
+      # behaviour changes underneath is worse than an error.
+      #
+      # The native spelling of the modern collation, and the value MariaDB's own
+      # character_set_collations already maps utf8mb4 to from 11.5 [2][4]:
+      collation-server = utf8mb4_uca1400_ai_ci
+      # On MariaDB 11.4 or older the default is utf8mb4_general_ci and the
+      # uca1400 family (added in 10.10) may not be present: use
+      # utf8mb4_unicode_ci there. [4]
+
+      # "If set to ON (OFF is the default), only IP addresses are used for
+      # connections. Host names are not resolved." [2] In a container the DNS
+      # lookup on every connect is a reverse lookup of a container IP that usually
+      # resolves to nothing, so it is latency for no benefit. The docs note that
+      # container configs commonly set it [2]. Grants must then use IPs or
+      # localhost, which is what the image's own grants do.
+      skip-name-resolve = ON
+
+      # ------------------------------------------------------------------- InnoDB
+      # innodb_buffer_pool_size is "The primary value to adjust on a database
+      # server with entirely/primarily InnoDB tables, can be set up to 80% of the
+      # total memory in these environments" [1]. Default is 128 MiB [1], which is
+      # what an untuned container runs on and why it reads every page from disk.
+      #
+      # Arithmetic, 2 GB container:
+      #   2048 MB total
+      #   - per-connection buffers: max_connections 200 x ~1 MB peak     = 200 MB
+      #   - redo log buffer (innodb_log_buffer_size below)               =  32 MB
+      #   - server, temp tables, connection threads, headroom            = ~800 MB
+      #   => 1024 MB for the pool (50%), well inside the 80% ceiling.
+      # A dedicated 16 GB database node has proportionally less fixed overhead:
+      #   16384 x 0.75 = 12288 -> innodb_buffer_pool_size = 12G.
+      # Adobe sizes a real Magento store at 8 GB of buffer pool (docs/infra/magento.md).
+      innodb_buffer_pool_size = 1G
+
+      # innodb_buffer_pool_instances is NOT set, and must not be copied from a
+      # MySQL config: "the variable is deprecated and ignored from MariaDB 10.5.1,
+      # where the buffer pool runs in a single instance regardless of size" [1],
+      # and it was removed outright in MariaDB 10.6.0 [1]. On 11.8 the server
+      # rejects it as an unknown variable and refuses to start.
+
+      # Redo log. "Larger values mean less disk I/O due to less flushing checkpoint
+      # activity, but also slower recovery from a crash" and "It can safely be set
+      # higher to reduce checkpoint flushing, even larger than
+      # innodb_buffer_pool_size" [1]. Default is 96 MB from MariaDB 10.5 [1].
+      # 512M is the write-heavy end of that trade: fewer checkpoints during
+      # imports and reindexes, at the cost of a longer crash recovery, because
+      # recovery has to replay everything since the last checkpoint.
+      innodb_log_file_size = 512M
+
+      # "Increasing this means larger transactions can run without needing to
+      # perform disk I/O before committing" [1]. Default 16 MB [1]; doubled
+      # because catalogue imports and schema migrations commit large transactions.
+      innodb_log_buffer_size = 32M
+
+      # DURABILITY. Left at the default of 1, which is the only fully durable
+      # setting: "the log buffer is written to the InnoDB redo log file and a
+      # flush to disk performed after each transaction. This is required for full
+      # ACID compliance" [1].
+      #
+      # The alternatives trade committed data for speed, plainly:
+      #   0 - "Nothing is done on commit ... a server crash can erase the last
+      #       second of transactions" [1].
+      #   2 - "flushing takes place every innodb_flush_log_at_timeout seconds (by
+      #       default once a second) ... a OS or power outage can cause the last
+      #       second's transactions to be lost" [1].
+      # Setting 2 on a machine that takes payments means a power cut can lose an
+      # order that the customer has already been charged for. It is a legitimate
+      # choice for a CI database or a disposable replica, and never for the
+      # primary of a store.
+      innodb_flush_log_at_trx_commit = 1
+
+      # innodb_flush_method is deliberately NOT set. It has been O_DIRECT by
+      # default on Unix since MariaDB 10.6 [1], so setting it changes nothing, and
+      # it is "Deprecated from MariaDB 11.0" in favour of four booleans
+      # (innodb_log_file_buffering, innodb_data_file_buffering,
+      # innodb_log_file_write_through, innodb_data_file_write_through) [1].
+      # O_DIRECT is what avoids double buffering: InnoDB caches pages in the
+      # buffer pool, and the filesystem cache would otherwise hold a second copy.
+
+      # "Should be set to around the number of I/O operations per second that
+      # system can handle" and "Ideally, opt for a lower setting, as at higher
+      # value data is removed from the buffers too quickly, reducing the
+      # effectiveness of caching" [1]. Default 200 [1], which is a spinning-disk
+      # number. 1000 is a conservative SSD figure that respects that warning; an
+      # NVMe device sustains far more, but raising this further mostly buys
+      # aggressive flushing rather than throughput.
+      innodb_io_capacity = 1000
+      # Default is "2000 or twice innodb_io_capacity, whichever is higher" [1].
+      innodb_io_capacity_max = 2000
+
+      # "SSD devices, with low seek times, would be less likely to require dirty
+      # neighbor flushing to be set" [1]. MariaDB 10.4.4+ tries to detect SSDs by
+      # itself [1]; this states the intent for storage it cannot detect, such as a
+      # network volume in a cloud VM.
+      innodb_flush_neighbors = 0
+
+      # innodb_thread_concurrency is NOT set. It is "Deprecated and ignored from
+      # MariaDB 10.5.5" and removed in 10.6.0 [1]. Adobe's Magento tuning guidance
+      # still recommends 2 * (NumCPUs + NumDisks) for it (docs/infra/magento.md),
+      # which is MySQL advice that has no effect on a modern MariaDB.
+
+      # ------------------------------------------------------------- connections
+      # Every connection costs a thread and its per-connection buffers, so this is
+      # a memory decision, not a generosity one. Default is 151 [2].
+      # Arithmetic for a typical PHP-FPM store:
+      #   2 web nodes x 40 FPM children       =  80
+      #   cron + queue consumers              =  20
+      #   admin, migrations, monitoring       =  20
+      #   headroom for a bad afternoon        =  80
+      #   => 200
+      # Adobe publishes 300 for a small Magento environment and 1000 for a medium
+      # one (docs/infra/magento.md). Raise this only alongside the buffer-pool
+      # arithmetic above: 200 more connections is roughly 200 MB more RAM.
+      max_connections = 200
+
+      # "Set as large as the largest BLOB, in multiples of 1024" [2]. The default
+      # (16 MB) is what makes a mysqldump restore fail halfway through with
+      # "packet too large" on a single wide row.
+      max_allowed_packet = 64M
+
+      # --------------------------------------------------------------- observability
+      # Off by default [2], and long_query_time defaults to 10 seconds [2], which
+      # is far above the point where a page is already broken for the user.
+      # 1 second catches the queries worth looking at without logging everything.
+      slow_query_log = ON
+      long_query_time = 1
+
+      [client]
+      # The server default above does not follow a client that announces something
+      # else, so set it here too.
+      default-character-set = utf8mb4
+provision:
+  ddev:
+    files:
+      - path: .ddev/config.db.yaml
+        content: |
+          # keel-generated: MariaDB. Frameworks read KEEL_DB and the DB_* vars.
+          database:
+            type: mariadb
+            version: "{{db.version}}"
+          web_environment:
+            - KEEL_DB=mariadb
+            - DB_HOST={{db.host}}
+            - DB_PORT={{db.port}}
+            - DB_NAME={{db.name}}
+            - DB_USER={{db.user}}
+            - DB_PASSWORD={{db.password}}
+    install:
+      # "You can provide additional MySQL/MariaDB configuration for a project by
+      # creating a directory called .ddev/mysql/ and adding any number of *.cnf
+      # MySQL configuration files. These files will be automatically included
+      # when MySQL is started."
+      # https://docs.ddev.com/en/stable/users/extend/customization-extendibility/
+      #
+      # Copied rather than written twice: .keel/mariadb/my.cnf stays the single
+      # source of truth (and the copy you deploy with), and DDEV gets the same
+      # bytes at the path it reads. Two hand-maintained copies of the same
+      # numbers is exactly the drift this catalogue exists to remove.
+      - "mkdir -p .ddev/mysql && cp .keel/mariadb/my.cnf .ddev/mysql/keel-mariadb.cnf"
+      - "{{restart}}" # DDEV reads the file at container start, not while running
+  # Under compose the environment's own stack declares the db service, so this
+  # adds the tuning to it instead of starting a second server. Compose merges
+  # services of the same name across -f files:
+  #   docker compose -f docker-compose.yml -f docker-compose.mariadb.yml up -d
+  # Copy the two keys into your own stack if you would rather keep one file.
+  compose:
+    files:
+      - path: docker-compose.mariadb.yml
+        content: |
+          # keel-generated: tuning overlay for the db service in docker-compose.yml.
+          services:
+            db:
+              volumes:
+                # Anything in /etc/mysql/conf.d is read at start-up, after the
+                # image's own defaults, so this overrides them without replacing
+                # the file the image ships.
+                - ./.keel/mariadb/my.cnf:/etc/mysql/conf.d/keel-mariadb.cnf:ro
+              healthcheck:
+                # Proves the server ANSWERS A QUERY, not that port 3306 is open.
+                # "--connect: Active when an external user can connect to the TCP
+                # port of MariaDB Server. --innodb_initialized: True when InnoDB
+                # has completed initializing, including any rollback or crash
+                # recovery." healthcheck.sh ships in the official image. See
+                # https://mariadb.com/docs/server/server-management/automated-mariadb-deployment-and-administration/docker-and-mariadb/using-healthcheck-sh
+                test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+                interval: 10s
+                timeout: 5s
+                retries: 12
+                # First start initialises the data directory, and the entrypoint
+                # runs a temporary server to do it. Without a start_period the
+                # container is marked unhealthy before it has ever been ready.
+                start_period: 60s
+  local:
+    install:
+      - "docker compose -f docker-compose.db.yml up -d"
+    files:
+      - path: docker-compose.db.yml
+        content: |
+          # keel-generated: a local MariaDB for development, tuned by
+          # .keel/mariadb/my.cnf (edit that file, then `docker compose -f
+          # docker-compose.db.yml up -d` again).
+          services:
+            db:
+              image: mariadb:{{db.version}}
+              restart: unless-stopped
+              environment:
+                MARIADB_DATABASE: {{db.name}}
+                MARIADB_USER: {{db.user}}
+                MARIADB_PASSWORD: {{db.password}}
+                MARIADB_ROOT_PASSWORD: {{db.password}}
+              volumes:
+                - dbdata:/var/lib/mysql
+                - ./.keel/mariadb/my.cnf:/etc/mysql/conf.d/keel-mariadb.cnf:ro
+              healthcheck:
+                # See the compose overlay above for why this is not a port check.
+                test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+                interval: 10s
+                timeout: 5s
+                retries: 12
+                start_period: 60s
+              # Loopback only, on a non-default host port: see postgres.yaml.
+              ports: ["127.0.0.1:{{db.localPort}}:3306"]
+          volumes:
+            dbdata:
+      - path: .env
+        content: |
+          # keel: connection for the local mariadb container.
+          KEEL_DB=mariadb
+          DB_HOST=127.0.0.1
+          DB_PORT={{db.localPort}}
+          DB_NAME={{db.name}}
+          DB_USER={{db.user}}
+          DB_PASSWORD={{db.password}}

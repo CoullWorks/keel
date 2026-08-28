@@ -1,0 +1,500 @@
+id: nginx
+schema_version: 2
+kind: service
+label: NGINX (shared main + http tuning)
+category: Web
+# One recipe, not one per framework. The six per-framework copies of this were
+# byte-identical apart from their id and appliesTo: how a web server is switched
+# on is the environment's job, not the framework's.
+#
+# SCOPE. This file owns the main context and the http block: the settings that
+# would be identical for Laravel, Django and Next.js. It owns no server block,
+# no root, no try_files, no location and no fastcgi_pass. Those name a
+# framework's paths and live with the framework, which drops a file into
+# conf.d/ that inherits everything set here.
+aliases: [laravel-nginx, magento-nginx, woocommerce-nginx]
+appliesTo: ["*"] # any app can be fronted by a web server; the config is what differs
+provides: [webserver, front-controller, nginx]
+conflicts: [apache]
+# Selected unless you choose Apache instead, because without one of the two a
+# built stack cannot be opened at all.
+#
+# No environment recipe publishes a host port: the web server is the single
+# ingress, so the proxy config describes the only route in. That is a
+# deliberate property (see the note in each framework's server block) and it
+# has a consequence — leaving both web servers unticked produces containers
+# that are healthy, a database that answers, and a site_url that refuses the
+# connection. Reachability is not an optional extra, so it is not an unticked
+# box. Apache is the alternative, never an addition: the two conflict.
+default: true
+updated: 2026-08-12
+vars:
+  nginx.version: "1.30" # current stable line; 1.31.x is mainline
+files:
+  - path: .keel/nginx/nginx.conf
+    content: |
+      # keel-generated: NGINX main + http configuration.
+      #
+      # Deliberately contains no server block. Framework server blocks are
+      # dropped into conf.d/ (see the include at the end of the http block) and
+      # inherit everything here. Anything in this file that names a path, a port
+      # or a webroot would be in the wrong file.
+      #
+      # Every default quoted below is nginx's own, so it is visible what is being
+      # changed and what is merely being stated.
+      #
+      # Sources, all fetched 2026-08-12, all nginx.org:
+      #   [1] Core module      /en/docs/ngx_core_module.html
+      #   [2] HTTP core        /en/docs/http/ngx_http_core_module.html
+      #   [3] gzip             /en/docs/http/ngx_http_gzip_module.html
+      #   [4] FastCGI          /en/docs/http/ngx_http_fastcgi_module.html
+      #   [5] Proxy            /en/docs/http/ngx_http_proxy_module.html
+      #   [6] Real IP          /en/docs/http/ngx_http_realip_module.html
+      #   [7] Headers          /en/docs/http/ngx_http_headers_module.html
+      #   [8] Hash tables      /en/docs/hash.html
+
+      user  nginx;
+
+      # Default is 1 [1]. "When one is in doubt, setting it to the number of
+      # available CPU cores would be a good start (the value "auto" will try to
+      # autodetect it)" [1]. auto is right in a container, where the core count
+      # is whatever the host or the cgroup gives you.
+      worker_processes  auto;
+
+      # Every connection costs at least one file descriptor, and worker_connections
+      # below is capped by this: the maximum number of simultaneous connections
+      # "cannot exceed the current limit on the maximum number of open files,
+      # which can be changed by worker_rlimit_nofile" [1]. Raising
+      # worker_connections without this produces "worker_connections exceed
+      # open file resource limit" in the error log and a silently lower ceiling.
+      worker_rlimit_nofile  65535;
+
+      error_log  /var/log/nginx/error.log  warn;
+      pid        /var/run/nginx.pid;
+
+      events {
+          # Default is 512 [1]. Note what it counts: "this number includes all
+          # connections (e.g. connections with proxied servers, among others),
+          # not only connections with clients" [1]. A reverse-proxied request
+          # therefore occupies two, one inbound and one to the upstream, so a
+          # worker serving 2000 clients through PHP-FPM needs about 4000 slots.
+          #
+          # nginx publishes no "max clients = workers x connections" formula, so
+          # do not treat 4096 as a capacity promise. It is headroom, and it is
+          # cheap: the memory is allocated per connection in use, not up front.
+          worker_connections  4096;
+      }
+
+      http {
+          include       /etc/nginx/mime.types;
+          default_type  application/octet-stream;
+
+          log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
+                            '$status $body_bytes_sent "$http_referer" '
+                            '"$http_user_agent" "$http_x_forwarded_for" '
+                            'rt=$request_time urt="$upstream_response_time"';
+          # rt and urt are the reason this is not nginx's stock log format: with
+          # them, "the site is slow" is answerable from the access log alone, and
+          # the gap between the two numbers separates a slow application from a
+          # slow client connection.
+          access_log  /var/log/nginx/access.log  main;
+
+          # ------------------------------------------------------------ transfer
+          # Default off [2]. Copies a file to the socket in the kernel, without
+          # reading it into nginx's own memory first.
+          sendfile      on;
+          # Default off [2], and it does nothing on its own: "The options are
+          # enabled only when sendfile is used" [2]. With both on, nginx sends
+          # "the response header and the beginning of a file in one packet" and
+          # then "a file in full packets" [2], rather than dribbling out partial
+          # segments.
+          tcp_nopush    on;
+          # Default on [2]; stated because it is what stops Nagle's algorithm
+          # delaying the last small packet of a keep-alive response [2].
+          tcp_nodelay   on;
+
+          # Default 75s [2]. 65 sits under the 60-75s idle timeout most load
+          # balancers and cloud proxies use, so nginx closes the connection first
+          # rather than the client racing a close it has not seen yet.
+          keepalive_timeout  65;
+          # nginx's own default since 1.19.10 (it was 100 before) [2]. Stated
+          # rather than changed, because the reason matters: "Closing connections
+          # periodically is necessary to free per-connection memory allocations.
+          # Therefore, using too high maximum number of requests could result in
+          # excessive memory usage and not recommended" [2].
+          keepalive_requests 1000;
+
+          # "if nginx emits the message requesting to increase either hash max
+          # size or hash bucket size then the first parameter should first be
+          # increased" [8]. So raise the max size, not the bucket size, when
+          # "could not build the types_hash" appears.
+          types_hash_max_size 2048;
+          server_names_hash_max_size 1024;
+
+          # --------------------------------------------------------- request body
+          # Default is 1m, and exceeding it returns "the 413 (Request Entity Too
+          # Large) error ... Please be aware that browsers cannot correctly
+          # display this error" [2]. That is what a failed media upload looks
+          # like: no message, just a dead form.
+          #
+          # 32m is a shared default for admin uploads. It is an upper bound, not
+          # a target: a framework whose forms accept video should raise it in its
+          # own server block, and a pure JSON API should lower it, since this is
+          # also the size of request an unauthenticated client can make nginx
+          # buffer.
+          # It must be at least as large as PHP's upload_max_filesize and
+          # post_max_size, or the smaller of the three wins and the error comes
+          # from whichever it is.
+          client_max_body_size 32m;
+          # Default is two memory pages, "8K on x86 ... usually 16K on other
+          # 64-bit platforms", and "In case the request body is larger than the
+          # buffer, the whole body or only its part is written to a temporary
+          # file" [2]. 128k keeps ordinary form posts and JSON bodies in memory.
+          client_body_buffer_size 128k;
+          # Defaults are 1k and 4 8k [2]. "if a request includes long cookies, or
+          # comes from a WAP client, it may not fit into 1K" [2]; an oversized
+          # header returns 400 and an oversized request line returns 414 [2].
+          # Sessions plus a consent banner plus several analytics cookies pass 8k
+          # more often than people expect.
+          client_header_buffer_size 1k;
+          large_client_header_buffers 4 16k;
+
+          # ------------------------------------------------------------ compression
+          gzip  on;
+          # Default 1, range 1 to 9 [3]. nginx publishes no recommended value, so
+          # this is a judgement: 5 is where the curve flattens for text, and 9
+          # spends noticeably more CPU per request for a percent or two. Static
+          # assets are better served pre-compressed (gzip_static / brotli) than
+          # compressed on every request.
+          gzip_comp_level 5;
+          # Default 20 bytes [3]. Below about a kilobyte the gzip header and the
+          # CPU cost outweigh the saving, and the response often still occupies
+          # one packet. Note the caveat: "The length is determined only from the
+          # "Content-Length" response header field" [3], so a chunked response
+          # from PHP is compressed regardless of size.
+          gzip_min_length 1024;
+          # Default off, meaning proxied requests are not compressed at all [3].
+          # Behind a CDN or a load balancer every request is proxied, so the
+          # default silently disables compression for all real traffic.
+          gzip_proxied any;
+          # "Enables or disables inserting the "Vary: Accept-Encoding" response
+          # header field" [3]. Without it a shared cache can serve a gzipped body
+          # to a client that did not ask for one.
+          gzip_vary on;
+          # "Enables gzipping of responses for the specified MIME types in
+          # addition to "text/html" ... Responses with the "text/html" type are
+          # always compressed" [3]. So text/html is deliberately absent from this
+          # list: adding it is harmless but tells a reader something untrue.
+          # Nothing already compressed is listed either (jpeg, png, webp, woff2,
+          # zip, mp4): re-compressing them costs CPU and grows the payload.
+          gzip_types
+              text/plain
+              text/css
+              text/xml
+              text/javascript
+              application/javascript
+              application/json
+              application/ld+json
+              application/manifest+json
+              application/rss+xml
+              application/xml
+              application/xhtml+xml
+              application/vnd.api+json
+              application/wasm
+              image/svg+xml
+              font/ttf
+              font/otf;
+
+          # ------------------------------------------------------------- identity
+          # "Enables or disables emitting nginx version on error pages and in the
+          # "Server" response header field" [2]. Be clear about the limit: off
+          # removes the VERSION, not the header. Responses still say
+          # "Server: nginx". Removing it entirely needs the commercial
+          # server_tokens "" form or a third-party module.
+          server_tokens off;
+
+          # -------------------------------------------------- upstream defaults
+          # These are the http-level defaults every framework's server block
+          # inherits. A framework overrides them where its own behaviour differs.
+          #
+          # FastCGI (PHP-FPM). Defaults are 4k|8k for the header buffer and
+          # 8 4k|8k for the body [4], which a PHP response with a large session
+          # cookie or a long Set-Cookie chain overflows on the FIRST buffer:
+          # "This part usually contains a small response header; if it exceeds the
+          # buffer size, the response is considered invalid" [4], which surfaces
+          # as "upstream sent too big header".
+          # The values below are the ones Laravel's own deployment documentation
+          # publishes (docs/infra/laravel.md).
+          fastcgi_buffer_size       32k;
+          fastcgi_buffers           8 32k;
+          fastcgi_busy_buffers_size 64k;
+          # When a response does not fit in those buffers nginx does not fail, it
+          # spools: "If the whole response does not fit into memory, a part of it
+          # can be saved to a temporary file on the disk" [4]. That is a silent
+          # disk write on every large response, and it is why undersized buffers
+          # look like a slow disk rather than a config mistake.
+          fastcgi_temp_file_write_size 64k;
+          # All three FastCGI timeouts default to 60s [4]. 120s gives admin
+          # actions, imports and report pages room without letting a hung worker
+          # hold a connection all afternoon. Note read_timeout is "set only
+          # between two successive read operations, not for the transmission of
+          # the whole response" [4], so a slow stream does not trip it.
+          # It must be at least as long as PHP-FPM's request_terminate_timeout,
+          # or nginx gives up first and returns 504 while the worker keeps going.
+          # Magento's shipped config asks for 600s; that belongs in its own
+          # server block, not here.
+          fastcgi_connect_timeout   60s;
+          fastcgi_send_timeout      120s;
+          fastcgi_read_timeout      120s;
+          # Never send the framework's PHP version to the client.
+          fastcgi_hide_header X-Powered-By;
+
+          # HTTP proxy (Node, Python, or any app server). Same defaults, same
+          # reasoning [5].
+          proxy_buffer_size       16k;
+          proxy_buffers           8 16k;
+          proxy_busy_buffers_size 32k;
+          proxy_connect_timeout   60s;
+          proxy_send_timeout      120s;
+          proxy_read_timeout      120s;
+          # Buffering ON is the right default: it frees the application worker as
+          # soon as the response is written, instead of holding it open for a
+          # slow client. Frameworks that STREAM must turn it off in their own
+          # location block, or the stream arrives all at once at the end. Server
+          # sent events, chunked AI responses, Gradio and Streamlit queues and
+          # Reflex's event channel are all in that category:
+          #     proxy_buffering off;
+          #     proxy_cache off;
+          proxy_buffering on;
+          # Headers every proxied backend needs to build correct absolute URLs
+          # and to see the real client. Set here so no framework block forgets
+          # one; a block that sets its own proxy_set_header adds to these rather
+          # than replacing them.
+          proxy_set_header Host              $host;
+          proxy_set_header X-Real-IP         $remote_addr;
+          proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header X-Forwarded-Host  $host;
+          # WebSocket upgrade, mapped once here so a framework block only needs
+          # proxy_set_header Upgrade/Connection to inherit working behaviour.
+          proxy_http_version 1.1;
+
+          # ------------------------------------------------------------- real IP
+          # Behind a load balancer, a CDN or Docker's own proxy, $remote_addr is
+          # the proxy. Every rate limit, every access log line and every
+          # geo-block is then about the proxy rather than the visitor.
+          #
+          # set_real_ip_from "Defines trusted addresses that are known to send
+          # correct replacement addresses" [6]. The ranges below are the private
+          # networks a container stack proxies from. THIS IS A TRUST DECISION: any
+          # client that can reach nginx directly from one of these ranges can set
+          # X-Forwarded-For to anything it likes and become that address. On a
+          # public deployment, narrow this to the actual proxy addresses (the
+          # CDN's published ranges, the load balancer's subnet) and delete the
+          # rest.
+          set_real_ip_from 10.0.0.0/8;
+          set_real_ip_from 172.16.0.0/12;
+          set_real_ip_from 192.168.0.0/16;
+          set_real_ip_from fc00::/7;
+          real_ip_header   X-Forwarded-For;
+          # "If recursive search is enabled, the original client address that
+          # matches one of the trusted addresses is replaced by the last
+          # non-trusted address sent in the request header field" [6]. With two
+          # proxies in the chain (CDN then load balancer), off would leave you
+          # with the load balancer's address.
+          real_ip_recursive on;
+
+          # ------------------------------------------------- security headers
+          # READ THIS BEFORE ADDING A HEADER IN A SERVER OR LOCATION BLOCK.
+          # "These directives are inherited from the previous configuration level
+          # if and only if there are no add_header directives defined on the
+          # current level" [7]. One add_header in a location block therefore
+          # discards EVERY header set here, silently. It is the most common way a
+          # site loses its security headers on exactly the routes that needed
+          # them.
+          # Since nginx 1.29.3 the add_header_inherit directive changes that rule
+          # [7]; before it, a block that adds a header must repeat these.
+          #
+          # always: without it a header is only added on a normal response, so
+          # error pages and redirects go out bare [7].
+          add_header X-Content-Type-Options   "nosniff" always;
+          add_header X-Frame-Options          "SAMEORIGIN" always;
+          add_header Referrer-Policy          "strict-origin-when-cross-origin" always;
+          add_header Cross-Origin-Opener-Policy "same-origin" always;
+          #
+          # Two more belong on a real deployment but not in a shared default:
+          #
+          #   add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+          # HSTS is a promise a browser remembers for a year. Enabling it on a
+          # development hostname, or before every subdomain serves HTTPS, locks
+          # people out of things that still work over plain HTTP.
+          #
+          #   add_header Content-Security-Policy "default-src 'self'; ..." always;
+          # A CSP that is not written against the application's own scripts,
+          # styles and third parties either blocks the site or allows everything.
+          # It belongs with the framework, and it should start in
+          # Content-Security-Policy-Report-Only.
+
+          # ---------------------------------------------------------- file cache
+          # nginx's own documented example values [2]. Caches open file
+          # descriptors and stat() results, which matters most for a site with
+          # many small static assets.
+          open_file_cache          max=1000 inactive=20s;
+          open_file_cache_valid    30s;
+          open_file_cache_min_uses 2;
+          # "Caching of errors should be enabled separately" [2]; without it a
+          # missing file is stat()ed on every request.
+          open_file_cache_errors   on;
+
+          # ------------------------------------------------ framework server blocks
+          # Everything specific to an application lives here: the server block,
+          # its root, its try_files, its location blocks and its fastcgi_pass or
+          # proxy_pass. Each one inherits every default above.
+          include /etc/nginx/conf.d/*.conf;
+      }
+  - path: NGINX.md
+    content: |
+      # NGINX (scaffolded by keel)
+
+      `.keel/nginx/nginx.conf` is the shared half: the main context and the http
+      block. It contains no server block on purpose.
+
+      ## How a framework adds itself
+
+      Drop a file into `conf.d/`. It inherits gzip, the buffers, the timeouts,
+      the security headers and the real-IP handling from the http block, so it
+      only has to describe what is actually specific to the application:
+
+          # conf.d/app.conf
+          server {
+              listen 80;
+              server_name _;
+              root /var/www/html/public;
+              index index.php;
+
+              location / { try_files $uri $uri/ /index.php?$query_string; }
+
+              location ~ ^/index\.php(/|$) {
+                  fastcgi_pass php:9000;
+                  fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;
+                  include fastcgi_params;
+              }
+          }
+
+      ## Two inherited defaults frameworks are expected to override
+
+      - **`proxy_buffering on`** - correct for a normal request/response app,
+        wrong for anything that streams. Server sent events, chunked LLM
+        responses, Gradio, Streamlit and Reflex all need `proxy_buffering off;`
+        in their own location block, or the client receives the whole stream at
+        the end.
+      - **`fastcgi_read_timeout 120s`** and **`client_max_body_size 32m`** -
+        deliberately middling. Magento's own configuration asks for 600s; an
+        API that only accepts small JSON bodies should lower the body size.
+
+      ## The header rule that catches everyone
+
+      `add_header` is not additive across levels: a `location` block with one
+      `add_header` of its own discards every `add_header` from the `http` block.
+      If you add a header inside a block, repeat the security headers there too
+      (or use `add_header_inherit`, nginx 1.29.3+).
+
+      ## Trusted proxies
+
+      `set_real_ip_from` currently trusts the RFC1918 ranges, which is right for
+      a container network and wrong on a public host: anything that can reach
+      nginx from those ranges can claim any client IP through `X-Forwarded-For`.
+      Narrow it to your CDN or load balancer before going live.
+provision:
+  ddev:
+    files:
+      # DDEV's web container ships its own nginx.conf, so the main context above
+      # cannot be replaced there. What DDEV does support is a snippet:
+      # "To add an nginx snippet to the default config, add an nginx config file
+      # as .ddev/nginx/<something>.conf."
+      # https://docs.ddev.com/en/stable/users/extend/customization-extendibility/
+      # This carries the subset of the shared tuning that is valid in both the
+      # http and server contexts, so it applies wherever DDEV includes it.
+      # Left out because they are main-context only: worker_processes,
+      # worker_rlimit_nofile, worker_connections, log_format, and the
+      # conf.d include.
+      - path: .ddev/nginx/keel-http-defaults.conf
+        content: |
+          # keel-generated: the shared nginx tuning that DDEV can accept as a
+          # snippet. Reasoning and sources: .keel/nginx/nginx.conf.
+          #
+          # No sendfile here, for two reasons. DDEV includes this file at the end
+          # of its own server block, which already carries `sendfile off`, and
+          # nginx refuses to start on a directive repeated in one context:
+          #
+          #   [emerg] "sendfile" directive is duplicate in
+          #   /mnt/ddev_config/nginx/keel-http-defaults.conf:3
+          #
+          # The web container then exited on a loop and `ddev restart` failed
+          # with an empty log, so every DDEV stack that picked nginx died at the
+          # last step of its build.
+          #
+          # And DDEV is right to turn it off: sendfile skips the page cache, and
+          # over a bind mount or a synced folder that serves stale bytes after an
+          # edit. Turning it back on for a tree the developer is editing is the
+          # wrong value as well as the wrong place.
+          tcp_nopush on;
+          tcp_nodelay on;
+          keepalive_timeout 65;
+          keepalive_requests 1000;
+
+          client_max_body_size 32m;
+          client_body_buffer_size 128k;
+          large_client_header_buffers 4 16k;
+
+          gzip on;
+          gzip_comp_level 5;
+          gzip_min_length 1024;
+          gzip_proxied any;
+          gzip_vary on;
+          gzip_types text/plain text/css text/xml text/javascript application/javascript
+                     application/json application/ld+json application/manifest+json
+                     application/rss+xml application/xml application/xhtml+xml
+                     application/wasm image/svg+xml font/ttf font/otf;
+
+          server_tokens off;
+
+          fastcgi_buffer_size 32k;
+          fastcgi_buffers 8 32k;
+          fastcgi_busy_buffers_size 64k;
+          fastcgi_connect_timeout 60s;
+          fastcgi_send_timeout 120s;
+          fastcgi_read_timeout 120s;
+          fastcgi_hide_header X-Powered-By;
+
+          proxy_buffer_size 16k;
+          proxy_buffers 8 16k;
+          proxy_busy_buffers_size 32k;
+          proxy_connect_timeout 60s;
+          proxy_send_timeout 120s;
+          proxy_read_timeout 120s;
+
+          add_header X-Content-Type-Options "nosniff" always;
+          add_header X-Frame-Options "SAMEORIGIN" always;
+          add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    install:
+      - "{{webserver_nginx}}" # ddev config --webserver-type=nginx-fpm
+      - "{{restart}}"
+  compose:
+    install:
+      # The service is declared in a compose file this recipe has just written,
+      # so the stack has to be brought up again for it to exist. Without this
+      # the config lands on disk and no web server is ever created.
+      - "{{start}}"
+    # No compose fragment here on purpose. This recipe writes the config; the
+    # framework's server-block recipe declares the nginx service and mounts
+    # this file into it, in compose.override.yaml. That is one mount declared
+    # in one place, next to the service it belongs to.
+    #
+    # There used to be a docker-compose.nginx.yml here that mounted the same
+    # file again. Compose merges compose.override.yaml automatically and
+    # nothing else, so that second copy was never read: it only told the
+    # reader, wrongly, that an extra -f flag was needed to get a working
+    # web server.
+  sail: {}
+  local: {}

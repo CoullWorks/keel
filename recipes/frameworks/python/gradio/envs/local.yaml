@@ -1,0 +1,51 @@
+id: gradio-local
+schema_version: 2
+kind: env
+env_family: local
+label: Local (native, no Docker)
+appliesTo: [gradio]
+provides: [env]
+default: true
+updated: 2026-08-12
+# Native Python via uv: no daemon, no containers. `keel run dev` runs
+# `python app.py`, which calls demo.launch() and binds 127.0.0.1:7860.
+#
+# There is no Dockerfile here by definition, so the container requirements the
+# Docker env carries have no place to live. What still applies on a bare host:
+#
+#   - Do not use share=True. Those links "are publicly accessible, meaning that
+#     anyone can use your model for prediction", and expire after a week.
+#   - Add auth if the demo is not meant to be public: demo.launch(auth=("user",
+#     "pass")), or a callable for custom logic. /logout ends the session.
+#   - Set GRADIO_ROOT_PATH if the app is proxied to a subpath, matching the
+#     proxy location exactly. Without it Gradio cannot run on any subpath.
+#   - Set FORWARDED_ALLOW_IPS to the proxy's address. The default is 127.0.0.1,
+#     which is right only when the proxy really is on this machine.
+#   - Set GRADIO_ANALYTICS_ENABLED=False for a private deployment.
+#   - Tune the queue rather than the process count: concurrency_limit per event
+#     listener (default 1), default_concurrency_limit in queue(), concurrency_id
+#     to share one limit across events that contend for a single GPU, max_size to
+#     cap the queue, max_threads above the default 40 for non-async functions.
+#     There is no documented multi-process mode for a demo.
+#
+# Selecting nginx or apache writes the matching server block or VirtualHost to
+# .keel/, pointed at 127.0.0.1:7860. See docs/infra/gradio.md.
+commands:
+  start: ""
+  # How this environment tears itself down. Used when a build fails partway:
+  # keel removes the directory it created, and without this the containers,
+  # volumes and network it started stay behind holding a bind mount to a
+  # path that no longer exists. The next attempt then reuses that container
+  # and dies with "current working directory is outside of container mount
+  # namespace root".
+  # The only thing keel starts under a native env is the local database, which
+  # the database recipe brings up from docker-compose.db.yml. Nothing else here
+  # runs in a container, so this is the whole teardown - and without it nothing
+  # ever stopped that container: `keel delete` left it running and holding the
+  # fixed host port, so the next project that wanted a database could not start.
+  # Guarded on the file so an environment built with no database is a no-op.
+  down: "[ -f docker-compose.db.yml ] && docker compose -f docker-compose.db.yml down -v || true"
+  restart: ""
+  exec: ""
+smoke:
+  - "uv --version"

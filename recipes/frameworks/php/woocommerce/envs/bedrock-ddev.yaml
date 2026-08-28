@@ -1,0 +1,69 @@
+id: woocommerce-bedrock-ddev
+schema_version: 2
+kind: env
+env_family: ddev
+label: DDEV
+bin: ddev
+appliesTo: [woocommerce-bedrock]
+provides: [env, docker]
+default: true
+priority: -10 # provision DDEV (docroot web/) before Bedrock is created
+commands:
+  start: "ddev start"
+  # How this environment tears itself down. Used when a build fails partway:
+  # keel removes the directory it created, and without this the containers,
+  # volumes and network it started stay behind holding a bind mount to a
+  # path that no longer exists. The next attempt then reuses that container
+  # and dies with "current working directory is outside of container mount
+  # namespace root".
+  down: "ddev delete -Oy"
+  restart: "ddev restart"
+  exec: "ddev exec"
+  composer: "ddev composer"
+  wp: "ddev wp"
+  site_url: "https://{{project}}.ddev.site"
+  webserver_nginx: "ddev config --webserver-type=nginx-fpm"
+  webserver_apache: "ddev config --webserver-type=apache-fpm"
+  redis_addon: "ddev add-on get ddev/ddev-redis"
+  varnish_addon: "ddev add-on get ddev/ddev-varnish"
+files:
+  # Same PHP settings as the classic WordPress env: Bedrock changes how WordPress
+  # is installed and where the docroot is, not what PHP needs to run it. DDEV
+  # serves through PHP-FPM behind nginx (nginx-fpm) or Apache (apache-fpm), and
+  # the shared nginx / apache service recipes flip between them with the
+  # webserver_* tokens above.
+  #
+  # Bedrock has no compose env yet, so the production Dockerfile, php.ini and FPM
+  # pool that recipes/frameworks/php/woocommerce/infra/php-fpm.yaml writes for the
+  # classic install do not reach it. They are a starting point if you deploy
+  # Bedrock: the PHP values are identical, only the document root moves to web/
+  # and Composer becomes part of the build.
+  - path: .ddev/php/keel-woocommerce.ini
+    verbatim: true
+    content: |
+      ; keel-generated. WordPress and WooCommerce development PHP settings for DDEV.
+      [PHP]
+      ; WooCommerce's server requirements, verbatim: "WordPress memory limit of
+      ; 256 MB or greater". docs/infra/woocommerce.md, source 1.
+      memory_limit = 512M
+      max_execution_time = 300
+      upload_max_filesize = 64M
+      post_max_size = 64M
+      ; PHP's default of 1000 silently truncates a variable product with many
+      ; attributes: the product saves and the variations are gone.
+      max_input_vars = 3000
+
+      [opcache]
+      ; 1, and it would be 1 in production too for this stack: WordPress rewrites
+      ; its own codebase during core, plugin and theme updates. Bedrock narrows
+      ; that (plugins come from Composer) but does not remove it.
+      opcache.validate_timestamps = 1
+      opcache.revalidate_freq = 0
+      opcache.save_comments = 1
+install:
+  # Bedrock serves from web/. DDEV creates the docroot if missing (the old
+  # --create-docroot flag is deprecated/removed).
+  - "ddev config --project-type=wordpress --php-version=8.3 --docroot=web {{db.ddev_flag}}"
+  - "ddev start"
+smoke:
+  - "ddev describe"

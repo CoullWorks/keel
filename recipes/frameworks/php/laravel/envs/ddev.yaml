@@ -1,0 +1,70 @@
+id: ddev
+schema_version: 2
+kind: env
+env_family: ddev
+label: DDEV
+appliesTo: [laravel]
+provides: [env, docker]
+default: true
+priority: -10   # provision DDEV (config + start) before the app is created
+commands:
+  start: "ddev start"
+  # How this environment tears itself down. Used when a build fails partway:
+  # keel removes the directory it created, and without this the containers,
+  # volumes and network it started stay behind holding a bind mount to a
+  # path that no longer exists. The next attempt then reuses that container
+  # and dies with "current working directory is outside of container mount
+  # namespace root".
+  down: "ddev delete -Oy"
+  restart: "ddev restart"
+  exec: "ddev exec"
+  composer: "ddev composer"
+  artisan: "ddev exec php artisan"
+  # Where the project can be opened. DDEV assigns the hostname from the project
+  # name, which is why this is the same line in every DDEV environment keel
+  # ships - and it was missing from this one alone, so a Laravel build on DDEV
+  # was the only one that finished without saying where the site was.
+  site_url: "https://{{project}}.ddev.site"
+  webserver_nginx: "ddev config --webserver-type=nginx-fpm"
+  webserver_apache: "ddev config --webserver-type=apache-fpm"
+  redis_addon: "ddev add-on get ddev/ddev-redis"
+  opensearch_addon: "ddev add-on get ddev/ddev-opensearch"
+  elasticsearch_addon: "ddev add-on get ddev/ddev-elasticsearch"
+  meilisearch_addon: "ddev add-on get ddev/ddev-meilisearch"
+  minio_addon: "ddev add-on get ddev/ddev-minio"
+  rabbitmq_addon: "ddev add-on get ddev/ddev-rabbitmq"
+  memcached_addon: "ddev add-on get ddev/ddev-memcached"
+  mongo_addon: "ddev add-on get ddev/ddev-mongo"
+  solr_addon: "ddev add-on get ddev/ddev-solr"
+files:
+  # DDEV already serves through PHP-FPM behind nginx (nginx-fpm) or Apache
+  # (apache-fpm), and the shared nginx / apache service recipes flip between them
+  # with the webserver_* tokens above. What DDEV does not do is tune PHP, so this
+  # is the local-development counterpart of docker/php/conf.d/10-laravel.ini in the
+  # Docker envs. Development values, deliberately: see the note on
+  # validate_timestamps.
+  - path: .ddev/php/keel-laravel.ini
+    verbatim: true
+    content: |
+      ; keel-generated. Laravel development PHP settings for DDEV.
+      ; NOT the production set. The production values live in
+      ; docker/php/conf.d/10-laravel.ini, written by the Docker envs.
+      [PHP]
+      memory_limit = 512M
+      max_execution_time = 120
+
+      [opcache]
+      ; 1, not 0. Under DDEV your working tree is bind-mounted and you expect an
+      ; edit to take effect on the next request. validate_timestamps = 0 is right
+      ; for an immutable production image and completely wrong here: you would
+      ; edit a file, reload, and see the old code with nothing explaining why.
+      opcache.validate_timestamps = 1
+      opcache.revalidate_freq = 0
+      ; Discarding doc comments breaks anything that parses annotations, PHPUnit
+      ; included. php.net/manual/en/opcache.configuration.php
+      opcache.save_comments = 1
+install:
+  - "ddev config --project-type=laravel --docroot=public {{db.ddev_flag}}"
+  - "ddev start"
+smoke:
+  - "ddev describe"

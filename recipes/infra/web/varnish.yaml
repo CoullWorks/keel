@@ -1,0 +1,471 @@
+id: varnish
+schema_version: 2
+kind: service
+label: Varnish 9 (full-page cache, real VCL)
+category: Cache
+# Provisioning Varnish is the same everywhere. What differs is how each
+# application is told to use it (Magento's caching_application=2, WordPress's
+# purge plugin), and that lives in the config recipes beside this one.
+#
+# SCOPE. The VCL is genuinely whole rather than layered: Varnish has no include
+# directory that a framework can drop a file into and have it merge sensibly.
+# So this recipe owns the whole default.vcl, and it deliberately contains no
+# framework paths. The places a framework must add its own rules (its checkout
+# and admin paths, its static and media locations, its purge header) are marked
+# in the file.
+aliases: [magento-varnish, woo-varnish]
+appliesTo: ["*"] # a reverse-proxy cache sits in front of any web app, not just PHP
+provides: [varnish, fpc]
+updated: 2026-08-12
+vars:
+  # 9.0 is current. Note for anyone copying a version from a Magento guide:
+  # Varnish 7.x is end of life. varnish.org lists 9.0, 8.0 and 6.0 LTS as
+  # supported and says "All releases not mentioned above are End-Of-Life and
+  # unsupported". Magento's own varnish:vcl:generate still only ships templates
+  # up to varnish7.vcl, which is a reason to write the VCL rather than generate
+  # it, not a reason to run an unsupported Varnish.
+  # https://www.varnish.org/releases/
+  varnish.version: "9.0"
+  # Cache size. See the compose file for what this does and does not include.
+  varnish.size: "512m"
+  # The origin Varnish sits in front of. This must match the web server service
+  # in your stack: `web` under DDEV, often `nginx` or `app` under compose.
+  varnish.backendHost: web
+  varnish.backendPort: "80"
+  # Host port for the cached entry point. The origin keeps its own port, so both
+  # can be compared side by side while tuning.
+  varnish.localPort: "8081"
+files:
+  - path: .keel/varnish/default.vcl
+    content: |
+      # keel-generated: Varnish VCL for a dynamic site with logged-in users.
+      #
+      # The default configuration caches almost nothing on a site like this,
+      # and it is right to: Varnish's builtin VCL passes any request carrying a
+      # Cookie or Authorization header, and marks any response carrying
+      # Set-Cookie uncacheable. Since an analytics tag sets a cookie on the first
+      # visit, every subsequent request from every visitor arrives with a Cookie
+      # header, so the hit rate for a stock configuration on a real site is close
+      # to zero. The work below is mostly about that.
+      #
+      # Sources, all fetched 2026-08-12:
+      #   [1] builtin.vcl
+      #       https://github.com/varnishcache/varnish-cache/blob/master/bin/varnishd/builtin.vcl
+      #   [2] Grace mode
+      #       https://github.com/varnishcache/varnish-cache/blob/master/doc/sphinx/users-guide/vcl-grace.rst
+      #   [3] Purging and banning
+      #       https://github.com/varnishcache/varnish-cache/blob/master/doc/sphinx/users-guide/purging.rst
+      #   [4] Backend definition
+      #       https://github.com/varnishcache/varnish-cache/blob/master/doc/sphinx/reference/vcl-backend.rst
+      #   [5] Health probes
+      #       https://github.com/varnishcache/varnish-cache/blob/master/doc/sphinx/reference/vcl-probe.rst
+      #   [6] varnishd
+      #       https://github.com/varnishcache/varnish-cache/blob/master/doc/sphinx/reference/varnishd.rst
+
+      vcl 4.1;
+
+      import std;
+
+      # ------------------------------------------------------------------ backend
+      backend default {
+          .host = "{{varnish.backendHost}}";
+          .port = "{{varnish.backendPort}}";
+
+          # Defaults come from the varnishd parameters of the same names [4]:
+          # connect_timeout 3.5s, first_byte_timeout 60s, between_bytes_timeout
+          # 60s. first_byte_timeout is raised because the slow requests on an
+          # application server are the ones you least want to fail: a cold cache,
+          # a catalogue reindex, an admin report. Magento's own generated VCL
+          # uses 600s for the same reason.
+          .connect_timeout        = 5s;
+          .first_byte_timeout     = 300s;
+          .between_bytes_timeout  = 60s;
+          # Bound the damage a Varnish stampede can do to the origin. Without it
+          # Varnish will open as many backend connections as it has threads, and
+          # a PHP-FPM pool of 40 children meets several hundred of them.
+          .max_connections        = 100;
+
+          # Health probe. Without one, Varnish has no idea the origin is down and
+          # cannot use the saved-by-grace path below.
+          #
+          # Defaults, all from [5]: .url "/", .timeout 2s, .interval 5s,
+          # .window 8, .threshold 3, .expected_response 200, and .initial is
+          # "one less than .threshold", which means "the backend will be marked
+          # unhealthy until the first probe response come back successful" [5].
+          # .initial is set to .threshold here so a restart does not begin by
+          # declaring the origin sick.
+          #
+          # REPLACE .url with the application's own health endpoint. It should be
+          # a page that touches the database and the cache but does no real work:
+          # probing "/" means probing the heaviest page on the site every 5
+          # seconds, and probing a static file means the probe stays green while
+          # the application is dead. Magento ships /health_check.php.
+          .probe = {
+              .url               = "/";
+              .timeout           = 2s;
+              .interval          = 5s;
+              .window            = 5;
+              .threshold         = 3;
+              .initial           = 3;
+              .expected_response = 200;
+          }
+      }
+
+      # Who may invalidate cached content. Anything not listed gets 405.
+      # Narrow this before it leaves a development machine: with a wide ACL,
+      # anything on the network can flush the entire cache and put the full load
+      # on the origin, which is a denial of service that needs no exploit.
+      acl purgers {
+          "localhost";
+          "127.0.0.1";
+          "::1";
+          # Container networks. Replace with the deployment's real addresses.
+          "10.0.0.0"/8;
+          "172.16.0.0"/12;
+          "192.168.0.0"/16;
+      }
+
+      sub vcl_recv {
+          # ---------------------------------------------------------- invalidation
+          # PURGE removes one object and all its variants: "A purge is what
+          # happens when you pick out an object from the cache and discard it
+          # along with its variants" [3].
+          if (req.method == "PURGE") {
+              if (!client.ip ~ purgers) {
+                  return (synth(405, "Not allowed"));
+              }
+              return (purge);
+          }
+
+          # BAN removes everything matching an expression. The expression uses
+          # obj.http.* rather than req.*, and that is the whole point: bans that
+          # only match obj.* "are also processed by a background worker threads
+          # called the ban lurker", and "we recommend that you avoid using req.*
+          # in your bans, as the request object is not available in the ban
+          # lurker thread" [3]. A req.*-based ban stays on the ban list and is
+          # evaluated on every lookup until an object happens to match, which is
+          # how a long ban list turns into a CPU problem.
+          # vcl_backend_response below stores the URL and host on the object so
+          # this can work.
+          if (req.method == "BAN") {
+              if (!client.ip ~ purgers) {
+                  return (synth(405, "Not allowed"));
+              }
+              # Send: X-Ban-Url: ^/products/.*  (a regex, matched against the path)
+              if (req.http.X-Ban-Url) {
+                  if (std.ban("obj.http.X-Url ~ " + req.http.X-Ban-Url
+                              + " && obj.http.X-Host == " + req.http.host)) {
+                      return (synth(200, "Ban added"));
+                  } else {
+                      return (synth(400, std.ban_error()));
+                  }
+              }
+              return (synth(400, "X-Ban-Url header required"));
+          }
+
+          # ----------------------------------------------------------------- grace
+          # Cap grace while the origin is healthy, and let it run long when it is
+          # not. This is the documented pattern [2]: with a 24 hour grace set on
+          # the object in vcl_backend_response, a healthy backend serves content
+          # at most 10 seconds stale (while a background fetch refreshes it), and
+          # a sick backend keeps serving from cache for as long as the object
+          # survives instead of showing an error page.
+          if (std.healthy(req.backend_hint)) {
+              set req.grace = 10s;
+          }
+
+          # ------------------------------------------------------------- normalise
+          # Strip marketing parameters before hashing. Without this, every
+          # campaign link is a separate cache object for identical content, so a
+          # newsletter can miss the cache on every single click.
+          set req.url = regsuball(req.url,
+              "([?&])(utm_[a-z]+|gclid|gclsrc|gad_[a-z]+|gbraid|wbraid|dclid|fbclid|msclkid|mc_[a-z]+|_gl|_kx|igshid|ttclid|srsltid|yclid|zanpid|origin|ref)=[^&]*", "\1");
+          # Tidy up the separators the substitution leaves behind.
+          set req.url = regsub(req.url, "[?&]+$", "");
+          set req.url = regsub(req.url, "\?&", "?");
+          # Sort the remaining parameters so ?a=1&b=2 and ?b=2&a=1 are one object.
+          set req.url = std.querysort(req.url);
+
+          # ------------------------------------------------------------- cookies
+          # THE SETTING THAT DECIDES THE HIT RATE. Varnish's builtin VCL passes
+          # any request with a Cookie header: "if (req.http.Cookie) { # Risky to
+          # cache by default. return (pass); }" [1]. Correct as a default, and
+          # fatal as a policy, because analytics tags give every visitor a cookie
+          # on their first page view.
+          #
+          # So: delete the cookies that cannot possibly change the response, then
+          # let the builtin rule apply to whatever is left. A visitor carrying
+          # only analytics cookies gets cached pages; a visitor carrying a
+          # session cookie still goes to the origin, which is what you want,
+          # because their page has their name and their basket in it.
+          if (req.http.Cookie) {
+              set req.http.Cookie = ";" + req.http.Cookie;
+              set req.http.Cookie = regsuball(req.http.Cookie, "; +", ";");
+              # Analytics, advertising and consent cookies. Extend per site;
+              # every name removed here is a name the origin never sees.
+              set req.http.Cookie = regsuball(req.http.Cookie,
+                  ";(_ga[^=]*|_gid|_gat[^=]*|__utm[a-z]*|_fbp|_fbc|_hj[A-Za-z0-9]*|_clck|_clsk|_pk_[a-z]+[^=]*|__hs[a-z]*|hubspotutk|_uetsid|_uetvid|__gads|__gpi|_scid|_ttp|_pin_unauth|cookie_consent|cookieyes-consent|_pinterest_[a-z]*|yandexuid)=[^;]*", ";");
+              set req.http.Cookie = regsuball(req.http.Cookie, ";+", ";");
+              set req.http.Cookie = regsub(req.http.Cookie, "^;", "");
+              set req.http.Cookie = regsub(req.http.Cookie, ";$", "");
+              if (req.http.Cookie == "") {
+                  unset req.http.Cookie;
+              }
+          }
+
+          # --------------------------------------------------- framework rules go here
+          # A framework adds its own bypasses at this point. They are the same
+          # shape everywhere but the paths are never the same, which is why they
+          # are not in this shared file:
+          #
+          #   # never cache the private half of the site
+          #   if (req.url ~ "^/(checkout|cart|customer|admin|wp-admin|my-account)") {
+          #       return (pass);
+          #   }
+          #   # static assets carry no session, so serve them even to logged-in users
+          #   if (req.url ~ "^/(static|media|assets|_next/static)/") {
+          #       unset req.http.Cookie;
+          #       return (hash);
+          #   }
+          #
+          # Everything else falls through to the builtin VCL, which handles the
+          # method check, the Authorization header and the remaining Cookie
+          # header [1].
+      }
+
+      sub vcl_hash {
+          # The builtin hashes the URL and the Host [1]. Add the scheme, because
+          # a site reachable over both http and https will otherwise serve a
+          # page whose absolute URLs are for the wrong one. Set
+          # X-Forwarded-Proto at the TLS terminator in front of Varnish.
+          if (req.http.X-Forwarded-Proto) {
+              hash_data(req.http.X-Forwarded-Proto);
+          }
+      }
+
+      sub vcl_backend_response {
+          # Store the URL and host on the object so bans can be lurker-friendly
+          # (see the BAN handling in vcl_recv). They are removed again on the way
+          # out in vcl_deliver.
+          set beresp.http.X-Url  = bereq.url;
+          set beresp.http.X-Host = bereq.http.host;
+
+          # Grace: how long a stale object may still be served while a fresh one
+          # is fetched in the background. "Setting an object's grace to a
+          # positive value tells Varnish that it should serve the object to
+          # clients for some time after the TTL has expired, while Varnish
+          # fetches a new version of the object" [2].
+          #
+          # 24 hours looks reckless and is not: vcl_recv caps it at 10 seconds
+          # while the backend is healthy. The long value only comes into play
+          # when the origin is sick, and then it is the difference between a
+          # slightly stale page and an error page.
+          set beresp.grace = 24h;
+
+          # Do not cache an error response over a good one during a background
+          # refresh. Without this, one 500 from a deploy replaces a working
+          # cached page with a broken one for the whole TTL [2].
+          if (beresp.status >= 500 && bereq.is_bgfetch) {
+              return (abandon);
+          }
+
+          # Everything else is left to the builtin VCL, which already declines to
+          # cache responses with Set-Cookie, with Cache-Control no-cache/no-store
+          # /private, with Vary: * or with a zero TTL [1]. The application's own
+          # Cache-Control headers therefore stay in charge of what is cacheable,
+          # which is where that decision belongs.
+      }
+
+      sub vcl_deliver {
+          # Internal bookkeeping must not reach the client.
+          unset resp.http.X-Url;
+          unset resp.http.X-Host;
+          # Do not advertise the cache or its version.
+          unset resp.http.Via;
+          unset resp.http.X-Varnish;
+          unset resp.http.Server;
+
+          # A cache you cannot observe is a cache you cannot tune. Remove these
+          # two lines, or gate them behind an ACL, on a public deployment.
+          if (obj.hits > 0) {
+              set resp.http.X-Cache = "HIT";
+              set resp.http.X-Cache-Hits = obj.hits;
+          } else {
+              set resp.http.X-Cache = "MISS";
+          }
+      }
+
+      # vcl_hit is deliberately NOT defined. The current builtin is simply
+      # `return (deliver)` [1], and the old three-branch grace ladder
+      # (obj.ttl >= 0s ... obj.ttl + obj.grace > 0s ... return (restart)) is
+      # obsolete: "Note that the condition obj.ttl + obj.grace > 0s will (in sub
+      # vcl_hit) always evaluate to true. In earlier versions (6.0.0 and
+      # earlier), this was not the case" [2]. That ladder is still copied from
+      # guide to guide, and Magento's generated VCL still contains it.
+  - path: docker-compose.varnish.yml
+    content: |
+      # keel-generated: Varnish {{varnish.version}} in front of the application.
+      # Standalone: docker compose -f docker-compose.varnish.yml up -d
+      # Or merged:  docker compose -f docker-compose.yml -f docker-compose.varnish.yml up -d
+      services:
+        varnish:
+          image: varnish:{{varnish.version}}
+          restart: unless-stopped
+          environment:
+            # Storage size. "By default, the containers will use a cache size of
+            # 100MB, which is usually a bit too small".
+            # https://hub.docker.com/_/varnish
+            #
+            # Read this number correctly: it is the NET size of cached objects.
+            # Two things sit on top of it, both documented: "varnishd also
+            # requires memory outside the storage engine in the order of 1KB per
+            # object" and "due to fragmentation, the amount of memory actually
+            # used by the malloc implementation might be substantially higher by
+            # a factor of typically two to four times".
+            # https://github.com/varnishcache/varnish-cache/blob/master/doc/sphinx/users-guide/storage-backends.rst
+            #
+            # Arithmetic: 512m of objects plus 1 KB each (about 50 MB for 50,000
+            # pages) times a fragmentation factor of two is roughly 1.1 GB of
+            # resident memory. So a 512m cache wants a container limit near
+            # 1.5 GB, not 512 MB. Sizing the cache at the container's memory
+            # limit is how Varnish gets OOM-killed under a cache fill.
+            VARNISH_SIZE: "{{varnish.size}}"
+          volumes:
+            - ./.keel/varnish/default.vcl:/etc/varnish/default.vcl:ro
+          # Both of these are recommended by the image: "mount the working
+          # directory as tmpfs to make sure disk I/O isn't a bottleneck" and
+          # "allow Varnish to lock those memory-mapped files so they aren't paged
+          # out by the kernel". The shared memory log is written constantly, so
+          # on a bind-mounted or overlay filesystem it is a real bottleneck.
+          tmpfs:
+            - /var/lib/varnish/varnishd:exec
+          ulimits:
+            memlock: {soft: -1, hard: -1}
+          ports:
+            # Varnish in front, the origin still reachable on its own port, so
+            # cached and uncached responses can be compared directly.
+            - "127.0.0.1:{{varnish.localPort}}:80"
+          healthcheck:
+            # varnishadm talks to the running daemon over the management
+            # interface and reports the health of the backend, so a pass means
+            # Varnish is running AND has a working origin. A TCP check on port 80
+            # passes while every request is returning 503 Backend fetch failed.
+            test: ["CMD-SHELL", "varnishadm backend.list | grep -q healthy"]
+            interval: 15s
+            timeout: 5s
+            retries: 6
+            start_period: 20s
+      # After editing default.vcl, reload without losing the cache:
+      #   docker compose cp .keel/varnish/default.vcl varnish:/etc/varnish/default.vcl
+      #   docker compose exec varnish varnishreload
+  - path: VARNISH.md
+    content: |
+      # Varnish (scaffolded by keel)
+
+      Cached entry point http://127.0.0.1:{{varnish.localPort}} · origin
+      `{{varnish.backendHost}}:{{varnish.backendPort}}` · VCL
+      `.keel/varnish/default.vcl`.
+
+      ## What this VCL does that a default one does not
+
+      1. **Removes analytics cookies before the cache decision.** Varnish's
+         builtin VCL passes any request carrying a `Cookie` header, and an
+         analytics tag gives every visitor one on their first page view. Without
+         stripping them, the hit rate on a real site is close to zero. Session
+         cookies are deliberately left alone, so logged-in visitors still reach
+         the origin.
+      2. **Strips marketing query parameters and sorts the rest**, so a
+         newsletter campaign is not a cache miss on every click.
+      3. **Serves stale content when the origin is sick.** Objects carry 24 hours
+         of grace, capped to 10 seconds while the backend probe is healthy.
+      4. **Bans that the ban lurker can process**, matching on `obj.http.X-Url`
+         rather than `req.url`, so the ban list does not grow into a CPU cost.
+      5. **Refuses to replace a good cached page with a 500** during a background
+         refresh.
+
+      ## Invalidating
+
+          # one object
+          curl -X PURGE http://127.0.0.1:{{varnish.localPort}}/some/page
+
+          # everything under a prefix (regex)
+          curl -X BAN -H 'X-Ban-Url: ^/products/' http://127.0.0.1:{{varnish.localPort}}/
+
+      Both are restricted to the `purgers` ACL. Narrow that ACL before this is
+      reachable from anywhere else: an open purge endpoint lets anyone empty the
+      cache and put the full load on the origin.
+
+      ## What a framework still has to add
+
+      The VCL marks the spot. Two rules, and they are different for every
+      application:
+
+      - the paths that must never be cached (checkout, cart, account, admin);
+      - the static and media paths that should be served from cache even to
+        logged-in visitors, with the cookie dropped.
+
+      A framework also has to be told it is behind a cache: Magento needs
+      `system/full_page_cache/caching_application = 2`, WordPress needs a purge
+      plugin, and anything terminating TLS in front must send
+      `X-Forwarded-Proto`, which this VCL adds to the hash.
+
+      ## Version
+
+      Varnish 7.x is end of life. This pins 9.0; 8.0 and 6.0 LTS are the other
+      supported lines. Magento's `bin/magento varnish:vcl:generate` still emits
+      templates only up to `varnish7.vcl`, and its `vcl_hit` still contains the
+      grace ladder that has been obsolete since Varnish 6.0.1, which is why this
+      recipe ships a VCL rather than generating one.
+provision:
+  ddev:
+    files:
+      - path: .ddev/docker-compose.varnish.yaml
+        content: |
+          # keel-generated: Varnish {{varnish.version}} for DDEV, in front of the
+          # web container. Rationale for every setting: .keel/varnish/default.vcl
+          # and docker-compose.varnish.yml.
+          services:
+            varnish:
+              container_name: ddev-${DDEV_SITENAME}-varnish
+              image: varnish:{{varnish.version}}
+              hostname: varnish
+              restart: "no"
+              labels:
+                com.ddev.site-name: ${DDEV_SITENAME}
+                com.ddev.approot: ${DDEV_APPROOT}
+              environment:
+                - VARNISH_SIZE={{varnish.size}}
+                - VIRTUAL_HOST=$DDEV_HOSTNAME
+                - HTTP_EXPOSE={{varnish.localPort}}:80
+                - HTTPS_EXPOSE=8443:80
+              expose:
+                - "80"
+              volumes:
+                # Relative to .ddev/, so this is the project-root copy.
+                - "../.keel/varnish/default.vcl:/etc/varnish/default.vcl:ro"
+              tmpfs:
+                - /var/lib/varnish/varnishd:exec
+              ulimits:
+                memlock: {soft: -1, hard: -1}
+              healthcheck:
+                test: ["CMD-SHELL", "varnishadm backend.list | grep -q healthy"]
+                interval: 15s
+                timeout: 5s
+                retries: 6
+                start_period: 20s
+              depends_on:
+                - web
+    install:
+      - "{{restart}}"
+  compose:
+    install:
+      # docker-compose.varnish.yml is a separate file, not compose.override.yaml,
+      # so compose does not merge it automatically the way it does the override.
+      # Both have to be named or the service is written to disk and never
+      # created. The web-server recipes do not need this because their service
+      # arrives through the framework's compose.override.yaml.
+      - "docker compose -f compose.yaml -f docker-compose.varnish.yml up -d"
+  sail: {}
+  local:
+    install:
+      - "docker compose -f docker-compose.varnish.yml up -d"
