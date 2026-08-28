@@ -111,7 +111,8 @@ keel is one vocabulary across every stack. Full list:
 keel new [framework]      # scaffold a project (interactive or flag-driven)
 keel gen                  # generate components, framework-aware (artisan make, bin/console, manage.py…)
 keel new-recipe [--pack]  # scaffold your own recipe or pack
-keel adopt                # adopt an existing project so keel can manage it
+keel track [path]         # list an existing project (detect its stack; no manifest)
+keel adopt                # adopt an existing project so keel can manage it (writes a manifest)
 ```
 
 **Run & manage a project**
@@ -148,6 +149,11 @@ keel studio               # a visual stack builder in your browser
 keel console              # full-screen multi-panel terminal UI
 keel mcp                  # run as an MCP server so AI coding agents can drive keel
 ```
+
+The **console** and the **studio** offer the same actions — build a stack, track
+and manage projects, generate code, run tasks, packs and plugins — so you can work
+entirely in the terminal or in the browser. The only browser-only surface is the
+studio's visual database grid; the console gives you the database *tasks* instead.
 
 > Commands like `keel sonar` (AI-visibility audit) and `keel ai-core` (per-stack AI
 > assistant rules) come from **plugins**, not core keel — see [Extend keel](#extend-keel)

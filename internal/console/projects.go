@@ -29,6 +29,12 @@ type projectFlow struct {
 	choosing bool // false = picking a project, true = picking a task
 	task     int
 	note     string
+	// adding is the "add an existing project" prompt (the console twin of the
+	// studio's "Add an existing project" input), and src is the path being typed.
+	// On enter it runs `keel track <path>`, which lists the project without
+	// adopting it — the same operation the studio's add endpoint performs.
+	adding bool
+	src    string
 }
 
 func newProjectFlow() *projectFlow {
@@ -51,6 +57,9 @@ func (f *projectFlow) reload() {
 }
 
 func (f *projectFlow) update(msg tea.KeyMsg) (Action, bool) {
+	if f.adding {
+		return f.updateAdd(msg)
+	}
 	if f.choosing {
 		switch msg.String() {
 		case "up", "k":
@@ -94,6 +103,9 @@ func (f *projectFlow) update(msg tea.KeyMsg) (Action, bool) {
 		if len(f.items) > 0 {
 			f.choosing, f.task, f.note = true, 0, ""
 		}
+	case "a":
+		// Add an existing project — the console twin of the studio's add input.
+		f.adding, f.src, f.note = true, "", ""
 	case "r":
 		f.reload()
 		f.note = "rescanned"
@@ -103,13 +115,54 @@ func (f *projectFlow) update(msg tea.KeyMsg) (Action, bool) {
 	return Action{}, false
 }
 
+// updateAdd drives the "add an existing project" path prompt. On enter it runs
+// `keel track <path>` (list the project, no manifest) and stays in the flow; the
+// console reloads the list when the action returns, so the new project appears.
+// It mirrors the Plugins area's install prompt so both read the same way.
+func (f *projectFlow) updateAdd(msg tea.KeyMsg) (Action, bool) {
+	switch msg.String() {
+	case "enter":
+		src := strings.TrimSpace(f.src)
+		if src == "" {
+			f.note = "enter a project path"
+			return Action{}, false
+		}
+		f.adding, f.src, f.note = false, "", ""
+		return Action{Kind: "argv", Argv: []string{"track", src}}, false
+	case "esc":
+		f.adding, f.src = false, ""
+	case "backspace":
+		if r := []rune(f.src); len(r) > 0 {
+			f.src = string(r[:len(r)-1])
+		} else {
+			f.adding = false
+		}
+	default:
+		if s := msg.String(); len(s) == 1 {
+			f.src += s
+		}
+	}
+	return Action{}, false
+}
+
 func (f *projectFlow) view(w int) string {
 	var b strings.Builder
 	b.WriteString(mainTitle.Render("Projects") + "\n")
 
+	if f.adding {
+		b.WriteString(styHead.Render("Add an existing project") + "\n")
+		b.WriteString(styDim.Render("Type or paste a path. keel detects the stack and lists it;\nrun adopt afterwards to make it keel-managed.") + "\n\n")
+		b.WriteString("  " + styWord.Render("> ") + f.src + styWord.Render("_") + "\n")
+		if f.note != "" {
+			b.WriteString("\n" + styDim.Render(f.note) + "\n")
+		}
+		b.WriteString("\n" + styDim.Render("enter track · esc cancel"))
+		return b.String()
+	}
+
 	if len(f.items) == 0 {
 		b.WriteString(styDim.Render("keel is not tracking any projects yet.") + "\n\n")
-		b.WriteString(cmd(w, "keel adopt <path>", "detect the stack and make it keel-managed"))
+		b.WriteString(cmd(w, "a", "add an existing project (track it, like the studio)"))
 		b.WriteString(cmd(w, "keel new", "build a new one"))
 		return b.String()
 	}
@@ -153,6 +206,6 @@ func (f *projectFlow) view(w int) string {
 	if f.note != "" {
 		b.WriteString(styHead.Render(f.note) + "\n\n")
 	}
-	b.WriteString(styDim.Render(trimTo("enter choose a task · r rescan · esc back", w)))
+	b.WriteString(styDim.Render(trimTo("enter choose a task · a add an existing project · r rescan · esc back", w)))
 	return b.String()
 }
