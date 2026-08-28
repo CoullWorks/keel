@@ -164,6 +164,11 @@ provision:
               # app can take that long to drain. The proxy gets the same grace
               # period rather than being killed first.
               stop_grace_period: 30s
+  # DDEV runs this project with --webserver-type=generic, so Traefik forwards
+  # straight to the dev-server daemon on :3000 and no nginx is in the local
+  # path. The server block above is still written, so the deployment shape is
+  # version-controlled next to the code that assumes it.
+  ddev: {}
   # Native env: no container to add. The server block above still applies, but
   # change proxy_pass to http://127.0.0.1:3000 because there is no `app` host.
   local: {}

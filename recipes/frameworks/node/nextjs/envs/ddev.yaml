@@ -1,0 +1,51 @@
+id: nextjs-ddev
+schema_version: 2
+kind: env
+env_family: ddev
+label: DDEV
+bin: ddev
+appliesTo: [nextjs]
+provides: [env, docker]
+priority: -10
+updated: 2026-08-28
+# DDEV can host a Node app, not just PHP: a `generic` project type with a
+# `generic` webserver runs no nginx/Apache, and Traefik forwards straight to the
+# dev server started as a web_extra_daemon. This is the same shape fastapi-ddev
+# uses for uvicorn. The framework's own steps stay env-agnostic: keel runs
+# {{start}} -> {{exec}} npm install -> {{restart}} -> {{exec}} npm run build, so
+# supplying the command vars below is all a Node framework needs to gain DDEV.
+#
+# Not the default (that stays Local); this is offered when you ask for it with
+# --env ddev, so a single `.ddev.site` HTTPS URL and DDEV's add-ons are on hand.
+commands:
+  start: "ddev start"
+  # Where the project can be opened once the build finishes.
+  site_url: "https://{{project}}.ddev.site"
+  # How this environment tears itself down when a build fails partway, so DDEV's
+  # containers, volumes and network do not linger holding a bind mount to a path
+  # keel has already removed.
+  down: "ddev delete -Oy"
+  restart: "ddev restart"
+  exec: "ddev exec"
+  redis_addon: "ddev add-on get ddev/ddev-redis"
+install:
+  # The database comes from the chosen db recipe (which writes its own DDEV
+  # config); nodejs-version pins the runtime DDEV puts in the web container.
+  - "ddev config --project-type=generic --webserver-type=generic --docroot='' --nodejs-version={{pin.node_version}} {{db.ddev_flag}}"
+files:
+  - path: .ddev/config.nextjs.yaml
+    content: |
+      # Traefik forwards straight to the Next.js dev server on :3000 (generic
+      # webserver = no nginx and no Apache in the local path).
+      web_extra_exposed_ports:
+        - name: nextjs
+          container_port: 3000
+          http_port: 80
+          https_port: 443
+      web_extra_daemons:
+        - name: nextjs
+          # The daemon starts with `ddev start`, before keel has run
+          # `ddev exec npm install`, so wait for the install to land (the same
+          # guard the compose env uses) rather than crash-looping first.
+          command: "sh -c 'until [ -f node_modules/.package-lock.json ]; do sleep 2; done; exec npm run dev'"
+          directory: /var/www/html

@@ -75,17 +75,35 @@ func newCmd() *cobra.Command {
 				if prefer == "" {
 					return "", nil
 				}
-				r, ok := reg.Get(prefer)
-				if !ok {
-					return "", fmt.Errorf("unknown %s %q for --%s", kind, prefer, flag)
+				// An exact id (or alias) that applies to this framework always wins,
+				// so `--env django-docker`, `--db postgres` and Laravel's bare-id
+				// `ddev`/`sail` keep resolving exactly as before.
+				if r, ok := reg.Get(prefer); ok && r.Kind == kind && r.AppliesToFramework(fw) {
+					return r.ID, nil
 				}
-				if r.Kind != kind {
-					return "", fmt.Errorf("--%s %s is a %s recipe, not a %s", flag, prefer, r.Kind, kind)
+				// `--env ddev` names a family, not one framework's recipe. Every
+				// framework namespaces its env (fastapi-ddev, nextjs-docker) except
+				// Laravel's legacy bare `ddev`/`sail`, so resolving by id alone made
+				// `--env ddev` resolve to Laravel's recipe and get refused everywhere
+				// else - even though fastapi-ddev and django-ddev exist. Resolve the
+				// family (docker is the everyday name for the compose family) to this
+				// framework's own variant.
+				if kind == recipe.Env {
+					if id, ok := envByFamily(reg, fw, prefer); ok {
+						return id, nil
+					}
 				}
-				if !r.AppliesToFramework(fw) {
+				// Tell "known recipe, wrong framework" apart from "no such thing".
+				if r, ok := reg.Get(prefer); ok {
+					if r.Kind != kind {
+						return "", fmt.Errorf("--%s %s is a %s recipe, not a %s", flag, prefer, r.Kind, kind)
+					}
 					return "", fmt.Errorf("--%s %s does not apply to %s", flag, prefer, fw)
 				}
-				return r.ID, nil
+				if kind == recipe.Env && isEnvFamilyName(prefer) {
+					return "", fmt.Errorf("--%s %s does not apply to %s", flag, prefer, fw)
+				}
+				return "", fmt.Errorf("unknown %s %q for --%s", kind, prefer, flag)
 			}
 			env, err = requested(recipe.Env, "env", env)
 			if err != nil {
@@ -355,6 +373,34 @@ func langVariant(reg *recipe.Registry, fw string, js, ts bool) (string, error) {
 		return jsID, nil
 	}
 	return tsID, nil
+}
+
+// envByFamily resolves an env-family name to the env recipe of that family that
+// applies to fw. It lets `--env ddev` mean "this framework's ddev env" instead
+// of one hard-coded recipe id: fastapi-ddev for FastAPI, nextjs-ddev for Next.js,
+// the bare `ddev` for Laravel. `docker` is accepted as the everyday name for the
+// compose family, whose recipes are all named `<framework>-docker`.
+func envByFamily(reg *recipe.Registry, fw, name string) (string, bool) {
+	fam := name
+	if name == "docker" {
+		fam = recipe.FamilyCompose
+	}
+	if !recipe.EnvFamilies[fam] {
+		return "", false
+	}
+	for _, r := range reg.ForFramework(fw, recipe.Env) {
+		if r.EnvFamily == fam {
+			return r.ID, true
+		}
+	}
+	return "", false
+}
+
+// isEnvFamilyName reports whether name is an env-family name a user might pass to
+// --env (including the `docker` synonym for compose). Used only to word the error
+// when the family exists but not for this framework.
+func isEnvFamilyName(name string) bool {
+	return name == "docker" || recipe.EnvFamilies[name]
 }
 
 // frameworkFromIDs returns the framework recipe id among ids, or "" if none is
