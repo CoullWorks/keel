@@ -102,6 +102,11 @@ provision:
   # No compose fragment: the web server is the runtime image, selected by
   # WEB_TARGET above, so there is no extra container to add.
   compose: {}
+  # DDEV runs this project with --webserver-type=generic, so Traefik forwards
+  # straight to the dev-server daemon on :4321 and no nginx is in the local
+  # path. The server block above is still written, so the deployment shape is
+  # version-controlled next to the code that assumes it.
+  ddev: {}
   # Native env: serve dist/ from a host nginx. The block above applies with
   # `root` changed to wherever dist/ was copied.
   local: {}

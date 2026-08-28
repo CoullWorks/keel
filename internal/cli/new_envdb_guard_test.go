@@ -3,7 +3,44 @@ package cli
 import (
 	"strings"
 	"testing"
+
+	"github.com/coullworks/keel/internal/recipe"
 )
+
+// TestNewEnvFlagResolvesByFamily is the fix for the bug where `--env ddev` only
+// ever meant Laravel's bare-id `ddev` recipe, so `keel new fastapi --env ddev`
+// was refused even though fastapi-ddev exists. `--env <family>` must resolve to
+// the env recipe of that family that applies to the named framework.
+func TestNewEnvFlagResolvesByFamily(t *testing.T) {
+	reg, err := loadCatalog(t)
+	if err != nil {
+		t.Skip("no catalogue")
+	}
+	// (framework, family) pairs that must resolve, given a matching recipe exists.
+	cases := []struct{ fw, fam string }{
+		{"fastapi", "ddev"},  // Python has a ddev recipe; the flag must reach it
+		{"django", "ddev"},   // ditto
+		{"fastapi", "local"}, // families other than ddev resolve the same way
+		{"laravel", "ddev"},  // Laravel's bare-id recipe still resolves
+		{"laravel", "sail"},  // and its sail recipe
+		{"django", "docker"}, // "docker" is the everyday name for the compose family
+	}
+	for _, c := range cases {
+		if len(reg.ForFramework(c.fw, recipe.Env)) == 0 {
+			continue
+		}
+		isolate(t)
+		if _, err := runRoot(t, "new", c.fw, "--env", c.fam, "--dry-run"); err != nil {
+			t.Errorf("keel new %s --env %s should resolve by family, got: %v", c.fw, c.fam, err)
+		}
+	}
+	// A token that is neither an id nor a family is still a clear "unknown".
+	isolate(t)
+	if _, err := runRoot(t, "new", "fastapi", "--env", "banana", "--dry-run"); err == nil ||
+		!strings.Contains(err.Error(), "unknown env") {
+		t.Errorf("--env banana should be an unknown-env error, got: %v", err)
+	}
+}
 
 // TestNewGuardsIncompatibleEnvDB is the flag-path half of the Supabase + compose
 // bug. `keel new django --env django-docker --db supabase` cannot be built —
