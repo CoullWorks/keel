@@ -49,7 +49,7 @@ var standalone = map[string]bool{
 	"plugins": true, "studio": true, "sponsor": true, "self-update": true, "mcp": true,
 	"version": true, "completion": true, "help": true, "projects": true,
 	"init": true, "proxy": true, "reset": true,
-	"optimize": true, "adopt": true, "commerce": true, "brand": true,
+	"optimize": true, "adopt": true, "track": true, "commerce": true, "brand": true,
 	// config edits keel's own profile (the same file init writes); it is
 	// meaningful anywhere, with no project.
 	"config": true,

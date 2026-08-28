@@ -79,7 +79,7 @@ func rootCmd() *cobra.Command {
 			return runConsole(cmd)
 		},
 	}
-	root.AddCommand(newCmd(), initCmd(), configCmd(), doctorCmd(), genCmd(), recipesCmd(), newRecipeCmd(), studioCmd(), consoleCmd(), sponsorCmd(), dbCmd(), brandCmd(), secretsCmd(), statusCmd(), serviceCmd(), updateCmd(), deployCmd(), adoptCmd(), optimizeCmd(), mcpCmd(), runCmd(), selfUpdateCmd(), commerceCmd(), pluginsCmd(), deleteCmd(), resetCmd(), proxyCmd(), addCmd(), removeCmd())
+	root.AddCommand(newCmd(), initCmd(), configCmd(), doctorCmd(), genCmd(), recipesCmd(), newRecipeCmd(), studioCmd(), consoleCmd(), sponsorCmd(), dbCmd(), brandCmd(), secretsCmd(), statusCmd(), serviceCmd(), updateCmd(), deployCmd(), adoptCmd(), trackCmd(), optimizeCmd(), mcpCmd(), runCmd(), selfUpdateCmd(), commerceCmd(), pluginsCmd(), deleteCmd(), resetCmd(), proxyCmd(), addCmd(), removeCmd())
 	root.AddCommand(pluginCommands()...)
 	return root
 }
