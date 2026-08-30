@@ -203,6 +203,11 @@ A plugin's code stays **untrusted until you `trust` it**, and each capability
 (`net`, `secrets`, `exec`) is granted separately. See
 [docs/PLUGIN-STANDARD.md](docs/PLUGIN-STANDARD.md) to build one.
 
+**Start from a reference — fork it, keep what you need:**
+
+- **[keel-plugin-example](https://github.com/coullworks/keel-plugin-example)** — one plugin that demonstrates *every* extension point (commands, studio screens/pages/actions, wizard steps, the `keel.call` bridge, recipes).
+- **[keel-pack-example](https://github.com/coullworks/keel-pack-example)** — a data-only pack showing *every* recipe kind (`env`, `db`, `config`, `service`, `addon`, `generator`) and every lifecycle hook.
+
 Recipes are data, and packs are git repos of recipe YAML plus lifecycle hooks:
 
 ```sh
