@@ -65,6 +65,16 @@ func TestEveryWebServerConfigParses(t *testing.T) {
 				if err := writeTree(dir, files); err != nil {
 					t.Fatal(err)
 				}
+				// Pre-create the bind-mount source dirs. If a plan writes no file
+				// under conf.d, the dir doesn't exist, and `docker run -v` then
+				// creates it as root — which defeats t.TempDir()'s cleanup
+				// (RemoveAll: unlinkat conf.d: permission denied). Owning them
+				// here keeps cleanup working.
+				for _, d := range []string{"docker/nginx/conf.d", "docker/apache/conf.d"} {
+					if err := os.MkdirAll(filepath.Join(dir, d), 0o755); err != nil {
+						t.Fatal(err)
+					}
+				}
 				name := fw.ID + "/" + env.ID + "/" + web.ID
 				switch {
 				case hasFile(files, ".keel/nginx/nginx.conf"):

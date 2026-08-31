@@ -14,4 +14,9 @@ updated: 2026-08-13
 install:
   - "git init -q"
   - "git add -A"
+  # Fall back to a local identity only when the machine has none configured (a
+  # fresh box or CI), so the first commit never fails with "Author identity
+  # unknown"; a user who already has git configured keeps their own identity.
+  - "git config user.name >/dev/null 2>&1 || git config user.name keel"
+  - "git config user.email >/dev/null 2>&1 || git config user.email keel@localhost"
   - "git commit -q -m 'Initial commit, scaffolded with keel'"
