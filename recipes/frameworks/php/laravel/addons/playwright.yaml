@@ -1,0 +1,42 @@
+id: laravel-playwright
+schema_version: 2
+kind: addon
+label: Playwright (end-to-end browser tests)
+appliesTo: [laravel]
+provides: [e2e-tests]
+updated: 2026-08-31
+# The E2E half of the Laravel test suite: `php artisan test` (Pest/PHPUnit) covers
+# units and feature tests, Playwright drives a real browser against the running
+# app. Laravel ships a package.json for Vite, so Playwright installs as a dev
+# dependency alongside it. Opt-in via --with laravel-playwright.
+install:
+  - "{{exec}} npm install -D @playwright/test"
+  # One place names the e2e task, so `keel run test:e2e` has something to run.
+  - "{{exec}} npm pkg set scripts.test:e2e=\"playwright test\""
+smoke:
+  # The install is what this recipe owns; a full browser run needs the app up,
+  # which the boot verify already proves. `--version` confirms the runner
+  # resolved without pulling a browser during the offline smoke.
+  - "{{exec}} npx playwright --version"
+files:
+  - path: playwright.config.ts
+    content: |
+      import { defineConfig } from "@playwright/test";
+
+      // keel-generated. baseURL is the site keel serves for this environment
+      // (the DDEV URL, or localhost + the published port), so `keel run test:e2e`
+      // hits the same app the stack brings up.
+      export default defineConfig({
+        testDir: "./e2e",
+        use: { baseURL: "{{site_url}}" },
+      });
+  - path: e2e/home.spec.ts
+    content: |
+      import { expect, test } from "@playwright/test";
+
+      // keel-generated. Proves the runner, the config and the app agree. Replace
+      // it with a real end-to-end flow.
+      test("the home page loads", async ({ page }) => {
+        const res = await page.goto("/");
+        expect(res?.ok()).toBeTruthy();
+      });
