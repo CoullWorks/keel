@@ -292,6 +292,8 @@ pack, or fetching a framework's own installer.
 keel is free and open source. If it saves you time: `keel sponsor` (or
 [github.com/sponsors/coullworks](https://github.com/sponsors/coullworks)).
 
+Or you can PP - ttechitsolutions@gmail.com
+
 ## License
 
 [MIT](LICENSE) © CoullWorks
