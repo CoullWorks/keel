@@ -67,6 +67,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node || '22' }}
+      # Newer npm than the one bundled with Node: works around an arborist
+      # regression ("Cannot read properties of null (reading 'edgesOut')") that
+      # breaks a fresh `npm install` of the Nuxt dependency tree.
+      - run: npm install -g npm@latest
       - run: go build -o keel ./cmd/keel
       - name: Verify ${{ matrix.framework }} ${{ matrix.with }}
         if: ${{ github.event.inputs.framework == '' || github.event.inputs.framework == matrix.framework }}
@@ -118,6 +122,10 @@ jobs:
         with:
           go-version: "1.24"
       - uses: ddev/github-action-setup-ddev@v1
+        with:
+          # keel's own repo has no .ddev project; the action's default autostart
+          # tries to start one and fails. keel starts ddev itself during verify.
+          autostart: false
       - run: go build -o keel ./cmd/keel
       - name: Verify ${{ matrix.framework }} (DDEV)
         if: ${{ github.event.inputs.framework == '' || github.event.inputs.framework == matrix.framework }}
