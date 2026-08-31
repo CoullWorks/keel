@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.0](https://github.com/CoullWorks/keel/compare/v1.1.0...v1.2.0) (2026-08-31)
+
+
+### Features
+
+* **laravel:** add Playwright E2E addon ([#10](https://github.com/CoullWorks/keel/issues/10)) ([01fb9aa](https://github.com/CoullWorks/keel/commit/01fb9aa052117b5da409866c5ca7b3b4803aff8e))
+
 ## [1.1.0](https://github.com/CoullWorks/keel/compare/v1.0.2...v1.1.0) (2026-08-31)
 
 
