@@ -8,6 +8,8 @@ name: release-please
 on:
   push:
     branches: [main]
+  workflow_dispatch: {} # let a maintainer run it on demand (e.g. after enabling
+    # the org "Actions can create PRs" setting) without waiting for a push.
 
 permissions:
   contents: write

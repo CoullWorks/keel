@@ -1,0 +1,126 @@
+id: ollama
+schema_version: 2
+kind: service
+label: Ollama (local LLM runtime, OpenAI-compatible API)
+category: AI
+# A local model server. keel already ships the retrieval half of a local AI stack
+# (chroma, qdrant, pgvector); Ollama is the inference half. It runs open models on
+# your machine and exposes both its native API and an OpenAI-compatible one on
+# 11434, so app code that targets OpenAI can point at it by changing the base URL.
+# CPU by default; models are pulled on demand into a named volume.
+appliesTo: [fastapi, django, flask, reflex, streamlit, gradio, dash, nextjs, express, nestjs]
+provides: [ollama, llm, inference]
+default: false
+updated: 2026-08-31
+vars:
+  # Pinned, not latest, for reproducible builds. https://github.com/ollama/ollama/releases
+  ollama.version: "0.5.7"
+  ollama.host: ollama
+  ollama.port: "11434"
+  ollama.localPort: "11434"
+  # A small default so `ollama pull` is quick on a laptop; swap for any tag at
+  # https://ollama.com/library. The server runs fine with no model pulled; you
+  # pull one when you first need it (see OLLAMA.md).
+  ollama.model: "llama3.2"
+files:
+  - path: docker-compose.ollama.yml
+    content: |
+      # keel-generated: Ollama, a local LLM runtime.
+      #
+      # Standalone: docker compose -f docker-compose.ollama.yml up -d
+      # Or merged:  docker compose -f docker-compose.yml -f docker-compose.ollama.yml up -d
+      # First model: docker compose -f docker-compose.ollama.yml exec ollama ollama pull {{ollama.model}}
+      # Then the API is at http://localhost:{{ollama.localPort}} (see OLLAMA.md).
+      services:
+        ollama:
+          image: ollama/ollama:{{ollama.version}}
+          restart: unless-stopped
+          ports:
+            # Loopback only: the model server stays on this machine.
+            - "127.0.0.1:{{ollama.localPort}}:11434"
+          volumes:
+            # Models are large; a named volume keeps them across restarts so you
+            # pull each one once.
+            - ollama-models:/root/.ollama
+          healthcheck:
+            # `ollama list` talks to the local server, so it proves the runtime is
+            # answering (not just that the port is open). Passes with no model
+            # pulled. The ollama binary is in the image.
+            test: ["CMD", "ollama", "list"]
+            interval: 10s
+            timeout: 5s
+            retries: 10
+            start_period: 10s
+      volumes:
+        ollama-models:
+  - path: OLLAMA.md
+    content: |
+      # Ollama (scaffolded by keel)
+
+      A local LLM runtime. Runs open models on your machine and serves them on
+      `11434`, with both Ollama's native API and an OpenAI-compatible API.
+
+      - **API base (in-container):** `http://{{ollama.host}}:11434`
+      - **API base (host):** `http://localhost:{{ollama.localPort}}`
+
+      ## Pull a model (the server starts without one)
+
+          docker compose -f docker-compose.ollama.yml exec ollama ollama pull {{ollama.model}}
+
+      Browse models at https://ollama.com/library. Bigger models want more RAM;
+      start small on a laptop.
+
+      ## Call it from the app
+
+      - **OpenAI-compatible** (point any OpenAI SDK at the base URL):
+
+            base_url = "http://{{ollama.host}}:11434/v1"   # from another container
+            api_key  = "ollama"                             # any non-empty string
+
+      - **Native API**:
+
+            curl http://localhost:{{ollama.localPort}}/api/generate \
+              -d '{"model":"{{ollama.model}}","prompt":"hello"}'
+
+      ## GPU
+
+      This sidecar is CPU-only, which works everywhere. For NVIDIA GPUs, add a
+      `deploy.resources.reservations.devices` block and the NVIDIA container
+      toolkit on the host. https://hub.docker.com/r/ollama/ollama
+provision:
+  ddev:
+    files:
+      - path: .ddev/docker-compose.ollama.yaml
+        content: |
+          # keel-generated: Ollama for DDEV. Reach it at ollama:11434 from the app.
+          services:
+            ollama:
+              container_name: ddev-${DDEV_SITENAME}-ollama
+              image: ollama/ollama:{{ollama.version}}
+              hostname: ollama
+              restart: "no"
+              labels:
+                com.ddev.site-name: ${DDEV_SITENAME}
+                com.ddev.approot: ${DDEV_APPROOT}
+              expose:
+                - "11434"
+              volumes:
+                - "ollama-models:/root/.ollama"
+              healthcheck:
+                test: ["CMD", "ollama", "list"]
+                interval: 10s
+                timeout: 5s
+                retries: 10
+                start_period: 10s
+            web:
+              depends_on:
+                - ollama
+          volumes:
+            ollama-models:
+    install:
+      - "{{restart}}"
+  compose: {}
+  sail: {}
+  local:
+    install:
+      - "docker compose -f docker-compose.ollama.yml up -d"
