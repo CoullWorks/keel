@@ -1,0 +1,117 @@
+id: mailpit
+schema_version: 2
+kind: service
+label: Mailpit (local mail catcher, SMTP sink + web inbox)
+category: Mail
+# A dev mail trap. Every framework keel scaffolds can send email; in local dev you
+# want that mail caught and shown, not delivered. Mailpit is a single Go binary
+# that speaks SMTP on 1025 and serves a web inbox on 8025, so you point the app's
+# mailer at it and read what it would have sent. Not for production: it delivers
+# nothing onward and stores messages in memory.
+appliesTo: [laravel, symfony, magento, magento-mageos, woocommerce, woocommerce-bedrock, django, fastapi, flask, express, nestjs, adonisjs, nextjs]
+provides: [mailpit, smtp, mail]
+default: false
+updated: 2026-08-31
+vars:
+  # Pinned minor, not latest: a moving tag turns a green build red on someone
+  # else's schedule. Bump it deliberately. https://github.com/axllent/mailpit/releases
+  mailpit.version: "v1.21"
+  mailpit.host: mailpit
+  # SMTP: what the app connects to. The app sets MAIL host=mailpit, port=1025,
+  # no auth, no TLS (a local trap needs none of it).
+  mailpit.smtpPort: "1025"
+  # Web inbox: read the caught mail here.
+  mailpit.uiPort: "8025"
+  mailpit.uiLocalPort: "8025"
+files:
+  - path: docker-compose.mailpit.yml
+    content: |
+      # keel-generated: Mailpit, a local SMTP sink with a web inbox.
+      #
+      # Standalone: docker compose -f docker-compose.mailpit.yml up -d
+      # Or merged:  docker compose -f docker-compose.yml -f docker-compose.mailpit.yml up -d
+      # Then point the app's mailer at mailpit:1025 (see MAILPIT.md) and read the
+      # caught mail at http://localhost:{{mailpit.uiLocalPort}}.
+      services:
+        mailpit:
+          image: axllent/mailpit:{{mailpit.version}}
+          restart: unless-stopped
+          environment:
+            # In-memory store: nothing is written to disk, and the inbox is empty
+            # on every restart, which is what you want for a dev trap.
+            MP_MAX_MESSAGES: "500"
+            MP_SMTP_AUTH_ACCEPT_ANY: "1"
+            MP_SMTP_AUTH_ALLOW_INSECURE: "1"
+          ports:
+            # Bound to loopback: the trap and its inbox never leave this machine.
+            - "127.0.0.1:{{mailpit.smtpPort}}:1025"
+            - "127.0.0.1:{{mailpit.uiLocalPort}}:8025"
+          healthcheck:
+            # Mailpit serves /readyz once it is accepting SMTP + HTTP. The alpine
+            # image ships busybox wget. https://mailpit.axllent.org/docs/
+            test: ["CMD", "wget", "-q", "--spider", "http://localhost:8025/readyz"]
+            interval: 10s
+            timeout: 3s
+            retries: 10
+            start_period: 5s
+  - path: MAILPIT.md
+    content: |
+      # Mailpit (scaffolded by keel)
+
+      A local mail trap. The app sends mail to Mailpit over SMTP; Mailpit catches
+      it and shows it in a web inbox instead of delivering it anywhere.
+
+      - **Web inbox:** http://localhost:{{mailpit.uiLocalPort}}
+      - **SMTP:** `{{mailpit.host}}:1025` (in-container) / `127.0.0.1:{{mailpit.smtpPort}}` (host), no auth, no TLS.
+
+      ## Point the app at it
+
+      - **Laravel** (`.env`): `MAIL_MAILER=smtp`, `MAIL_HOST={{mailpit.host}}`,
+        `MAIL_PORT=1025`, `MAIL_USERNAME=null`, `MAIL_PASSWORD=null`, `MAIL_ENCRYPTION=null`.
+      - **Symfony** (`.env`): `MAILER_DSN=smtp://{{mailpit.host}}:1025`.
+      - **Django** (`settings.py`): `EMAIL_HOST="{{mailpit.host}}"`, `EMAIL_PORT=1025`,
+        `EMAIL_USE_TLS=False`.
+      - **Node (nodemailer)**: `{ host: "{{mailpit.host}}", port: 1025, secure: false }`.
+
+      Not for production: Mailpit delivers nothing onward and keeps messages in
+      memory only.
+provision:
+  # DDEV: a project sidecar the web container can reach by name.
+  ddev:
+    files:
+      - path: .ddev/docker-compose.mailpit.yaml
+        content: |
+          # keel-generated: Mailpit for DDEV. Reach it at mailpit:1025 from the
+          # app; open the inbox with `ddev launch :8025` or the mapped host port.
+          services:
+            mailpit:
+              container_name: ddev-${DDEV_SITENAME}-mailpit
+              image: axllent/mailpit:{{mailpit.version}}
+              hostname: mailpit
+              restart: "no"
+              labels:
+                com.ddev.site-name: ${DDEV_SITENAME}
+                com.ddev.approot: ${DDEV_APPROOT}
+              environment:
+                MP_MAX_MESSAGES: "500"
+                MP_SMTP_AUTH_ACCEPT_ANY: "1"
+                MP_SMTP_AUTH_ALLOW_INSECURE: "1"
+              expose:
+                - "1025"
+                - "8025"
+              healthcheck:
+                test: ["CMD", "wget", "-q", "--spider", "http://localhost:8025/readyz"]
+                interval: 10s
+                timeout: 3s
+                retries: 10
+                start_period: 5s
+            web:
+              depends_on:
+                - mailpit
+    install:
+      - "{{restart}}"
+  compose: {}
+  sail: {}
+  local:
+    install:
+      - "docker compose -f docker-compose.mailpit.yml up -d"

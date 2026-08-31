@@ -40,6 +40,20 @@ $ keel new laravel --with filament,redis,pest
     ...
 ```
 
+## Watch it
+
+The CLI resolving and planning a whole stack (`keel new … --dry-run`, runs nothing):
+
+<p align="center">
+  <img src="assets/keel-cli-demo.gif" alt="keel CLI resolving and planning a full stack" width="820">
+</p>
+
+The studio (`keel studio`) is the same engine, driven from the browser:
+
+<p align="center">
+  <img src="assets/keel-studio-demo.gif" alt="keel studio running in the browser" width="820">
+</p>
+
 ## Why
 
 Most generators lay down *app code* and stop; environment tools spin up *services*
