@@ -28,7 +28,7 @@ func TestDryMatrixCoversEveryFrameworkAndEnv(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reg, err := catalog.Registry()
+	reg, err := catalog.RegistryBuiltin()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +108,7 @@ func dryRows(reg *recipe.Registry) []dryRow {
 // failure mode this guards: the number is a floor, so adding recipes is fine and
 // losing them is not.
 func TestDryMatrixCountIsAsserted(t *testing.T) {
-	reg, err := catalog.Registry()
+	reg, err := catalog.RegistryBuiltin()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func TestDryMatrixCountIsAsserted(t *testing.T) {
 // environment is a dead choice, which is exactly what the per-framework recipes
 // used to be.
 func TestEveryDatabaseIsBuildableSomewhere(t *testing.T) {
-	reg, err := catalog.Registry()
+	reg, err := catalog.RegistryBuiltin()
 	if err != nil {
 		t.Fatal(err)
 	}

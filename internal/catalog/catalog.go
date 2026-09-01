@@ -61,23 +61,41 @@ func RegisterPluginRecipes(fn func() []recipe.Recipe) { pluginRecipes = fn }
 // than corrupting the registry, exactly as a bad user YAML would be — but it is
 // dropped, not fatal, because one broken plugin recipe must not deny a user the
 // rest of the catalog.
-func Registry() (*recipe.Registry, error) { return load(false) }
+func Registry() (*recipe.Registry, error) { return load(false, false) }
 
 // RegistryStrict is Registry, but a malformed user recipe or pack is a hard error
 // rather than a skipped-with-warning. `keel recipes validate` uses it so a broken
 // install is reported instead of silently dropped — the one place the user is
 // asking "is everything I installed valid?".
-func RegistryStrict() (*recipe.Registry, error) { return load(true) }
+func RegistryStrict() (*recipe.Registry, error) { return load(true, false) }
+
+// RegistryBuiltin loads only the recipes embedded in the binary, skipping user
+// recipes, home-discovered packs and enabled plugins.
+//
+// keel's own tests use it. keel's coverage tests assert the *shipped* catalogue:
+// every framework builds, every env resolves, the dry matrix covers everything.
+// Folding in whatever a developer happens to have installed is wrong for that job
+// twice over — a pack's recipes are the pack's to test in its own repo, and a
+// locally installed pack or plugin must not turn keel's `make test` red while CI
+// (with a clean home) stays green.
+func RegistryBuiltin() (*recipe.Registry, error) { return load(false, true) }
 
 // load assembles the registry. A malformed built-in is always fatal (that is a
 // keel bug, not the user's). A malformed user recipe/pack is fatal only in strict
 // mode; otherwise it is skipped with a warning, so one hand-edited bad file in
 // ~/.config/keel/recipes/ cannot lock the user out of every built-in recipe and
 // brick every command that needs the catalog.
-func load(strict bool) (*recipe.Registry, error) {
+func load(strict, builtinOnly bool) (*recipe.Registry, error) {
 	reg := recipe.NewRegistry()
 	if err := recipe.LoadInto(reg, recipes.FS, "builtin", ""); err != nil {
 		return nil, err
+	}
+
+	// Built-ins only: no user dir, no home-discovered packs, no plugins. keel's
+	// coverage tests stop here so they test keel, not whatever is installed.
+	if builtinOnly {
+		reg.PropagateFamilyApplicability()
+		return reg, nil
 	}
 
 	// skip reports a bad user recipe: fatal in strict mode, otherwise a warning
