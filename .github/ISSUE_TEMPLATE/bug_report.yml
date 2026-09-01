@@ -1,0 +1,63 @@
+name: Bug report
+description: Something in keel does not work as expected
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. Please redact any secrets from command output before pasting.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did keel actually do?
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: What should it have done instead?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The exact commands you ran, in order.
+      placeholder: |
+        1. keel new nextjs -o demo --env nextjs-local
+        2. keel run test
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: keel version
+      description: Output of `keel --version`.
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: OS / arch
+      options:
+        - Linux (x86_64)
+        - Linux (arm64)
+        - macOS (Apple silicon)
+        - macOS (Intel)
+        - Windows
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: framework
+    attributes:
+      label: Framework / stack (if relevant)
+      description: e.g. laravel, nextjs, fastapi
+  - type: textarea
+    id: output
+    attributes:
+      label: Command output
+      description: Paste the command and its output. Use `--json` where a command supports it, and redact secrets first.
+      render: shell
