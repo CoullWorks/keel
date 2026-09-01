@@ -1,0 +1,39 @@
+id: symfony-playwright
+schema_version: 2
+kind: addon
+label: Playwright (end-to-end browser tests)
+appliesTo: [symfony]
+provides: [e2e-tests]
+updated: 2026-09-01
+# The E2E half of the test suite: PHPUnit covers units, Playwright drives a real
+# browser against the running app. The Symfony skeleton ships no package.json, so
+# this bootstraps a minimal one just for the e2e runner. Opt-in via
+# --with symfony-playwright; it ships a working home-page test to build from.
+install:
+  - "{{exec}} npm init -y"
+  - "{{exec}} npm install -D @playwright/test"
+  # One place names the e2e task, so `keel run test:e2e` has something to run.
+  - "{{exec}} npm pkg set scripts.test:e2e=\"playwright test\""
+smoke:
+  - "{{exec}} npx playwright --version"
+files:
+  - path: playwright.config.ts
+    content: |
+      import { defineConfig } from "@playwright/test";
+
+      // keel-generated. baseURL is the site keel serves for this environment, so
+      // `keel run test:e2e` hits the same app the stack brings up.
+      export default defineConfig({
+        testDir: "./e2e",
+        use: { baseURL: "{{site_url}}" },
+      });
+  - path: e2e/home.spec.ts
+    content: |
+      import { expect, test } from "@playwright/test";
+
+      // keel-generated. Proves the runner, the config and the app agree. Replace
+      // it with a real end-to-end flow.
+      test("the home page loads", async ({ page }) => {
+        const res = await page.goto("/");
+        expect(res?.ok()).toBeTruthy();
+      });

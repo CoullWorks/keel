@@ -1,0 +1,37 @@
+id: python-playwright
+schema_version: 2
+kind: addon
+label: Playwright (end-to-end browser tests, via pytest-playwright)
+appliesTo: [django, fastapi, flask]
+provides: [e2e-tests]
+updated: 2026-09-01
+# The E2E half of the test suite: pytest covers units and API tests, Playwright
+# drives a real browser against the running app through pytest-playwright's page
+# fixture. Opt-in via --with python-playwright; it ships a working home-page test.
+# Run `uv run playwright install chromium` once to fetch the browser, then
+# `uv run pytest tests/e2e`.
+install:
+  - "{{exec}} uv add --dev pytest-playwright"
+smoke:
+  # The install is what this recipe owns; a real run needs a browser and the app
+  # up. `--version` confirms the runner resolved without pulling a browser during
+  # the offline smoke.
+  - "{{exec}} uv run playwright --version"
+files:
+  - path: tests/e2e/conftest.py
+    content: |
+      import pytest
+
+      # keel-generated. Points pytest-playwright at the site keel serves for this
+      # environment, so page.goto("/") hits the app the stack brings up. Overrides
+      # pytest-base-url's default so you do not have to pass --base-url.
+      @pytest.fixture
+      def base_url():
+          return "{{site_url}}"
+  - path: tests/e2e/test_home.py
+    content: |
+      # keel-generated. Proves the runner, the config and the app agree. Replace
+      # it with a real end-to-end flow.
+      def test_home_page_loads(page):
+          res = page.goto("/")
+          assert res is not None and res.ok

@@ -27,6 +27,7 @@ var pureLibraries = map[string]bool{
 	"python-scrapy":       true, // a crawling framework you write spiders against, not a Django app
 	"python-datascience":  true, // dataframe/ML libraries your own code imports
 	"python-vectors":      true, // vector-store clients your own code imports
+	"python-playwright":   true, // an e2e test runner plugin; configured via pytest, not Django settings
 }
 
 // TestDjangoAddonsRegisterThemselves is the guard for the worst class of defect
