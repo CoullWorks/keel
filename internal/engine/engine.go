@@ -23,6 +23,7 @@ import (
 	"github.com/coullworks/keel/internal/envfile"
 	"github.com/coullworks/keel/internal/recipe"
 	"github.com/coullworks/keel/internal/resolver"
+	"github.com/coullworks/keel/internal/safepath"
 	"gopkg.in/yaml.v3"
 )
 
@@ -935,7 +936,11 @@ func applyPatches(dir string, patches []recipe.Patch, vars map[string]string, ou
 		for k, v := range p.Set {
 			rendered[k] = render(v, vars)
 		}
-		ok, err := PatchFile(filepath.Join(dir, render(p.File, vars)), rendered)
+		fp, err := safepath.Join(dir, render(p.File, vars))
+		if err != nil {
+			return err
+		}
+		ok, err := PatchFile(fp, rendered)
 		if err != nil {
 			return err
 		}
@@ -949,7 +954,10 @@ func applyPatches(dir string, patches []recipe.Patch, vars map[string]string, ou
 // WriteFile writes rel (relative to dir) with content, creating parent dirs.
 // Exported so `keel gen` can emit generated component files.
 func WriteFile(dir, rel, content string) error {
-	p := filepath.Join(dir, rel)
+	p, err := safepath.Join(dir, rel)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
@@ -1002,7 +1010,9 @@ func writeManifest(dir string, plan *resolver.Plan) error {
 
 // basePath is where a keel-owned file's last-generated content is snapshotted,
 // used as the merge base by `keel update`.
-func basePath(dir, rel string) string { return filepath.Join(dir, ".keel", "base", rel) }
+func basePath(dir, rel string) (string, error) {
+	return safepath.Join(filepath.Join(dir, ".keel", "base"), rel)
+}
 
 // warnIfBaseUnwritten snapshots a generated file's merge base and, if that write
 // fails, warns instead of silently swallowing it. The base is what `keel update`
@@ -1019,7 +1029,10 @@ func warnIfBaseUnwritten(dir, rel, content string) {
 
 // WriteBase snapshots a generated file's content (the merge base for updates).
 func WriteBase(dir, rel, content string) error {
-	p := basePath(dir, rel)
+	p, err := basePath(dir, rel)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
@@ -1029,7 +1042,11 @@ func WriteBase(dir, rel, content string) error {
 // ReadBase returns the snapshotted base content for a file (false if none — e.g.
 // a project built before snapshots existed).
 func ReadBase(dir, rel string) (string, bool) {
-	b, err := os.ReadFile(basePath(dir, rel))
+	p, err := basePath(dir, rel)
+	if err != nil {
+		return "", false
+	}
+	b, err := os.ReadFile(p)
 	if err != nil {
 		return "", false
 	}
