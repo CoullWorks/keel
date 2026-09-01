@@ -936,13 +936,14 @@ func applyPatches(dir string, patches []recipe.Patch, vars map[string]string, ou
 			rendered[k] = render(v, vars)
 		}
 		rel := render(p.File, vars)
+		fp := filepath.Join(dir, rel)
 		// Confine the patch target to the project: a pack must not patch a file
-		// outside the tree it is building. filepath.IsLocal rejects "..", absolute
-		// and rooted paths, and is the barrier the path-traversal analysis reads.
-		if !filepath.IsLocal(rel) {
+		// outside the tree it is building. Checking the resolved path stays under
+		// dir is that guarantee and the barrier the path-traversal analysis reads.
+		if base := filepath.Clean(dir); fp != base && !strings.HasPrefix(fp, base+string(filepath.Separator)) {
 			return fmt.Errorf("refusing patch path %q: it escapes the project directory", rel)
 		}
-		ok, err := PatchFile(filepath.Join(dir, rel), rendered)
+		ok, err := PatchFile(fp, rendered)
 		if err != nil {
 			return err
 		}
@@ -956,13 +957,14 @@ func applyPatches(dir string, patches []recipe.Patch, vars map[string]string, ou
 // WriteFile writes rel (relative to dir) with content, creating parent dirs.
 // Exported so `keel gen` can emit generated component files.
 func WriteFile(dir, rel, content string) error {
-	// Confine rel to dir: recipe/pack data names it, so "..", an absolute path or
-	// a rooted name must never let a write land outside the project. filepath.IsLocal
-	// is exactly that check and the barrier the path-traversal analysis recognizes.
-	if !filepath.IsLocal(rel) {
+	p := filepath.Join(dir, rel)
+	// Confine the write to dir: recipe/pack data names rel, so "..", an absolute
+	// path or a rooted name must never let the resolved path land outside the
+	// project. Checking the resolved path stays under dir is both that guarantee
+	// and the barrier the path-traversal analysis recognizes.
+	if base := filepath.Clean(dir); p != base && !strings.HasPrefix(p, base+string(filepath.Separator)) {
 		return fmt.Errorf("refusing path %q: it escapes the project directory", rel)
 	}
-	p := filepath.Join(dir, rel)
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
@@ -1032,10 +1034,10 @@ func warnIfBaseUnwritten(dir, rel, content string) {
 
 // WriteBase snapshots a generated file's content (the merge base for updates).
 func WriteBase(dir, rel, content string) error {
-	if !filepath.IsLocal(rel) {
+	p := basePath(dir, rel)
+	if base := filepath.Clean(filepath.Join(dir, ".keel", "base")); p != base && !strings.HasPrefix(p, base+string(filepath.Separator)) {
 		return fmt.Errorf("refusing path %q: it escapes the project directory", rel)
 	}
-	p := basePath(dir, rel)
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
@@ -1045,10 +1047,11 @@ func WriteBase(dir, rel, content string) error {
 // ReadBase returns the snapshotted base content for a file (false if none — e.g.
 // a project built before snapshots existed).
 func ReadBase(dir, rel string) (string, bool) {
-	if !filepath.IsLocal(rel) {
+	p := basePath(dir, rel)
+	if base := filepath.Clean(filepath.Join(dir, ".keel", "base")); p != base && !strings.HasPrefix(p, base+string(filepath.Separator)) {
 		return "", false
 	}
-	b, err := os.ReadFile(basePath(dir, rel))
+	b, err := os.ReadFile(p)
 	if err != nil {
 		return "", false
 	}
