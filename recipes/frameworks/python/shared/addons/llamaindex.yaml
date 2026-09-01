@@ -1,0 +1,13 @@
+id: python-llamaindex
+schema_version: 2
+kind: addon
+label: LlamaIndex (RAG and data framework)
+appliesTo: [fastapi, django, flask, streamlit, gradio, dash, reflex]
+provides: [rag]
+updated: 2026-09-01
+# LlamaIndex connects your own data to an LLM: ingestion, indexing, retrieval.
+# The RAG-first alternative to LangChain; take one or both.
+install:
+  - "{{exec}} uv add llama-index"
+smoke:
+  - "{{exec}} uv run python -c \"import llama_index\""

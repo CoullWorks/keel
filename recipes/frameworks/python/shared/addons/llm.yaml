@@ -1,0 +1,13 @@
+id: python-llm
+schema_version: 2
+kind: addon
+label: LLM SDKs (OpenAI, Anthropic, LiteLLM)
+appliesTo: [fastapi, django, flask, streamlit, gradio, dash, reflex]
+provides: [llm-sdk]
+updated: 2026-09-01
+# The raw model SDKs plus LiteLLM, which gives you one provider-agnostic call
+# across 100+ models, including a local ollama endpoint.
+install:
+  - "{{exec}} uv add openai anthropic litellm"
+smoke:
+  - "{{exec}} uv run python -c \"import openai, anthropic, litellm\""

@@ -1,0 +1,13 @@
+id: python-scrapy
+schema_version: 2
+kind: addon
+label: Scrapy (web scraping and crawling)
+appliesTo: [fastapi, django, flask, streamlit, gradio, dash, reflex]
+provides: [scraping]
+updated: 2026-09-01
+# Scrapy is a full crawling framework for gathering the data an AI or analytics
+# project runs on: spiders, pipelines, throttling, exports.
+install:
+  - "{{exec}} uv add scrapy"
+smoke:
+  - "{{exec}} uv run python -c \"import scrapy\""
