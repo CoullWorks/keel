@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.1](https://github.com/CoullWorks/keel/compare/v1.2.0...v1.2.1) (2026-09-01)
+
+
+### Bug Fixes
+
+* **recipes:** add Python AI, agent and data-science addons ([#12](https://github.com/CoullWorks/keel/issues/12)) ([d278cc7](https://github.com/CoullWorks/keel/commit/d278cc7ba727e1e90bd51134d02730cf1c4d7cc0))
+
 ## [1.2.0](https://github.com/CoullWorks/keel/compare/v1.1.0...v1.2.0) (2026-08-31)
 
 
