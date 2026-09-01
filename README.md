@@ -12,7 +12,7 @@
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT"></a>
   <a href="https://github.com/coullworks/keel/releases/latest"><img src="https://img.shields.io/github/v/release/coullworks/keel?label=version&color=ff6a2c" alt="latest release"></a>
-  <img src="https://img.shields.io/badge/go-1.22%2B-00ADD8" alt="Go 1.22+">
+  <img src="https://img.shields.io/badge/go-1.25%2B-00ADD8" alt="Go 1.25+">
   <img src="https://img.shields.io/badge/telemetry-none-brightgreen" alt="zero telemetry">
 </p>
 
@@ -73,7 +73,7 @@ isn't a best guess at a project. It's a proper one, built and ready to run.
 curl -fsSL https://raw.githubusercontent.com/coullworks/keel/main/install.sh | sh
 ```
 
-Or with Go 1.22+:
+Or with Go 1.25+:
 
 ```sh
 go install github.com/coullworks/keel/cmd/keel@latest
