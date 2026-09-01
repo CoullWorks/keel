@@ -15,6 +15,10 @@ on:
     # commit of ours, so a scheduled scan is information even on a quiet week.
     - cron: "0 7 * * 1"
 
+# Least privilege: govulncheck only reads the checkout.
+permissions:
+  contents: read
+
 jobs:
   govulncheck:
     name: govulncheck (Go CVE scan)
