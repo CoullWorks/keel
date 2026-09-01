@@ -20,6 +20,13 @@ var pureLibraries = map[string]bool{
 	"django-anymail":      true, // configured per backend when you pick one
 	"django-simplejwt":    true, // ships its own files and settings hook
 	"django-pytest":       true, // a test runner; configured via pyproject [tool.pytest], not Django settings
+	"python-langchain":    true, // LLM/agent libraries your own code imports
+	"python-llamaindex":   true, // a RAG library your own code imports
+	"python-llm":          true, // model SDKs your own code imports
+	"python-mcp":          true, // an SDK you import to build a server/client
+	"python-scrapy":       true, // a crawling framework you write spiders against, not a Django app
+	"python-datascience":  true, // dataframe/ML libraries your own code imports
+	"python-vectors":      true, // vector-store clients your own code imports
 }
 
 // TestDjangoAddonsRegisterThemselves is the guard for the worst class of defect

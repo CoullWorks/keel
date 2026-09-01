@@ -1,0 +1,14 @@
+id: python-vectors
+schema_version: 2
+kind: addon
+label: Vector DB clients (Chroma, Qdrant)
+appliesTo: [fastapi, django, flask, streamlit, gradio, dash, reflex]
+provides: [vector-clients]
+updated: 2026-09-01
+# The Python clients for the vector stores keel ships as services: add the
+# client here, add the matching chroma or qdrant service to run it. The storage
+# half of a RAG or agent-memory stack.
+install:
+  - "{{exec}} uv add chromadb qdrant-client"
+smoke:
+  - "{{exec}} uv run python -c \"import chromadb, qdrant_client\""

@@ -1,0 +1,13 @@
+id: python-mcp
+schema_version: 2
+kind: addon
+label: MCP Python SDK (build an MCP server or client)
+appliesTo: [fastapi, django, flask, streamlit, gradio, dash, reflex]
+provides: [mcp]
+updated: 2026-09-01
+# The Model Context Protocol SDK: expose your app's tools and data to an AI
+# client, or drive one. The same protocol keel's own studio speaks.
+install:
+  - "{{exec}} uv add \"mcp[cli]\""
+smoke:
+  - "{{exec}} uv run python -c \"import mcp\""

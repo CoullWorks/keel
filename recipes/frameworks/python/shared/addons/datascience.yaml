@@ -1,0 +1,13 @@
+id: python-datascience
+schema_version: 2
+kind: addon
+label: Data science core (pandas, numpy, polars, scikit-learn)
+appliesTo: [fastapi, django, flask, streamlit, gradio, dash, reflex]
+provides: [datascience]
+updated: 2026-09-01
+# The everyday data-science stack: dataframes (pandas plus the faster polars),
+# numerics (numpy) and classical machine learning (scikit-learn).
+install:
+  - "{{exec}} uv add pandas numpy polars scikit-learn"
+smoke:
+  - "{{exec}} uv run python -c \"import pandas, numpy, polars, sklearn\""

@@ -1,0 +1,13 @@
+id: python-langchain
+schema_version: 2
+kind: addon
+label: LangChain + LangGraph (LLM and agent orchestration)
+appliesTo: [fastapi, django, flask, streamlit, gradio, dash, reflex]
+provides: [llm-framework, agents]
+updated: 2026-09-01
+# LangChain for LLM app plumbing, LangGraph for stateful agents. The dominant
+# Python agent stack. Pairs with the ollama service and a vector store.
+install:
+  - "{{exec}} uv add langchain langgraph"
+smoke:
+  - "{{exec}} uv run python -c \"import langchain, langgraph\""
