@@ -229,7 +229,14 @@ type DBService struct {
 // ReadManifest loads a project's .keel/manifest.yaml (used by `keel gen` and the
 // future dashboard to know a project's framework + env).
 func ReadManifest(dir string) (*Manifest, error) {
-	path := filepath.Join(dir, ".keel", "manifest.yaml")
+	safeDir, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, err
+	}
+	path, err := filepath.Abs(filepath.Join(dir, ".keel", "manifest.yaml"))
+	if err != nil || !strings.HasPrefix(path, safeDir) {
+		return nil, fmt.Errorf("refusing manifest path outside %q", dir)
+	}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		// A missing manifest ("not a keel project") and an unreadable one
@@ -746,6 +753,15 @@ func Build(ctx context.Context, plan *resolver.Plan, opts Options) (err error) {
 	if needsDocker && opts.DockerUp != nil && !opts.DockerUp() {
 		return fmt.Errorf("docker doesn't appear to be running - start it and try again (keel doctor)")
 	}
+	// Resolve the target to an absolute path once (this removes any "..") and
+	// refuse one that still climbs out, so every op on opts.Dir below (stat,
+	// mkdir, the rollback remove) works on a confined, normalised path.
+	if abs, aerr := filepath.Abs(opts.Dir); aerr == nil {
+		opts.Dir = abs
+	}
+	if strings.Contains(opts.Dir, "..") {
+		return fmt.Errorf("refusing project directory %q", opts.Dir)
+	}
 	freshDir := false
 	if _, statErr := os.Stat(opts.Dir); os.IsNotExist(statErr) {
 		freshDir = true
@@ -936,11 +952,15 @@ func applyPatches(dir string, patches []recipe.Patch, vars map[string]string, ou
 			rendered[k] = render(v, vars)
 		}
 		rel := render(p.File, vars)
-		fp := filepath.Join(dir, rel)
-		// Confine the patch target to the project: a pack must not patch a file
-		// outside the tree it is building. Checking the resolved path stays under
-		// dir is that guarantee and the barrier the path-traversal analysis reads.
-		if base := filepath.Clean(dir); fp != base && !strings.HasPrefix(fp, base+string(filepath.Separator)) {
+		// Confine the patch target to the project (resolve both to absolute paths
+		// and require the target to stay under dir): a pack must not patch a file
+		// outside the tree it is building.
+		safeDir, err := filepath.Abs(dir)
+		if err != nil {
+			return err
+		}
+		fp, err := filepath.Abs(filepath.Join(dir, rel))
+		if err != nil || !strings.HasPrefix(fp, safeDir) {
 			return fmt.Errorf("refusing patch path %q: it escapes the project directory", rel)
 		}
 		ok, err := PatchFile(fp, rendered)
@@ -1011,7 +1031,14 @@ func writeManifest(dir string, plan *resolver.Plan) error {
 	if err != nil {
 		return err
 	}
-	kd := filepath.Join(dir, ".keel")
+	safeDir, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+	kd, err := filepath.Abs(filepath.Join(dir, ".keel"))
+	if err != nil || !strings.HasPrefix(kd, safeDir) {
+		return fmt.Errorf("refusing .keel path outside %q", dir)
+	}
 	if err := os.MkdirAll(kd, 0o755); err != nil {
 		return err
 	}
@@ -1092,7 +1119,14 @@ func WriteManifestFile(dir string, m *Manifest) error {
 	if err != nil {
 		return err
 	}
-	kd := filepath.Join(dir, ".keel")
+	safeDir, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+	kd, err := filepath.Abs(filepath.Join(dir, ".keel"))
+	if err != nil || !strings.HasPrefix(kd, safeDir) {
+		return fmt.Errorf("refusing .keel path outside %q", dir)
+	}
 	if err := os.MkdirAll(kd, 0o755); err != nil {
 		return err
 	}
