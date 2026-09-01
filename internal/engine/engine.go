@@ -23,7 +23,6 @@ import (
 	"github.com/coullworks/keel/internal/envfile"
 	"github.com/coullworks/keel/internal/recipe"
 	"github.com/coullworks/keel/internal/resolver"
-	"github.com/coullworks/keel/internal/safepath"
 	"gopkg.in/yaml.v3"
 )
 
@@ -936,11 +935,14 @@ func applyPatches(dir string, patches []recipe.Patch, vars map[string]string, ou
 		for k, v := range p.Set {
 			rendered[k] = render(v, vars)
 		}
-		fp, err := safepath.Join(dir, render(p.File, vars))
-		if err != nil {
-			return err
+		rel := render(p.File, vars)
+		// Confine the patch target to the project: a pack must not patch a file
+		// outside the tree it is building. filepath.IsLocal rejects "..", absolute
+		// and rooted paths, and is the barrier the path-traversal analysis reads.
+		if !filepath.IsLocal(rel) {
+			return fmt.Errorf("refusing patch path %q: it escapes the project directory", rel)
 		}
-		ok, err := PatchFile(fp, rendered)
+		ok, err := PatchFile(filepath.Join(dir, rel), rendered)
 		if err != nil {
 			return err
 		}
@@ -954,10 +956,13 @@ func applyPatches(dir string, patches []recipe.Patch, vars map[string]string, ou
 // WriteFile writes rel (relative to dir) with content, creating parent dirs.
 // Exported so `keel gen` can emit generated component files.
 func WriteFile(dir, rel, content string) error {
-	p, err := safepath.Join(dir, rel)
-	if err != nil {
-		return err
+	// Confine rel to dir: recipe/pack data names it, so "..", an absolute path or
+	// a rooted name must never let a write land outside the project. filepath.IsLocal
+	// is exactly that check and the barrier the path-traversal analysis recognizes.
+	if !filepath.IsLocal(rel) {
+		return fmt.Errorf("refusing path %q: it escapes the project directory", rel)
 	}
+	p := filepath.Join(dir, rel)
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
@@ -1010,9 +1015,7 @@ func writeManifest(dir string, plan *resolver.Plan) error {
 
 // basePath is where a keel-owned file's last-generated content is snapshotted,
 // used as the merge base by `keel update`.
-func basePath(dir, rel string) (string, error) {
-	return safepath.Join(filepath.Join(dir, ".keel", "base"), rel)
-}
+func basePath(dir, rel string) string { return filepath.Join(dir, ".keel", "base", rel) }
 
 // warnIfBaseUnwritten snapshots a generated file's merge base and, if that write
 // fails, warns instead of silently swallowing it. The base is what `keel update`
@@ -1029,10 +1032,10 @@ func warnIfBaseUnwritten(dir, rel, content string) {
 
 // WriteBase snapshots a generated file's content (the merge base for updates).
 func WriteBase(dir, rel, content string) error {
-	p, err := basePath(dir, rel)
-	if err != nil {
-		return err
+	if !filepath.IsLocal(rel) {
+		return fmt.Errorf("refusing path %q: it escapes the project directory", rel)
 	}
+	p := basePath(dir, rel)
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
@@ -1042,11 +1045,10 @@ func WriteBase(dir, rel, content string) error {
 // ReadBase returns the snapshotted base content for a file (false if none — e.g.
 // a project built before snapshots existed).
 func ReadBase(dir, rel string) (string, bool) {
-	p, err := basePath(dir, rel)
-	if err != nil {
+	if !filepath.IsLocal(rel) {
 		return "", false
 	}
-	b, err := os.ReadFile(p)
+	b, err := os.ReadFile(basePath(dir, rel))
 	if err != nil {
 		return "", false
 	}
