@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.2.2](https://github.com/CoullWorks/keel/compare/v1.2.1...v1.2.2) (2026-09-01)
+
+
+### Bug Fixes
+
+* hermetic coverage tests + Dependabot security bumps ([#16](https://github.com/CoullWorks/keel/issues/16)) ([d1e8c38](https://github.com/CoullWorks/keel/commit/d1e8c3850b7b965f6cafe63811c9b6740a0dc236)), closes [#15](https://github.com/CoullWorks/keel/issues/15)
+* **recipes:** opt-in Playwright E2E addons for the other frameworks ([#14](https://github.com/CoullWorks/keel/issues/14)) ([13d4626](https://github.com/CoullWorks/keel/commit/13d4626dccf4dfe4e7991d36b9120487fefa188f))
+* **security:** CodeQL + govulncheck scanning, clear all CVEs, issue forms ([#19](https://github.com/CoullWorks/keel/issues/19)) ([bfde9e1](https://github.com/CoullWorks/keel/commit/bfde9e160e213ea33268cfc34c6fe049a5de7b25)), closes [#18](https://github.com/CoullWorks/keel/issues/18)
+
 ## [1.2.1](https://github.com/CoullWorks/keel/compare/v1.2.0...v1.2.1) (2026-09-01)
 
 
