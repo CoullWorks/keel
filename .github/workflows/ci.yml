@@ -9,6 +9,10 @@ on:
     # underneath us, so a green build on Monday is information even with no commits.
     - cron: "0 6 * * 1"
 
+# Least privilege: every job here only reads the checkout.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -16,7 +20,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
+          go-version: "1.26"
       - name: vet
         run: go vet ./...
       - name: lint recipes
