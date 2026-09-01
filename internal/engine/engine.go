@@ -957,12 +957,15 @@ func applyPatches(dir string, patches []recipe.Patch, vars map[string]string, ou
 // WriteFile writes rel (relative to dir) with content, creating parent dirs.
 // Exported so `keel gen` can emit generated component files.
 func WriteFile(dir, rel, content string) error {
-	p := filepath.Join(dir, rel)
-	// Confine the write to dir: recipe/pack data names rel, so "..", an absolute
-	// path or a rooted name must never let the resolved path land outside the
-	// project. Checking the resolved path stays under dir is both that guarantee
-	// and the barrier the path-traversal analysis recognizes.
-	if base := filepath.Clean(dir); p != base && !strings.HasPrefix(p, base+string(filepath.Separator)) {
+	// Confine the write to dir with the pattern the path-traversal analysis
+	// recognizes: resolve both to absolute paths and require the target to stay
+	// under the project, so a pack's "..", absolute or rooted rel is refused.
+	safeDir, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+	p, err := filepath.Abs(filepath.Join(dir, rel))
+	if err != nil || !strings.HasPrefix(p, safeDir) {
 		return fmt.Errorf("refusing path %q: it escapes the project directory", rel)
 	}
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
@@ -1034,8 +1037,12 @@ func warnIfBaseUnwritten(dir, rel, content string) {
 
 // WriteBase snapshots a generated file's content (the merge base for updates).
 func WriteBase(dir, rel, content string) error {
-	p := basePath(dir, rel)
-	if base := filepath.Clean(filepath.Join(dir, ".keel", "base")); p != base && !strings.HasPrefix(p, base+string(filepath.Separator)) {
+	safeDir, err := filepath.Abs(filepath.Join(dir, ".keel", "base"))
+	if err != nil {
+		return err
+	}
+	p, err := filepath.Abs(basePath(dir, rel))
+	if err != nil || !strings.HasPrefix(p, safeDir) {
 		return fmt.Errorf("refusing path %q: it escapes the project directory", rel)
 	}
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
@@ -1047,8 +1054,12 @@ func WriteBase(dir, rel, content string) error {
 // ReadBase returns the snapshotted base content for a file (false if none — e.g.
 // a project built before snapshots existed).
 func ReadBase(dir, rel string) (string, bool) {
-	p := basePath(dir, rel)
-	if base := filepath.Clean(filepath.Join(dir, ".keel", "base")); p != base && !strings.HasPrefix(p, base+string(filepath.Separator)) {
+	safeDir, err := filepath.Abs(filepath.Join(dir, ".keel", "base"))
+	if err != nil {
+		return "", false
+	}
+	p, err := filepath.Abs(basePath(dir, rel))
+	if err != nil || !strings.HasPrefix(p, safeDir) {
 		return "", false
 	}
 	b, err := os.ReadFile(p)
