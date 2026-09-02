@@ -414,7 +414,7 @@ func TestApplyEditsCommitsAllInOneTx(t *testing.T) {
 		{Column: "name", Value: &one, Key: map[string]string{"id": "1"}},
 		{Column: "email", Value: nil, Key: map[string]string{"id": "2"}},
 	}
-	n, err := applyEdits(context.Background(), db, enginePostgres, "users", edits, []string{"id"})
+	n, err := applyEdits(context.Background(), db, enginePostgres, "users", edits, []column{{Name: "name"}, {Name: "email"}}, []string{"id"})
 	if err != nil {
 		t.Fatalf("applyEdits: %v", err)
 	}
@@ -438,7 +438,7 @@ func TestApplyEditsRollsBackOnError(t *testing.T) {
 	fake.failOnExec = true
 	one := "1"
 	edits := []cellEdit{{Column: "name", Value: &one, Key: map[string]string{"id": "1"}}}
-	if _, err := applyEdits(context.Background(), db, enginePostgres, "users", edits, []string{"id"}); err == nil {
+	if _, err := applyEdits(context.Background(), db, enginePostgres, "users", edits, []column{{Name: "name"}, {Name: "email"}}, []string{"id"}); err == nil {
 		t.Fatalf("a failing exec should error")
 	}
 	if fake.committed || !fake.rolledBack {
@@ -453,7 +453,7 @@ func TestApplyEditsRefusesBadEdit(t *testing.T) {
 	// This edit is missing the pk column, so buildUpdate refuses it and the tx
 	// rolls back before any statement runs.
 	edits := []cellEdit{{Column: "name", Value: &one, Key: map[string]string{"nope": "1"}}}
-	if _, err := applyEdits(context.Background(), db, enginePostgres, "users", edits, []string{"id"}); err == nil {
+	if _, err := applyEdits(context.Background(), db, enginePostgres, "users", edits, []column{{Name: "name"}, {Name: "email"}}, []string{"id"}); err == nil {
 		t.Fatalf("an edit missing its pk column must error")
 	}
 	if len(fake.execs) != 0 {
