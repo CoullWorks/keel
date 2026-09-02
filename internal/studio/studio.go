@@ -1088,7 +1088,7 @@ func handleDBGrid(w http.ResponseWriter, r *http.Request) {
 	}
 	defer db.Close()
 
-	ok, err := tableExists(ctx, db, eng, body.Table)
+	tbl, ok, err := canonicalTable(ctx, db, eng, body.Table)
 	if err != nil {
 		writeJSON(w, map[string]any{"error": err.Error()})
 		return
@@ -1097,29 +1097,31 @@ func handleDBGrid(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"error": "no such table: " + body.Table})
 		return
 	}
-	cols, err := listColumns(ctx, db, eng, body.Table)
+	cols, err := listColumns(ctx, db, eng, tbl)
 	if err != nil {
 		writeJSON(w, map[string]any{"error": err.Error()})
 		return
 	}
 	// Mark FK columns so the UI can link a cell to its referenced row. Non-fatal
 	// if it fails — the grid still renders, just without FK links.
-	cols = attachFKs(ctx, db, eng, body.Table, cols)
-	pk, err := primaryKey(ctx, db, eng, body.Table)
+	cols = attachFKs(ctx, db, eng, tbl, cols)
+	pk, err := primaryKey(ctx, db, eng, tbl)
 	if err != nil {
 		writeJSON(w, map[string]any{"error": err.Error()})
 		return
 	}
 
-	q := gridQuery{Table: body.Table, Page: body.Page, PageSize: body.PageSize, SortDesc: body.Desc}
+	q := gridQuery{Table: tbl, Page: body.Page, PageSize: body.PageSize, SortDesc: body.Desc}
 	q.normalise()
 	// Sort/filter columns must be real columns of this table, or they're dropped
-	// — a caller can't sort or filter by an expression it invented.
-	if validCol(cols, body.Sort) {
-		q.SortCol = body.Sort
+	// — a caller can't sort or filter by an expression it invented. The name is
+	// taken from the schema (cols), not the request, so the identifier threaded
+	// into SQL is a trusted value.
+	if c, ok := canonicalCol(cols, body.Sort); ok {
+		q.SortCol = c
 	}
-	if validCol(cols, body.FilterCol) && strings.TrimSpace(body.Filter) != "" {
-		q.FilterCol = body.FilterCol
+	if c, ok := canonicalCol(cols, body.FilterCol); ok && strings.TrimSpace(body.Filter) != "" {
+		q.FilterCol = c
 		q.Filter = body.Filter
 	}
 
@@ -1170,16 +1172,17 @@ func handleDBCommit(w http.ResponseWriter, r *http.Request) {
 	}
 	defer db.Close()
 
-	if ok, err := tableExists(ctx, db, eng, body.Table); err != nil || !ok {
+	tbl, ok, err := canonicalTable(ctx, db, eng, body.Table)
+	if err != nil || !ok {
 		writeJSON(w, map[string]any{"error": "no such table: " + body.Table})
 		return
 	}
-	cols, err := listColumns(ctx, db, eng, body.Table)
+	cols, err := listColumns(ctx, db, eng, tbl)
 	if err != nil {
 		writeJSON(w, map[string]any{"error": err.Error()})
 		return
 	}
-	pk, err := primaryKey(ctx, db, eng, body.Table)
+	pk, err := primaryKey(ctx, db, eng, tbl)
 	if err != nil {
 		writeJSON(w, map[string]any{"error": err.Error()})
 		return
@@ -1189,15 +1192,19 @@ func handleDBCommit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Validate every edit's column against the live schema BEFORE opening the
-	// transaction, so a bad column can't leave a half-applied batch.
-	for _, e := range body.Edits {
-		if !validCol(cols, e.Column) {
+	// transaction, so a bad column can't leave a half-applied batch. Rewrite each
+	// to the schema's own column name, so the identifier threaded into SQL is a
+	// trusted value rather than the request's.
+	for i, e := range body.Edits {
+		c, ok := canonicalCol(cols, e.Column)
+		if !ok {
 			writeJSON(w, map[string]any{"error": "no such column: " + e.Column})
 			return
 		}
+		body.Edits[i].Column = c
 	}
 
-	updated, err := applyEdits(ctx, db, eng, body.Table, body.Edits, pk)
+	updated, err := applyEdits(ctx, db, eng, tbl, body.Edits, pk)
 	if err != nil {
 		writeJSON(w, map[string]any{"error": err.Error()})
 		return
