@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -310,11 +311,19 @@ func projectName(dir string) string {
 		}
 	}
 	name := strings.Trim(b.String(), "-")
-	if name == "" {
+	// The loop above already limits name to [a-z0-9-]; the regexp match makes that
+	// guarantee explicit and is the barrier the injection analysis recognizes, so
+	// a {{project}} interpolated into a shell command is provably shell-safe.
+	if name == "" || !safeProjectName.MatchString(name) {
 		return "app"
 	}
 	return name
 }
+
+// safeProjectName is the shape projectName guarantees: lowercased, [a-z0-9-]
+// only. Used as an explicit barrier so an interpolated {{project}} cannot carry
+// shell metacharacters into a rendered command.
+var safeProjectName = regexp.MustCompile(`^[a-z0-9-]+$`)
 
 // render substitutes the recipe template vars in s ({{env}}, {{project}}, and the
 // env's command vocabulary {{start}}/{{exec}}/{{composer}}/… plus {{create}}).

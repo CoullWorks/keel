@@ -3,7 +3,6 @@ import { useQuery } from '@tanstack/react-query'
 import { apiJSON, fetchJSON } from '../lib/api'
 import { Icon, iconSlug, iconTint, BRAND_SVG } from '../lib/icons'
 import { useConsole } from '../lib/console'
-import { navTo } from '../lib/router'
 
 // Build.tsx — the React port of the studio's "New stack" BUILD WIZARD
 // (renderBuild + its whole recipe-selection engine: buildSteps/buildStepBody/
