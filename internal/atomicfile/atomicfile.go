@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // WriteFile writes data to path atomically with the given permissions. It creates
@@ -24,6 +25,13 @@ import (
 // error so a failed write leaves nothing behind. The caller is responsible for
 // creating the parent directory.
 func WriteFile(path string, data []byte, perm os.FileMode) error {
+	// The caller supplies the full target path; normalise it and refuse a
+	// traversal so both the temp file and the final rename stay at that path.
+	p, err := filepath.Abs(path)
+	if err != nil || strings.Contains(p, "..") {
+		return fmt.Errorf("refusing path outside %q", path)
+	}
+	path = p
 	dir := filepath.Dir(path)
 	f, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
 	if err != nil {

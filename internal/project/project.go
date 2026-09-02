@@ -42,11 +42,34 @@ func Detect(dir string) string {
 		return fw
 	}
 	has := func(name string) bool {
-		_, err := os.Stat(filepath.Join(dir, name))
+		safeBase, err := filepath.Abs(dir)
+		if err != nil {
+			return false
+		}
+		p, err := filepath.Abs(filepath.Join(dir, name))
+		if err != nil || !strings.HasPrefix(p, safeBase) {
+			return false
+		}
+		_, err = os.Stat(p)
 		return err == nil
 	}
+	readUnder := func(name string) ([]byte, bool) {
+		safeBase, err := filepath.Abs(dir)
+		if err != nil {
+			return nil, false
+		}
+		p, err := filepath.Abs(filepath.Join(dir, name))
+		if err != nil || !strings.HasPrefix(p, safeBase) {
+			return nil, false
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return nil, false
+		}
+		return b, true
+	}
 	if has("composer.json") {
-		if b, err := os.ReadFile(filepath.Join(dir, "composer.json")); err == nil {
+		if b, ok := readUnder("composer.json"); ok {
 			s := string(b)
 			switch {
 			case strings.Contains(s, "magento/product-community-edition"),
@@ -62,7 +85,7 @@ func Detect(dir string) string {
 		return "django"
 	}
 	if has("pyproject.toml") {
-		if b, err := os.ReadFile(filepath.Join(dir, "pyproject.toml")); err == nil {
+		if b, ok := readUnder("pyproject.toml"); ok {
 			l := strings.ToLower(string(b))
 			if strings.Contains(l, "fastapi") {
 				return "fastapi"
@@ -76,7 +99,7 @@ func Detect(dir string) string {
 		return "nextjs"
 	}
 	if has("package.json") {
-		if b, err := os.ReadFile(filepath.Join(dir, "package.json")); err == nil {
+		if b, ok := readUnder("package.json"); ok {
 			s := string(b)
 			// Expo/React Native before plain Next: an Expo app can pull Next in as
 			// a web target, but its identity is the mobile framework. Match the
@@ -101,7 +124,15 @@ func hasDep(pkgJSON, dep string) bool {
 }
 
 func manifestFramework(dir string) string {
-	b, err := os.ReadFile(filepath.Join(dir, ".keel", "manifest.yaml"))
+	safeBase, err := filepath.Abs(dir)
+	if err != nil {
+		return ""
+	}
+	p, err := filepath.Abs(filepath.Join(dir, ".keel", "manifest.yaml"))
+	if err != nil || !strings.HasPrefix(p, safeBase) {
+		return ""
+	}
+	b, err := os.ReadFile(p)
 	if err != nil {
 		return ""
 	}
@@ -115,7 +146,15 @@ func manifestFramework(dir string) string {
 }
 
 func isManaged(dir string) bool {
-	_, err := os.Stat(filepath.Join(dir, ".keel", "manifest.yaml"))
+	safeBase, err := filepath.Abs(dir)
+	if err != nil {
+		return false
+	}
+	p, err := filepath.Abs(filepath.Join(dir, ".keel", "manifest.yaml"))
+	if err != nil || !strings.HasPrefix(p, safeBase) {
+		return false
+	}
+	_, err = os.Stat(p)
 	return err == nil
 }
 
@@ -123,14 +162,33 @@ func isManaged(dir string) bool {
 // `keel adopt` can pick the matching env recipe. Returns "ddev", "sail",
 // "docker" or "local".
 func DetectEnv(dir string) string {
-	if fi, err := os.Stat(filepath.Join(dir, ".ddev")); err == nil && fi.IsDir() {
-		return "ddev"
+	safeBase, err := filepath.Abs(dir)
+	if err != nil {
+		return "local"
 	}
-	if _, err := os.Stat(filepath.Join(dir, "vendor", "bin", "sail")); err == nil {
-		return "sail"
+	under := func(rest ...string) (string, bool) {
+		p, err := filepath.Abs(filepath.Join(append([]string{dir}, rest...)...))
+		if err != nil || !strings.HasPrefix(p, safeBase) {
+			return "", false
+		}
+		return p, true
+	}
+	if p, ok := under(".ddev"); ok {
+		if fi, err := os.Stat(p); err == nil && fi.IsDir() {
+			return "ddev"
+		}
+	}
+	if p, ok := under("vendor", "bin", "sail"); ok {
+		if _, err := os.Stat(p); err == nil {
+			return "sail"
+		}
 	}
 	for _, f := range []string{"docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml", "Dockerfile"} {
-		if _, err := os.Stat(filepath.Join(dir, f)); err == nil {
+		p, ok := under(f)
+		if !ok {
+			continue
+		}
+		if _, err := os.Stat(p); err == nil {
 			return "docker"
 		}
 	}
@@ -153,9 +211,27 @@ type Registry struct {
 
 func path() string { return filepath.Join(profile.Dir(), "projects.yaml") }
 
+// safePath resolves the registry path confined under the (trusted) profile dir,
+// so the file sinks consume an Abs+HasPrefix-guarded path.
+func safePath() (string, error) {
+	safeBase, err := filepath.Abs(profile.Dir())
+	if err != nil {
+		return "", err
+	}
+	p, err := filepath.Abs(filepath.Join(profile.Dir(), "projects.yaml"))
+	if err != nil || !strings.HasPrefix(p, safeBase) {
+		return "", fmt.Errorf("refusing path outside %q", profile.Dir())
+	}
+	return p, nil
+}
+
 // Load reads the registry (empty if none yet).
 func Load() (*Registry, error) {
-	b, err := os.ReadFile(path())
+	p, err := safePath()
+	if err != nil {
+		return nil, err
+	}
+	b, err := os.ReadFile(p)
 	if os.IsNotExist(err) {
 		return &Registry{}, nil
 	}
@@ -174,6 +250,10 @@ func (r *Registry) Save() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	sort.SliceStable(r.Projects, func(i, j int) bool { return r.Projects[i].Name < r.Projects[j].Name })
+	p, err := safePath()
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(profile.Dir(), 0o755); err != nil {
 		return err
 	}
@@ -181,7 +261,7 @@ func (r *Registry) Save() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path(), b, 0o644)
+	return os.WriteFile(p, b, 0o644)
 }
 
 // Add registers a directory as a project, detecting its stack (or, for a
@@ -194,7 +274,14 @@ func (r *Registry) Add(dir string) (Project, error) {
 	if err != nil {
 		return Project{}, err
 	}
-	if info, err := os.Stat(abs); err != nil || !info.IsDir() {
+	d, err := filepath.Abs(abs)
+	if err != nil {
+		return Project{}, err
+	}
+	if strings.Contains(d, "..") {
+		return Project{}, fmt.Errorf("refusing path outside %q", abs)
+	}
+	if info, err := os.Stat(d); err != nil || !info.IsDir() {
 		return Project{}, fmt.Errorf("no such directory: %s", abs)
 	}
 	p := inspect(abs)
@@ -234,7 +321,11 @@ func (r *Registry) Refresh() {
 	defer r.mu.Unlock()
 	out := r.Projects[:0]
 	for _, p := range r.Projects {
-		if fi, err := os.Stat(p.Path); err == nil && fi.IsDir() {
+		d, err := filepath.Abs(p.Path)
+		if err != nil || strings.Contains(d, "..") {
+			continue // treat an unresolvable/escaping path as gone
+		}
+		if fi, err := os.Stat(d); err == nil && fi.IsDir() {
 			out = append(out, inspect(p.Path))
 		}
 	}
@@ -260,17 +351,34 @@ func Expand(p string) string {
 // lerna/nx, or a package.json with a "workspaces" field). `keel adopt` uses it
 // to decide between a single-app adoption and a shared-backend monorepo one.
 func IsMonorepo(dir string) bool {
+	safeBase, err := filepath.Abs(dir)
+	if err != nil {
+		return false
+	}
+	under := func(rest ...string) (string, bool) {
+		p, err := filepath.Abs(filepath.Join(append([]string{dir}, rest...)...))
+		if err != nil || !strings.HasPrefix(p, safeBase) {
+			return "", false
+		}
+		return p, true
+	}
 	for _, f := range []string{"pnpm-workspace.yaml", "turbo.json", "lerna.json", "nx.json"} {
-		if _, err := os.Stat(filepath.Join(dir, f)); err == nil {
+		p, ok := under(f)
+		if !ok {
+			continue
+		}
+		if _, err := os.Stat(p); err == nil {
 			return true
 		}
 	}
-	if b, err := os.ReadFile(filepath.Join(dir, "package.json")); err == nil {
-		var pkg struct {
-			Workspaces json.RawMessage `json:"workspaces"`
-		}
-		if json.Unmarshal(b, &pkg) == nil && len(pkg.Workspaces) > 0 {
-			return true
+	if p, ok := under("package.json"); ok {
+		if b, err := os.ReadFile(p); err == nil {
+			var pkg struct {
+				Workspaces json.RawMessage `json:"workspaces"`
+			}
+			if json.Unmarshal(b, &pkg) == nil && len(pkg.Workspaces) > 0 {
+				return true
+			}
 		}
 	}
 	return false
@@ -314,14 +422,37 @@ func Members(dir string) []Project {
 // package.json), distinguishing a shared lib worth keeping from a stray
 // directory that happened to match a workspace glob.
 func isWorkspacePackage(sub string) bool {
-	_, err := os.Stat(filepath.Join(sub, "package.json"))
+	safeBase, err := filepath.Abs(sub)
+	if err != nil {
+		return false
+	}
+	p, err := filepath.Abs(filepath.Join(sub, "package.json"))
+	if err != nil || !strings.HasPrefix(p, safeBase) {
+		return false
+	}
+	_, err = os.Stat(p)
 	return err == nil
 }
 
 // workspaceGlobs reads the workspace patterns from pnpm-workspace.yaml or
 // package.json "workspaces", falling back to the common apps/packages layout.
 func workspaceGlobs(dir string) []string {
-	if b, err := os.ReadFile(filepath.Join(dir, "pnpm-workspace.yaml")); err == nil {
+	safeBase, err := filepath.Abs(dir)
+	if err != nil {
+		return []string{"apps/*", "packages/*", "services/*"}
+	}
+	readUnder := func(name string) ([]byte, bool) {
+		p, err := filepath.Abs(filepath.Join(dir, name))
+		if err != nil || !strings.HasPrefix(p, safeBase) {
+			return nil, false
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return nil, false
+		}
+		return b, true
+	}
+	if b, ok := readUnder("pnpm-workspace.yaml"); ok {
 		var ws struct {
 			Packages []string `yaml:"packages"`
 		}
@@ -329,7 +460,7 @@ func workspaceGlobs(dir string) []string {
 			return ws.Packages
 		}
 	}
-	if b, err := os.ReadFile(filepath.Join(dir, "package.json")); err == nil {
+	if b, ok := readUnder("package.json"); ok {
 		var pkg struct {
 			Workspaces json.RawMessage `json:"workspaces"`
 		}
@@ -354,8 +485,15 @@ func workspaceGlobs(dir string) []string {
 // as a literal path.
 func expandGlob(root, glob string) []string {
 	glob = strings.TrimSpace(strings.Trim(glob, "'\""))
+	safeBase, err := filepath.Abs(root)
+	if err != nil {
+		return nil
+	}
 	if strings.HasSuffix(glob, "/*") || strings.HasSuffix(glob, "/**") {
-		base := filepath.Join(root, strings.TrimSuffix(strings.TrimSuffix(glob, "/**"), "/*"))
+		base, err := filepath.Abs(filepath.Join(root, strings.TrimSuffix(strings.TrimSuffix(glob, "/**"), "/*")))
+		if err != nil || !strings.HasPrefix(base, safeBase) {
+			return nil
+		}
 		entries, err := os.ReadDir(base)
 		if err != nil {
 			return nil
@@ -368,7 +506,10 @@ func expandGlob(root, glob string) []string {
 		}
 		return out
 	}
-	full := filepath.Join(root, glob)
+	full, err := filepath.Abs(filepath.Join(root, glob))
+	if err != nil || !strings.HasPrefix(full, safeBase) {
+		return nil
+	}
 	if info, err := os.Stat(full); err == nil && info.IsDir() {
 		return []string{full}
 	}
@@ -395,7 +536,11 @@ func (r *Registry) Prune() {
 	defer r.mu.Unlock()
 	out := r.Projects[:0]
 	for _, p := range r.Projects {
-		if _, err := os.Stat(p.Path); err == nil {
+		d, err := filepath.Abs(p.Path)
+		if err != nil || strings.Contains(d, "..") {
+			continue // treat an unresolvable/escaping path as gone
+		}
+		if _, err := os.Stat(d); err == nil {
 			out = append(out, p)
 		}
 	}

@@ -32,7 +32,10 @@ func ApplyAssets(dir, logo, favicon string) (AssetResult, error) {
 		if ext == "" {
 			ext = ".png"
 		}
-		dst := filepath.Join(pub, "brand-logo"+ext)
+		dst, err := confine(pub, "brand-logo"+ext)
+		if err != nil {
+			return res, fmt.Errorf("logo: %w", err)
+		}
 		if err := copyFile(logo, dst); err != nil {
 			return res, fmt.Errorf("logo: %w", err)
 		}
@@ -40,14 +43,20 @@ func ApplyAssets(dir, logo, favicon string) (AssetResult, error) {
 	}
 
 	if favicon = strings.TrimSpace(favicon); favicon != "" {
-		dst := filepath.Join(pub, "favicon.ico")
+		dst, err := confine(pub, "favicon.ico")
+		if err != nil {
+			return res, fmt.Errorf("favicon: %w", err)
+		}
 		if err := copyFile(favicon, dst); err != nil {
 			return res, fmt.Errorf("favicon: %w", err)
 		}
 		res.Written = append(res.Written, relTo(dir, dst))
 		// Next.js App Router serves app/favicon.ico automatically.
 		if app := filepath.Join(dir, "app"); isDir(app) {
-			adst := filepath.Join(app, "favicon.ico")
+			adst, err := confine(app, "favicon.ico")
+			if err != nil {
+				return res, nil
+			}
 			if err := copyFile(favicon, adst); err == nil {
 				res.Written = append(res.Written, relTo(dir, adst))
 			}
@@ -66,26 +75,51 @@ func ApplyAssetsData(dir string, logo []byte, logoName string, favicon []byte) (
 		if ext == "" {
 			ext = ".png"
 		}
-		dst := filepath.Join(pub, "brand-logo"+ext)
+		dst, err := confine(pub, "brand-logo"+ext)
+		if err != nil {
+			return res, fmt.Errorf("logo: %w", err)
+		}
 		if err := os.WriteFile(dst, logo, 0o644); err != nil {
 			return res, fmt.Errorf("logo: %w", err)
 		}
 		res.Written = append(res.Written, relTo(dir, dst))
 	}
 	if len(favicon) > 0 {
-		dst := filepath.Join(pub, "favicon.ico")
+		dst, err := confine(pub, "favicon.ico")
+		if err != nil {
+			return res, fmt.Errorf("favicon: %w", err)
+		}
 		if err := os.WriteFile(dst, favicon, 0o644); err != nil {
 			return res, fmt.Errorf("favicon: %w", err)
 		}
 		res.Written = append(res.Written, relTo(dir, dst))
 		if app := filepath.Join(dir, "app"); isDir(app) {
-			adst := filepath.Join(app, "favicon.ico")
+			adst, err := confine(app, "favicon.ico")
+			if err != nil {
+				return res, nil
+			}
 			if err := os.WriteFile(adst, favicon, 0o644); err == nil {
 				res.Written = append(res.Written, relTo(dir, adst))
 			}
 		}
 	}
 	return res, nil
+}
+
+// confine joins rest onto base and returns the result only when it stays under
+// base (both resolved to absolute paths). It is the shared path-injection barrier
+// for the asset writers: a target that escapes base (via .. or an absolute rest)
+// is refused rather than written outside the project's web-served dir.
+func confine(base string, rest ...string) (string, error) {
+	safeBase, err := filepath.Abs(base)
+	if err != nil {
+		return "", fmt.Errorf("refusing path outside %q", base)
+	}
+	p, err := filepath.Abs(filepath.Join(append([]string{base}, rest...)...))
+	if err != nil || !strings.HasPrefix(p, safeBase) {
+		return "", fmt.Errorf("refusing path outside %q", base)
+	}
+	return p, nil
 }
 
 // publicDir returns the project's web-served directory, creating public/ if none
@@ -97,7 +131,10 @@ func publicDir(dir string) string {
 			return filepath.Join(dir, c)
 		}
 	}
-	p := filepath.Join(dir, "public")
+	p, err := confine(dir, "public")
+	if err != nil {
+		return filepath.Join(dir, "public")
+	}
 	_ = os.MkdirAll(p, 0o755)
 	return p
 }

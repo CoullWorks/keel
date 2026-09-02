@@ -15,6 +15,7 @@ package studio
 
 import (
 	"encoding/xml"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -103,12 +104,21 @@ func item(key, value, file string) magentoConfigItem {
 	return magentoConfigItem{Key: key, File: file, Value: strings.TrimSpace(value)}
 }
 
-// parseMagentoEnvXML reads app/etc/env.xml and surfaces the config keys with
+// parseMagentoEnvXML reads dir/app/etc/env.xml and surfaces the config keys with
 // secrets already masked. The returned items are safe to serialise — no password
 // or crypt key value is ever included. A parse error yields an item-less result
-// with the error set; the caller decides how to present it.
-func parseMagentoEnvXML(path string) ([]magentoConfigItem, error) {
-	b, err := os.ReadFile(path)
+// with the error set; the caller decides how to present it. The read path is
+// confined under dir (Abs + HasPrefix) so it can never escape the project.
+func parseMagentoEnvXML(dir string) ([]magentoConfigItem, error) {
+	safeBase, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, fmt.Errorf("refusing path outside %q", dir)
+	}
+	p, err := filepath.Abs(filepath.Join(dir, "app", "etc", "env.xml"))
+	if err != nil || !strings.HasPrefix(p, safeBase) {
+		return nil, fmt.Errorf("refusing path outside %q", dir)
+	}
+	b, err := os.ReadFile(p)
 	if err != nil {
 		return nil, err
 	}
@@ -176,9 +186,15 @@ func handleMagentoEnv(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rel := "app/etc/env.xml"
-	envXMLPath := filepath.Join(dir, "app", "etc", "env.xml")
 	resp := magentoEnvResponse{EnvXML: rel, DotEnv: readDotEnvKeys(dir)}
 
+	safeBase, absErr := filepath.Abs(dir)
+	envXMLPath, joinErr := filepath.Abs(filepath.Join(dir, "app", "etc", "env.xml"))
+	if absErr != nil || joinErr != nil || !strings.HasPrefix(envXMLPath, safeBase) {
+		resp.Error = fmt.Sprintf("refusing path outside %q", dir)
+		writeJSON(w, resp)
+		return
+	}
 	if _, statErr := os.Stat(envXMLPath); statErr != nil {
 		// No env.xml: Magento isn't installed/configured yet. Not an error — the UI
 		// shows a clear "not installed yet" message and still lists any .env keys.
@@ -188,7 +204,7 @@ func handleMagentoEnv(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	items, perr := parseMagentoEnvXML(envXMLPath)
+	items, perr := parseMagentoEnvXML(dir)
 	if perr != nil {
 		resp.Installed = true
 		resp.Error = "could not parse app/etc/env.xml: " + perr.Error()

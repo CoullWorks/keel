@@ -106,18 +106,33 @@ func RootLaunch(dir string) engine.Launch {
 // defaults to npm for a bare package.json workspace. It never guesses for a
 // non-workspace directory — callers gate on IsMonorepo first.
 func packageManager(dir string) string {
-	if _, err := os.Stat(filepath.Join(dir, "turbo.json")); err == nil {
-		return "turbo"
+	safeBase, err := filepath.Abs(dir)
+	if err != nil {
+		return ""
+	}
+	under := func(name string) (string, bool) {
+		p, err := filepath.Abs(filepath.Join(dir, name))
+		if err != nil || !strings.HasPrefix(p, safeBase) {
+			return "", false
+		}
+		return p, true
+	}
+	if p, ok := under("turbo.json"); ok {
+		if _, err := os.Stat(p); err == nil {
+			return "turbo"
+		}
 	}
 	// The packageManager field ("pnpm@9.1.0") is the authoritative, committed
 	// declaration when present — Corepack reads the same field.
-	if b, err := os.ReadFile(filepath.Join(dir, "package.json")); err == nil {
-		var pkg struct {
-			PackageManager string `json:"packageManager"`
-		}
-		if json.Unmarshal(b, &pkg) == nil {
-			if name := managerName(pkg.PackageManager); name != "" {
-				return name
+	if p, ok := under("package.json"); ok {
+		if b, err := os.ReadFile(p); err == nil {
+			var pkg struct {
+				PackageManager string `json:"packageManager"`
+			}
+			if json.Unmarshal(b, &pkg) == nil {
+				if name := managerName(pkg.PackageManager); name != "" {
+					return name
+				}
 			}
 		}
 	}
@@ -126,17 +141,25 @@ func packageManager(dir string) string {
 		"yarn.lock":         "yarn",
 		"package-lock.json": "npm",
 	} {
-		if _, err := os.Stat(filepath.Join(dir, lock)); err == nil {
+		p, ok := under(lock)
+		if !ok {
+			continue
+		}
+		if _, err := os.Stat(p); err == nil {
 			return mgr
 		}
 	}
-	if _, err := os.Stat(filepath.Join(dir, "pnpm-workspace.yaml")); err == nil {
-		return "pnpm"
+	if p, ok := under("pnpm-workspace.yaml"); ok {
+		if _, err := os.Stat(p); err == nil {
+			return "pnpm"
+		}
 	}
 	// A package.json "workspaces" field with no other signal is an npm/yarn
 	// workspace; npm is the safe default (the command shape is the same).
-	if _, err := os.Stat(filepath.Join(dir, "package.json")); err == nil {
-		return "npm"
+	if p, ok := under("package.json"); ok {
+		if _, err := os.Stat(p); err == nil {
+			return "npm"
+		}
 	}
 	return ""
 }
@@ -163,7 +186,15 @@ func managerName(field string) string {
 // "dev" over "start" (the dev-server convention), or "" if the root defines
 // neither — in which case there is nothing to launch from the root.
 func rootLaunchScript(dir string) string {
-	b, err := os.ReadFile(filepath.Join(dir, "package.json"))
+	safeBase, err := filepath.Abs(dir)
+	if err != nil {
+		return ""
+	}
+	p, err := filepath.Abs(filepath.Join(dir, "package.json"))
+	if err != nil || !strings.HasPrefix(p, safeBase) {
+		return ""
+	}
+	b, err := os.ReadFile(p)
 	if err != nil {
 		return ""
 	}
@@ -264,7 +295,15 @@ func filterCommand(mgr, pkg, script string) string {
 // memberPackageName reads a member's package.json "name" (what --filter targets),
 // or "" if it has none.
 func memberPackageName(memberDir string) string {
-	b, err := os.ReadFile(filepath.Join(memberDir, "package.json"))
+	safeBase, err := filepath.Abs(memberDir)
+	if err != nil {
+		return ""
+	}
+	p, err := filepath.Abs(filepath.Join(memberDir, "package.json"))
+	if err != nil || !strings.HasPrefix(p, safeBase) {
+		return ""
+	}
+	b, err := os.ReadFile(p)
 	if err != nil {
 		return ""
 	}
@@ -286,7 +325,15 @@ func memberPackageName(memberDir string) string {
 // from the root's still be run singly (spec A: "the member's own dev/start script
 // when it has one").
 func memberScript(memberDir, rootScript string) string {
-	b, err := os.ReadFile(filepath.Join(memberDir, "package.json"))
+	safeBase, err := filepath.Abs(memberDir)
+	if err != nil {
+		return ""
+	}
+	p, err := filepath.Abs(filepath.Join(memberDir, "package.json"))
+	if err != nil || !strings.HasPrefix(p, safeBase) {
+		return ""
+	}
+	b, err := os.ReadFile(p)
 	if err != nil {
 		return ""
 	}
@@ -354,8 +401,10 @@ func findWorkspaceRoot(dir string) string {
 		}
 		// A .git here marks the repo boundary: a workspace root is at or below its
 		// repository, so there is nothing to find above it.
-		if fi, err := os.Stat(filepath.Join(cur, ".git")); err == nil && (fi.IsDir() || fi.Mode().IsRegular()) {
-			return ""
+		if gp, ok := gitMarker(cur); ok {
+			if fi, err := os.Stat(gp); err == nil && (fi.IsDir() || fi.Mode().IsRegular()) {
+				return ""
+			}
 		}
 		parent := filepath.Dir(cur)
 		if parent == cur { // reached the filesystem root
@@ -372,6 +421,21 @@ func findWorkspaceRoot(dir string) string {
 // the filesystem root.
 const maxMonorepoWalk = 40
 
+// gitMarker returns the confined path to dir's .git marker (Abs + must stay
+// under dir), reporting false when it cannot be resolved safely — so the walk
+// stats an Abs+HasPrefix-guarded path.
+func gitMarker(dir string) (string, bool) {
+	safeBase, err := filepath.Abs(dir)
+	if err != nil {
+		return "", false
+	}
+	p, err := filepath.Abs(filepath.Join(dir, ".git"))
+	if err != nil || !strings.HasPrefix(p, safeBase) {
+		return "", false
+	}
+	return p, true
+}
+
 // findMonorepoRoot walks from dir upward, returning the nearest ancestor (or dir
 // itself) whose .keel/manifest.yaml is a monorepo root. It stops at the first of:
 // a match, the filesystem root, a VCS boundary (a directory containing .git — a
@@ -385,8 +449,10 @@ func findMonorepoRoot(dir string) (string, *engine.Manifest) {
 		}
 		// A .git here marks the repo boundary: a shared-backend monorepo root is at
 		// or below its repository, so there is nothing to find above it.
-		if fi, err := os.Stat(filepath.Join(cur, ".git")); err == nil && (fi.IsDir() || fi.Mode().IsRegular()) {
-			return "", nil
+		if gp, ok := gitMarker(cur); ok {
+			if fi, err := os.Stat(gp); err == nil && (fi.IsDir() || fi.Mode().IsRegular()) {
+				return "", nil
+			}
 		}
 		parent := filepath.Dir(cur)
 		if parent == cur { // reached the filesystem root
@@ -491,6 +557,7 @@ func isPostgresURL(u string) bool {
 func rootEnv(dir string) (envFile string, get func(string) string) {
 	merged := map[string]string{}
 	envFile = ".env"
+	safeBase, baseErr := filepath.Abs(dir)
 	for _, name := range []string{".env", ".env.local"} { // later file wins
 		f, err := envfile.Load(filepath.Join(dir, name))
 		if err != nil {
@@ -500,7 +567,11 @@ func rootEnv(dir string) (envFile string, get func(string) string) {
 		if len(keys) == 0 {
 			continue
 		}
-		if _, statErr := os.Stat(filepath.Join(dir, name)); statErr == nil {
+		p, absErr := filepath.Abs(filepath.Join(dir, name))
+		if baseErr != nil || absErr != nil || !strings.HasPrefix(p, safeBase) {
+			continue // cannot confine: treat as absent for the source-name step
+		}
+		if _, statErr := os.Stat(p); statErr == nil {
 			envFile = name // the last present, non-empty file names the source
 		}
 		for _, k := range keys {

@@ -65,7 +65,15 @@ func file() string { return filepath.Join(profile.Dir(), "packs.yaml") }
 
 // Load reads packs.yaml (an empty registry if absent).
 func Load() (*Registry, error) {
-	b, err := os.ReadFile(file())
+	safeBase, err := filepath.Abs(profile.Dir())
+	if err != nil {
+		return nil, err
+	}
+	p, err := filepath.Abs(file())
+	if err != nil || !strings.HasPrefix(p, safeBase) {
+		return nil, fmt.Errorf("refusing path outside %q", profile.Dir())
+	}
+	b, err := os.ReadFile(p)
 	if os.IsNotExist(err) {
 		return &Registry{}, nil
 	}
@@ -155,7 +163,15 @@ func Uninstall(name string) (bool, error) {
 		if _, ok := r.Get(name); !ok {
 			return nil // not installed; removed stays false
 		}
-		if err := os.RemoveAll(Dir(name)); err != nil {
+		safeBase, err := filepath.Abs(RecipesDir())
+		if err != nil {
+			return err
+		}
+		p, err := filepath.Abs(Dir(name))
+		if err != nil || !strings.HasPrefix(p, safeBase) {
+			return fmt.Errorf("refusing path outside %q", RecipesDir())
+		}
+		if err := os.RemoveAll(p); err != nil {
 			return err
 		}
 		r.Remove(name)
@@ -194,7 +210,15 @@ func (r *Registry) Remove(name string) bool {
 
 // ReadManifest reads keel.pack.yaml from a directory.
 func ReadManifest(dir string) (*Manifest, error) {
-	b, err := os.ReadFile(filepath.Join(dir, manifestFile))
+	safeBase, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, err
+	}
+	p, err := filepath.Abs(filepath.Join(dir, manifestFile))
+	if err != nil || !strings.HasPrefix(p, safeBase) {
+		return nil, fmt.Errorf("refusing path outside %q", dir)
+	}
+	b, err := os.ReadFile(p)
 	if err != nil {
 		return nil, err
 	}

@@ -216,7 +216,13 @@ func handleRunTasks(w http.ResponseWriter, r *http.Request) {
 	// resolves the root launcher for it; every other member still needs its own
 	// keel manifest to expose a per-framework task set.
 	if !isRootLaunchMember(dir) {
-		if _, err := os.Stat(filepath.Join(dir, ".keel", "manifest.yaml")); err != nil {
+		safeBase, absErr := filepath.Abs(dir)
+		manifest, joinErr := filepath.Abs(filepath.Join(dir, ".keel", "manifest.yaml"))
+		if absErr != nil || joinErr != nil || !strings.HasPrefix(manifest, safeBase) {
+			writeJSON(w, map[string]any{"tasks": []runTask{}, "error": "not a keel project: " + dir})
+			return
+		}
+		if _, err := os.Stat(manifest); err != nil {
 			writeJSON(w, map[string]any{"tasks": []runTask{}, "error": "not a keel project: " + dir})
 			return
 		}
@@ -284,7 +290,13 @@ func handleRun(w http.ResponseWriter, r *http.Request) {
 	// resolves it), so it is allowed through without a manifest of its own; any
 	// other member still needs its keel manifest.
 	if !isRootLaunchMember(dir) {
-		if _, err := os.Stat(filepath.Join(dir, ".keel", "manifest.yaml")); err != nil {
+		safeBase, absErr := filepath.Abs(dir)
+		manifest, joinErr := filepath.Abs(filepath.Join(dir, ".keel", "manifest.yaml"))
+		if absErr != nil || joinErr != nil || !strings.HasPrefix(manifest, safeBase) {
+			fail("not a keel project: " + dir)
+			return
+		}
+		if _, err := os.Stat(manifest); err != nil {
 			fail("not a keel project: " + dir)
 			return
 		}

@@ -701,7 +701,11 @@ func writeCredentials(plan *resolver.Plan, dir string, values []creds.Value, sw 
 	if len(values) == 0 {
 		return nil
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	safeBase, err := filepath.Abs(dir)
+	if err != nil {
+		return fmt.Errorf("refusing path outside %q", dir)
+	}
+	if err := os.MkdirAll(safeBase, 0o755); err != nil {
 		return err
 	}
 	path, err := creds.WriteComposerAuth(plan.EnvFamily(), dir, values)
@@ -712,14 +716,18 @@ func writeCredentials(plan *resolver.Plan, dir string, values []creds.Value, sw 
 		sw.emit([]byte("✓ wrote Composer credentials to " + path))
 	}
 	if env := creds.EnvValues(values); len(env) > 0 {
-		f, err := envfile.Load(filepath.Join(dir, ".env"))
+		envPath, err := filepath.Abs(filepath.Join(dir, ".env"))
+		if err != nil || !strings.HasPrefix(envPath, safeBase) {
+			return fmt.Errorf("refusing path outside %q", dir)
+		}
+		f, err := envfile.Load(envPath)
 		if err != nil {
 			return err
 		}
 		for k, v := range env {
 			f.Set(k, v) // upsert: Merge only adds keys that are missing
 		}
-		if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(f.Render()), 0o600); err != nil {
+		if err := os.WriteFile(envPath, []byte(f.Render()), 0o600); err != nil {
 			return err
 		}
 		sw.emit([]byte(fmt.Sprintf("✓ wrote %d key(s) to .env", len(env))))
@@ -791,7 +799,14 @@ func handleExec(w http.ResponseWriter, r *http.Request) {
 	body.Dir = dir
 	// doctor/adopt don't need an existing manifest; everything else does.
 	if !execNoProject[body.Args[0]] {
-		if _, err := os.Stat(filepath.Join(body.Dir, ".keel", "manifest.yaml")); err != nil {
+		safeBase, absErr := filepath.Abs(body.Dir)
+		manifest, joinErr := filepath.Abs(filepath.Join(body.Dir, ".keel", "manifest.yaml"))
+		if absErr != nil || joinErr != nil || !strings.HasPrefix(manifest, safeBase) {
+			sw.emit([]byte("✗ not a keel project: " + body.Dir))
+			emitDone(w, flusher, false, 1, "not a keel project: "+body.Dir)
+			return
+		}
+		if _, err := os.Stat(manifest); err != nil {
 			sw.emit([]byte("✗ not a keel project: " + body.Dir))
 			emitDone(w, flusher, false, 1, "not a keel project: "+body.Dir)
 			return

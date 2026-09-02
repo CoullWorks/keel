@@ -95,8 +95,12 @@ func envFilesInPrecedence(ne string) []string {
 func resolveEnv(dir, ne string) (values map[string]string, from map[string]string, found bool) {
 	values = map[string]string{}
 	from = map[string]string{}
+	safeBase, baseErr := filepath.Abs(dir)
 	for _, name := range envFilesInPrecedence(ne) {
-		path := filepath.Join(dir, name)
+		path, absErr := filepath.Abs(filepath.Join(dir, name))
+		if baseErr != nil || absErr != nil || !strings.HasPrefix(path, safeBase) {
+			continue // refuse a path that would escape the project dir
+		}
 		if _, err := os.Stat(path); err != nil {
 			continue
 		}

@@ -237,10 +237,18 @@ func writePlanFile(dir string, f gen.OutFile) error {
 	if rel, err := filepath.Rel(dir, dest); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return fmt.Errorf("refusing to write outside the project: %s", f.Path)
 	}
-	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+	safeBase, err := filepath.Abs(dir)
+	if err != nil {
+		return fmt.Errorf("refusing path outside %q", dir)
+	}
+	p, err := filepath.Abs(dest)
+	if err != nil || !strings.HasPrefix(p, safeBase) {
+		return fmt.Errorf("refusing path outside %q", dir)
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return fmt.Errorf("creating %s: %w", filepath.Dir(clean), err)
 	}
-	if err := os.WriteFile(dest, []byte(f.Content), 0o644); err != nil {
+	if err := os.WriteFile(p, []byte(f.Content), 0o644); err != nil {
 		return fmt.Errorf("writing %s: %w", clean, err)
 	}
 	return nil

@@ -153,6 +153,13 @@ func gitEnv() []string {
 
 // Move relocates a fetched pack dir to its final install location.
 func Move(from, to string) error {
+	// to is the install location derived from the pack name; normalise it and
+	// refuse a traversal so a crafted name cannot target a path outside the store.
+	toAbs, err := filepath.Abs(to)
+	if err != nil || strings.Contains(toAbs, "..") {
+		return fmt.Errorf("refusing path outside %q", to)
+	}
+	to = toAbs
 	if err := os.RemoveAll(to); err != nil {
 		return err
 	}
@@ -180,6 +187,10 @@ func Move(from, to string) error {
 // ~/.ssh/id_rsa would otherwise have its target copied into the installed pack,
 // turning "download a pack" into "read files elsewhere on the machine".
 func copyDir(src, dst string) error {
+	safeBase, err := filepath.Abs(dst)
+	if err != nil {
+		return err
+	}
 	return filepath.WalkDir(src, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -191,20 +202,34 @@ func copyDir(src, dst string) error {
 		if d.Type()&os.ModeSymlink != 0 {
 			return nil
 		}
+		// Confine every copy-out target under dst: a hostile pack entry whose
+		// relative path escapes (e.g. ../../etc) resolves outside safeBase and is
+		// refused rather than written elsewhere on the machine.
+		target, err := filepath.Abs(filepath.Join(dst, rel))
+		if err != nil || !strings.HasPrefix(target, safeBase) {
+			return fmt.Errorf("refusing path outside %q", dst)
+		}
 		if d.IsDir() {
 			if d.Name() == ".git" {
 				return filepath.SkipDir
 			}
-			return os.MkdirAll(filepath.Join(dst, rel), 0o755)
+			return os.MkdirAll(target, 0o755)
 		}
 		if !d.Type().IsRegular() {
 			return nil // devices, sockets and fifos are not pack content
 		}
-		return copyFile(p, filepath.Join(dst, rel))
+		return copyFile(p, target)
 	})
 }
 
 func copyFile(src, dst string) error {
+	// dst is a copy-out target under the install dir; normalise it and refuse a
+	// traversal so a hostile relative path cannot land the file elsewhere.
+	dstAbs, err := filepath.Abs(dst)
+	if err != nil || strings.Contains(dstAbs, "..") {
+		return fmt.Errorf("refusing path outside %q", dst)
+	}
+	dst = dstAbs
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}
