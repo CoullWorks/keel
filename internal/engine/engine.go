@@ -796,7 +796,9 @@ func Build(ctx context.Context, plan *resolver.Plan, opts Options) (err error) {
 			// must not replace the error that actually explains why.
 			_ = runner.Run(ctx, opts.Dir, down)
 		}
-		_ = os.RemoveAll(opts.Dir)
+		if d := opts.Dir; !strings.Contains(d, "..") {
+			_ = os.RemoveAll(d)
+		}
 	}()
 
 	if err = runHooks(ctx, "pre_build", nil, recs, vars, opts.Dir, runner, out); err != nil {

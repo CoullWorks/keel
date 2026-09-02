@@ -307,7 +307,11 @@ func DetectMagento(dir string) (MagentoBrand, error) {
 		if !v.IsDir() {
 			continue
 		}
-		vendorDir := filepath.Join(root, v.Name())
+		safeRoot, aerr := filepath.Abs(root)
+		vendorDir, verr := filepath.Abs(filepath.Join(root, v.Name()))
+		if aerr != nil || verr != nil || !strings.HasPrefix(vendorDir, safeRoot) {
+			continue
+		}
 		themes, err := os.ReadDir(vendorDir)
 		if err != nil {
 			continue
@@ -453,7 +457,11 @@ func isCoreTheme(id string) bool {
 // theme was actually read from vendor/, so the caller can decide whether to fall
 // back to the built-in Luma palette and flag NoVendor.
 func loadVendorCoreThemes(dir string, raws map[string]rawTheme) (vendorReadable bool) {
-	vendorRoot := filepath.Join(dir, "vendor")
+	safeDir, aerr := filepath.Abs(dir)
+	vendorRoot, verr := filepath.Abs(filepath.Join(dir, "vendor"))
+	if aerr != nil || verr != nil || !strings.HasPrefix(vendorRoot, safeDir) {
+		return false
+	}
 	if info, err := os.Stat(vendorRoot); err != nil || !info.IsDir() {
 		return false // no vendor/ at all: nothing to read
 	}
@@ -501,7 +509,12 @@ func loadVendorCoreThemes(dir string, raws map[string]rawTheme) (vendorReadable 
 // coreThemeDirs. ok is false when no candidate dir has readable Less sources.
 func readVendorCoreTheme(dir, id string) (vars map[string]string, title, parent string, ok bool) {
 	for _, themeDir := range coreThemeDirs(dir, id) {
-		if info, err := os.Stat(filepath.Join(themeDir, "web", "css", "source")); err != nil || !info.IsDir() {
+		safeTheme, aerr := filepath.Abs(themeDir)
+		src, serr := filepath.Abs(filepath.Join(themeDir, "web", "css", "source"))
+		if aerr != nil || serr != nil || !strings.HasPrefix(src, safeTheme) {
+			continue
+		}
+		if info, err := os.Stat(src); err != nil || !info.IsDir() {
 			continue
 		}
 		vars = readMagentoLessVars(themeDir)
@@ -646,7 +659,11 @@ var magentoVarRefRe = regexp.MustCompile(`@([A-Za-z0-9_-]+)`)
 // that splits vars across _variables.less/_theme.less/_extend.less is read whole.
 func readMagentoLessVars(themeDir string) map[string]string {
 	vars := map[string]string{}
-	srcDir := filepath.Join(themeDir, "web", "css", "source")
+	safeTheme, aerr := filepath.Abs(themeDir)
+	srcDir, serr := filepath.Abs(filepath.Join(themeDir, "web", "css", "source"))
+	if aerr != nil || serr != nil || !strings.HasPrefix(srcDir, safeTheme) {
+		return vars
+	}
 	entries, err := os.ReadDir(srcDir)
 	if err != nil {
 		return vars
@@ -655,7 +672,11 @@ func readMagentoLessVars(themeDir string) map[string]string {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".less") {
 			continue
 		}
-		b, err := os.ReadFile(filepath.Join(srcDir, e.Name()))
+		fp, ferr := filepath.Abs(filepath.Join(srcDir, e.Name()))
+		if ferr != nil || !strings.HasPrefix(fp, srcDir) {
+			continue
+		}
+		b, err := os.ReadFile(fp)
 		if err != nil {
 			continue
 		}
@@ -670,7 +691,11 @@ func readMagentoLessVars(themeDir string) map[string]string {
 // unparseable file yields empty strings — a theme without a theme.xml still
 // counts (its brand vars alone are enough to show).
 func readThemeXML(path string) (title, parent string) {
-	b, err := os.ReadFile(path)
+	abs, err := filepath.Abs(path)
+	if err != nil || strings.Contains(abs, "..") {
+		return "", ""
+	}
+	b, err := os.ReadFile(abs)
 	if err != nil {
 		return "", ""
 	}

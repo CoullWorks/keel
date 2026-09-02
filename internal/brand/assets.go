@@ -140,7 +140,11 @@ func publicDir(dir string) string {
 }
 
 func isDir(p string) bool {
-	fi, err := os.Stat(p)
+	abs, err := filepath.Abs(p)
+	if err != nil || strings.Contains(abs, "..") {
+		return false
+	}
+	fi, err := os.Stat(abs)
 	return err == nil && fi.IsDir()
 }
 
