@@ -122,7 +122,7 @@ files:
       @auth_bp.post("/login")
       def login():
           email = request.form.get("email", "")
-          password = request.form.get("password", "")
+          password = request.form.get("password") or ""
           user = _find_by_email(email)
           if user is None or not check_password_hash(user.password_hash, password):
               return jsonify({"error": "invalid credentials"}), 401
@@ -135,7 +135,7 @@ files:
           # STUB: creates an in-memory account so the register flow is real.
           # Persist to your users table (with a hashed password) in production.
           email = request.form.get("email", "")
-          password = request.form.get("password", "")
+          password = request.form.get("password") or ""
           if not email or not password:
               return jsonify({"error": "email and password required"}), 422
           if _find_by_email(email) is not None:
