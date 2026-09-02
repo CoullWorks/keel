@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.2.3](https://github.com/CoullWorks/keel/compare/v1.2.2...v1.2.3) (2026-09-02)
+
+
+### Bug Fixes
+
+* **security:** confine engine writes to the project dir (HasPrefix) ([#25](https://github.com/CoullWorks/keel/issues/25)) ([7208de2](https://github.com/CoullWorks/keel/commit/7208de20bde1cea864306c9f24952cfa99675b26)), closes [#21](https://github.com/CoullWorks/keel/issues/21)
+* **security:** confine path sinks repo-wide + pin actions + Close handling ([#29](https://github.com/CoullWorks/keel/issues/29)) ([5ea216b](https://github.com/CoullWorks/keel/commit/5ea216b8f34c3312b9db8a02db107ca24cd47ea7)), closes [#21](https://github.com/CoullWorks/keel/issues/21)
+* **security:** confine recipe file paths under the project directory ([#22](https://github.com/CoullWorks/keel/issues/22)) ([8c73c1f](https://github.com/CoullWorks/keel/commit/8c73c1f372c0301e8784164d35db70422b920cab)), closes [#21](https://github.com/CoullWorks/keel/issues/21)
+* **security:** confine the remaining engine path sinks ([#27](https://github.com/CoullWorks/keel/issues/27)) ([00b9b67](https://github.com/CoullWorks/keel/commit/00b9b67e4227dc01b02424b276840774c1799c13)), closes [#21](https://github.com/CoullWorks/keel/issues/21)
+* **security:** confine the remaining engine path sinks ([#28](https://github.com/CoullWorks/keel/issues/28)) ([4336aea](https://github.com/CoullWorks/keel/commit/4336aeaced17c1c127bccabba7b1fe74bed65c02)), closes [#21](https://github.com/CoullWorks/keel/issues/21)
+* **security:** confine the residual path sinks ([#30](https://github.com/CoullWorks/keel/issues/30)) ([1f24ac2](https://github.com/CoullWorks/keel/commit/1f24ac26116079447f474438b6b5cdf6a67723e2)), closes [#21](https://github.com/CoullWorks/keel/issues/21)
+* **security:** engine path confinement via official Abs+HasPrefix ([#26](https://github.com/CoullWorks/keel/issues/26)) ([874b169](https://github.com/CoullWorks/keel/commit/874b169cbd85cd27a5ab203d1f59e81504959bf0)), closes [#21](https://github.com/CoullWorks/keel/issues/21)
+* **security:** inline IsLocal guards at engine path sinks ([#24](https://github.com/CoullWorks/keel/issues/24)) ([4627468](https://github.com/CoullWorks/keel/commit/46274688512e5c1191567138262c0034c542d888)), closes [#21](https://github.com/CoullWorks/keel/issues/21)
+
 ## [1.2.2](https://github.com/CoullWorks/keel/compare/v1.2.1...v1.2.2) (2026-09-01)
 
 
