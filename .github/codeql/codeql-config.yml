@@ -1,0 +1,15 @@
+name: keel code scanning
+
+# Scope scanning to keel's own shipped executable code. Excluded paths are not
+# keel's runtime security surface:
+#   - recipes/ is data: templates keel writes INTO a generated project. A finding
+#     there (e.g. a login form's empty password field) is about the user's future
+#     project, not keel, and is generated code by definition.
+#   - scripts/ is local developer tooling (asset generation), never shipped.
+#   - internal/studio/index.html is the deprecated legacy studio UI, kept only
+#     behind KEEL_STUDIO_LEGACY; the React studio in internal/studio/web is the
+#     default and is still scanned.
+paths-ignore:
+  - recipes
+  - scripts
+  - internal/studio/index.html
