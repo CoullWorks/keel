@@ -63,7 +63,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.24"
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node || '22' }}
@@ -121,7 +121,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.24"
-      - uses: ddev/github-action-setup-ddev@v1
+      - uses: ddev/github-action-setup-ddev@fdf2f5c97943bae638f31df6df86f1defa6210c0 # v1
         with:
           # keel's own repo has no .ddev project; the action's default autostart
           # tries to start one and fails. keel starts ddev itself during verify.
@@ -159,7 +159,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.24"
-      - uses: ddev/github-action-setup-ddev@v1
+      - uses: ddev/github-action-setup-ddev@fdf2f5c97943bae638f31df6df86f1defa6210c0 # v1
         with:
           autostart: false
       - name: e2e (full - container stacks boot and tear down)

@@ -3,6 +3,7 @@ package brand
 import (
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -38,7 +39,15 @@ type projectBrandRef struct {
 // the brand block means a manifest with fields this package doesn't know about
 // still decodes.
 func ProjectOverride(dir string) (Seed, bool) {
-	b, err := os.ReadFile(filepath.Join(dir, ".keel", "manifest.yaml"))
+	safeBase, err := filepath.Abs(dir)
+	if err != nil {
+		return Seed{}, false
+	}
+	p, err := filepath.Abs(filepath.Join(dir, ".keel", "manifest.yaml"))
+	if err != nil || !strings.HasPrefix(p, safeBase) {
+		return Seed{}, false
+	}
+	b, err := os.ReadFile(p)
 	if err != nil {
 		return Seed{}, false
 	}

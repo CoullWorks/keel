@@ -31,8 +31,12 @@ func handleDeployTargets(w http.ResponseWriter, r *http.Request) {
 		}
 		// Resolving artifacts needs the manifest; without one keel deploy --json
 		// still returns the target list (framework empty), which is a valid answer.
-		if _, err := os.Stat(filepath.Join(abs, ".keel", "manifest.yaml")); err == nil {
-			dir = abs
+		safeBase, absErr := filepath.Abs(abs)
+		manifest, joinErr := filepath.Abs(filepath.Join(abs, ".keel", "manifest.yaml"))
+		if absErr == nil && joinErr == nil && strings.HasPrefix(manifest, safeBase) {
+			if _, err := os.Stat(manifest); err == nil {
+				dir = abs
+			}
 		}
 	}
 	exe, err := os.Executable()

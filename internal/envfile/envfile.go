@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -52,7 +53,12 @@ func Parse(b []byte) *File {
 
 // Load parses a file from disk. A missing file yields an empty File, no error.
 func Load(path string) (*File, error) {
-	b, err := os.ReadFile(path)
+	// The caller supplies the full .env path; normalise it and refuse a traversal.
+	p, err := filepath.Abs(path)
+	if err != nil || strings.Contains(p, "..") {
+		return nil, fmt.Errorf("refusing path outside %q", path)
+	}
+	b, err := os.ReadFile(p)
 	if os.IsNotExist(err) {
 		return &File{index: map[string]int{}}, nil
 	}

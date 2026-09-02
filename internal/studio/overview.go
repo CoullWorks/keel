@@ -364,7 +364,15 @@ func skipDir(name string) bool {
 // fileExists reports whether a plain file exists at dir/parts... — the primitive
 // behind ".env present?" style facts.
 func fileExists(dir string, parts ...string) bool {
-	st, err := os.Stat(filepath.Join(append([]string{dir}, parts...)...))
+	safeBase, err := filepath.Abs(dir)
+	if err != nil {
+		return false
+	}
+	p, err := filepath.Abs(filepath.Join(append([]string{dir}, parts...)...))
+	if err != nil || !strings.HasPrefix(p, safeBase) {
+		return false // refuse a path that would escape the project dir
+	}
+	st, err := os.Stat(p)
 	return err == nil && !st.IsDir()
 }
 

@@ -190,7 +190,15 @@ func ApplyTokens(dir string, tokens BrandTokens) (Result, error) {
 // --- Tailwind v4: @theme block in the CSS entry that imports tailwindcss ---
 
 func applyTailwindV4Tokens(dir, css string, tokens BrandTokens) (Result, error) {
-	b, err := os.ReadFile(css)
+	safeBase, err := filepath.Abs(dir)
+	if err != nil {
+		return Result{}, fmt.Errorf("refusing path outside %q", dir)
+	}
+	p, err := filepath.Abs(css)
+	if err != nil || !strings.HasPrefix(p, safeBase) {
+		return Result{}, fmt.Errorf("refusing path outside %q", dir)
+	}
+	b, err := os.ReadFile(p)
 	if err != nil {
 		return Result{}, err
 	}
@@ -202,7 +210,7 @@ func applyTailwindV4Tokens(dir, css string, tokens BrandTokens) (Result, error) 
 	tokens = tokens.Merge(detectTailwindV4String(rel(dir, css), body))
 	block := startMark + "\n" + RenderTailwindV4(tokens) + endMark + "\n"
 	out := strings.TrimRight(body, "\n") + "\n\n" + block
-	if err := os.WriteFile(css, []byte(out), 0o644); err != nil {
+	if err := os.WriteFile(p, []byte(out), 0o644); err != nil {
 		return Result{}, err
 	}
 	return Result{Stack: "tailwind4", File: rel(dir, css), Note: "Utilities: bg-brand-500, text-accent-500, dark: variants via .dark"}, nil
@@ -212,8 +220,16 @@ func applyTailwindV4Tokens(dir, css string, tokens BrandTokens) (Result, error) 
 // so we write a drop-in colours module and tell the user how to spread it in. ---
 
 func findTailwindV3(dir string) string {
+	safeBase, err := filepath.Abs(dir)
+	if err != nil {
+		return ""
+	}
 	for _, n := range []string{"tailwind.config.js", "tailwind.config.ts", "tailwind.config.cjs", "tailwind.config.mjs"} {
-		if p := filepath.Join(dir, n); fileExists(p) {
+		p, err := filepath.Abs(filepath.Join(dir, n))
+		if err != nil || !strings.HasPrefix(p, safeBase) {
+			continue
+		}
+		if fileExists(p) {
 			return p
 		}
 	}
@@ -231,7 +247,15 @@ func applyTailwindV3Tokens(dir, cfg string, tokens BrandTokens) (Result, error) 
 	}
 	content := RenderTailwindV3(tokens)
 	out := filepath.Join(dir, "keel-brand.colors.js")
-	if err := os.WriteFile(out, []byte(content), 0o644); err != nil {
+	safeBase, err := filepath.Abs(dir)
+	if err != nil {
+		return Result{}, fmt.Errorf("refusing path outside %q", dir)
+	}
+	p, err := filepath.Abs(out)
+	if err != nil || !strings.HasPrefix(p, safeBase) {
+		return Result{}, fmt.Errorf("refusing path outside %q", dir)
+	}
+	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
 		return Result{}, err
 	}
 	return Result{
@@ -245,7 +269,15 @@ func applyTailwindV3Tokens(dir, cfg string, tokens BrandTokens) (Result, error) 
 // import. We insert the overrides right before the first bootstrap @import. ---
 
 func applyBootstrapTokens(dir, scss string, tokens BrandTokens) (Result, error) {
-	b, err := os.ReadFile(scss)
+	safeBase, err := filepath.Abs(dir)
+	if err != nil {
+		return Result{}, fmt.Errorf("refusing path outside %q", dir)
+	}
+	p, err := filepath.Abs(scss)
+	if err != nil || !strings.HasPrefix(p, safeBase) {
+		return Result{}, fmt.Errorf("refusing path outside %q", dir)
+	}
+	b, err := os.ReadFile(p)
 	if err != nil {
 		return Result{}, err
 	}
@@ -268,7 +300,7 @@ func applyBootstrapTokens(dir, scss string, tokens BrandTokens) (Result, error) 
 	if !inserted { // no import line found — prepend so it still precedes any later import
 		out = append([]string{strings.TrimRight(overrides, "\n")}, out...)
 	}
-	if err := os.WriteFile(scss, []byte(strings.Join(out, "\n")), 0o644); err != nil {
+	if err := os.WriteFile(p, []byte(strings.Join(out, "\n")), 0o644); err != nil {
 		return Result{}, err
 	}
 	return Result{Stack: "bootstrap", File: rel(dir, scss), Note: "Bootstrap needs a Sass recompile to apply the new colours everywhere."}, nil

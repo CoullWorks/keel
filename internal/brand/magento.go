@@ -203,7 +203,15 @@ var lumaDefaultVars = map[string]string{
 // it has the app/design/frontend theme tree. This is the trigger the studio uses
 // to route the brand editor down the Magento path instead of the CSS-kit path.
 func IsMagentoProject(dir string) bool {
-	info, err := os.Stat(filepath.Join(dir, "app", "design", "frontend"))
+	safeBase, err := filepath.Abs(dir)
+	if err != nil {
+		return false
+	}
+	p, err := filepath.Abs(filepath.Join(dir, "app", "design", "frontend"))
+	if err != nil || !strings.HasPrefix(p, safeBase) {
+		return false
+	}
+	info, err := os.Stat(p)
 	return err == nil && info.IsDir()
 }
 
@@ -274,8 +282,16 @@ type rawTheme struct {
 // built-in Luma default palette and flags NoVendor. A project with no theme tree
 // returns MagentoBrand{Found:false}, no error.
 func DetectMagento(dir string) (MagentoBrand, error) {
+	safeBase, err := filepath.Abs(dir)
+	if err != nil {
+		return MagentoBrand{Found: false, DefaultIndex: -1}, nil
+	}
 	root := filepath.Join(dir, "app", "design", "frontend")
-	vendors, err := os.ReadDir(root)
+	rootAbs, err := filepath.Abs(root)
+	if err != nil || !strings.HasPrefix(rootAbs, safeBase) {
+		return MagentoBrand{Found: false, DefaultIndex: -1}, nil
+	}
+	vendors, err := os.ReadDir(rootAbs)
 	if err != nil {
 		// No theme tree: not a fully-set-up Magento frontend. Not an error — the
 		// studio shows a clear "no themes found" state.

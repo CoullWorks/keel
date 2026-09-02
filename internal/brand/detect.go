@@ -1,7 +1,9 @@
 package brand
 
 import (
+	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -63,7 +65,15 @@ var (
 )
 
 func detectTailwindV4(dir, css string) (Detected, error) {
-	b, err := os.ReadFile(css)
+	safeBase, err := filepath.Abs(dir)
+	if err != nil {
+		return Detected{}, fmt.Errorf("refusing path outside %q", dir)
+	}
+	p, err := filepath.Abs(css)
+	if err != nil || !strings.HasPrefix(p, safeBase) {
+		return Detected{}, fmt.Errorf("refusing path outside %q", dir)
+	}
+	b, err := os.ReadFile(p)
 	if err != nil {
 		return Detected{}, err
 	}
@@ -124,7 +134,15 @@ var (
 )
 
 func detectTailwindV3(dir, cfg string) (Detected, error) {
-	b, err := os.ReadFile(cfg)
+	safeBase, err := filepath.Abs(dir)
+	if err != nil {
+		return Detected{}, fmt.Errorf("refusing path outside %q", dir)
+	}
+	p, err := filepath.Abs(cfg)
+	if err != nil || !strings.HasPrefix(p, safeBase) {
+		return Detected{}, fmt.Errorf("refusing path outside %q", dir)
+	}
+	b, err := os.ReadFile(p)
 	if err != nil {
 		return Detected{}, err
 	}
@@ -175,7 +193,15 @@ var scssRoleMap = map[string]string{
 }
 
 func detectBootstrap(dir, scss string) (Detected, error) {
-	b, err := os.ReadFile(scss)
+	safeBase, err := filepath.Abs(dir)
+	if err != nil {
+		return Detected{}, fmt.Errorf("refusing path outside %q", dir)
+	}
+	p, err := filepath.Abs(scss)
+	if err != nil || !strings.HasPrefix(p, safeBase) {
+		return Detected{}, fmt.Errorf("refusing path outside %q", dir)
+	}
+	b, err := os.ReadFile(p)
 	if err != nil {
 		return Detected{}, err
 	}

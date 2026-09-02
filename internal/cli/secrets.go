@@ -294,9 +294,11 @@ func ensureGitignored(name string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	_, err = fmt.Fprintf(f, "\n# added by keel\n%s\n", name)
-	return err
+	_, werr := fmt.Fprintf(f, "\n# added by keel\n%s\n", name)
+	if cerr := f.Close(); cerr != nil && werr == nil {
+		werr = cerr
+	}
+	return werr
 }
 
 func gitignored(name string) bool {

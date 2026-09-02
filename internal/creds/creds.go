@@ -199,6 +199,14 @@ func WriteComposerAuth(family, projectDir string, values []Value) (string, error
 		return "", nil
 	}
 	path, _ := ComposerAuthPath(family, projectDir)
+	// Normalise the auth.json target and refuse a traversal: the path is built
+	// from projectDir / the Composer home, so a crafted value must not escape to
+	// write this secret somewhere unintended.
+	pathAbs, err := filepath.Abs(path)
+	if err != nil || strings.Contains(pathAbs, "..") {
+		return "", fmt.Errorf("refusing path outside %q", path)
+	}
+	path = pathAbs
 
 	af := authFile{HTTPBasic: map[string]basicAuth{}, Bearer: map[string]string{}}
 	if b, err := os.ReadFile(path); err == nil {
