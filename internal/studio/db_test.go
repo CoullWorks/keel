@@ -520,7 +520,7 @@ func TestHandleDBGridHappyPath(t *testing.T) {
 	db, st := openFakeDB(t)
 	defer db.Close()
 	st.script = []scriptedResult{
-		{match: "information_schema.tables", cols: []string{"one"}, rows: [][]driver.Value{{[]byte("1")}}},
+		{match: "information_schema.tables", cols: []string{"table_name"}, rows: [][]driver.Value{{[]byte("users")}}},
 		{match: "information_schema.columns", cols: []string{"column_name", "data_type"}, rows: [][]driver.Value{{[]byte("id"), []byte("integer")}, {[]byte("name"), []byte("text")}}},
 		{match: "FOREIGN KEY", cols: []string{"column_name", "referenced_table_name", "referenced_column_name"}, rows: nil}, // no FKs on this table
 		{match: "pg_index", cols: []string{"attname"}, rows: [][]driver.Value{{[]byte("id")}}},
@@ -573,7 +573,7 @@ func TestHandleDBCommitHappyPath(t *testing.T) {
 	db, st := openFakeDB(t)
 	defer db.Close()
 	st.script = []scriptedResult{
-		{match: "information_schema.tables", cols: []string{"one"}, rows: [][]driver.Value{{[]byte("1")}}},
+		{match: "information_schema.tables", cols: []string{"table_name"}, rows: [][]driver.Value{{[]byte("users")}}},
 		{match: "information_schema.columns", cols: []string{"column_name", "data_type"}, rows: [][]driver.Value{{[]byte("id"), []byte("integer")}, {[]byte("name"), []byte("text")}}},
 		{match: "PRIMARY", cols: []string{"column_name"}, rows: [][]driver.Value{{[]byte("id")}}},
 	}
@@ -599,7 +599,7 @@ func TestHandleDBCommitRejectsUnknownColumn(t *testing.T) {
 	db, st := openFakeDB(t)
 	defer db.Close()
 	st.script = []scriptedResult{
-		{match: "information_schema.tables", cols: []string{"one"}, rows: [][]driver.Value{{[]byte("1")}}},
+		{match: "information_schema.tables", cols: []string{"table_name"}, rows: [][]driver.Value{{[]byte("users")}}},
 		{match: "information_schema.columns", cols: []string{"column_name", "data_type"}, rows: [][]driver.Value{{[]byte("id"), []byte("integer")}}},
 		{match: "PRIMARY", cols: []string{"column_name"}, rows: [][]driver.Value{{[]byte("id")}}},
 	}
@@ -620,7 +620,7 @@ func TestHandleDBCommitRefusesTableWithoutPK(t *testing.T) {
 	db, st := openFakeDB(t)
 	defer db.Close()
 	st.script = []scriptedResult{
-		{match: "information_schema.tables", cols: []string{"one"}, rows: [][]driver.Value{{[]byte("1")}}},
+		{match: "information_schema.tables", cols: []string{"table_name"}, rows: [][]driver.Value{{[]byte("users")}}},
 		{match: "information_schema.columns", cols: []string{"column_name", "data_type"}, rows: [][]driver.Value{{[]byte("name"), []byte("text")}}},
 		{match: "PRIMARY", cols: []string{"column_name"}, rows: nil}, // no pk
 	}

@@ -318,7 +318,7 @@ func (m wizardModel) View() string {
 		default:
 			marker = "  "
 		}
-		label := o.Label
+		var label string
 		if i == m.cursor {
 			label = styAccent.Render(o.Label)
 		} else {

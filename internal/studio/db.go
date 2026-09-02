@@ -759,6 +759,28 @@ func tableExists(ctx context.Context, db *sql.DB, e dbEngine, table string) (boo
 	return err == nil, err
 }
 
+// canonicalTable returns the table's own name as the schema records it, matched
+// against the requested name as a bound parameter. The returned name is a
+// database read, so a caller threads a trusted identifier into SQL rather than
+// the request string. Reports false if the table does not exist.
+func canonicalTable(ctx context.Context, db *sql.DB, e dbEngine, table string) (string, bool, error) {
+	var q string
+	if e == enginePostgres {
+		q = `SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name=$1`
+	} else {
+		q = `SELECT table_name FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name=?`
+	}
+	var name string
+	err := db.QueryRowContext(ctx, q, table).Scan(&name)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return name, true, nil
+}
+
 // scanRows reads a result set into string-encoded cells (nil -> SQL NULL), which
 // is a lossless, driver-agnostic transport for a grid: every value round-trips
 // as text and the UI decides how to render it by column type.
@@ -821,4 +843,17 @@ func colNames(cols []column) []string {
 		out[i] = c.Name
 	}
 	return out
+}
+
+// canonicalCol returns the table's own column name matching name, taken from the
+// schema in cols (a database read) rather than the request. Callers thread the
+// returned value into SQL so the identifier provably originates from the schema,
+// not user input. Reports false if name is not a real column.
+func canonicalCol(cols []column, name string) (string, bool) {
+	for _, c := range cols {
+		if c.Name == name {
+			return c.Name, true
+		}
+	}
+	return "", false
 }
