@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.2.4](https://github.com/CoullWorks/keel/compare/v1.2.3...v1.2.4) (2026-09-02)
+
+
+### Bug Fixes
+
+* **security:** command-injection barrier + scan scoping + nit ([#35](https://github.com/CoullWorks/keel/issues/35)) ([dc04639](https://github.com/CoullWorks/keel/commit/dc04639e24008625d2910afaf7ccfe522e9628d2)), closes [#31](https://github.com/CoullWorks/keel/issues/31)
+* **security:** finish sql-injection + flask empty-password ([#34](https://github.com/CoullWorks/keel/issues/34)) ([de91e08](https://github.com/CoullWorks/keel/commit/de91e0883fcf848e2689591f66393a05f10c29fd)), closes [#31](https://github.com/CoullWorks/keel/issues/31)
+* **security:** sql-injection barrier + nits ([#32](https://github.com/CoullWorks/keel/issues/32)) ([7c49183](https://github.com/CoullWorks/keel/commit/7c49183df56a2d411fc04171b1755e09f079f5ac)), closes [#31](https://github.com/CoullWorks/keel/issues/31)
+
 ## [1.2.3](https://github.com/CoullWorks/keel/compare/v1.2.2...v1.2.3) (2026-09-02)
 
 
