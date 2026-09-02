@@ -702,7 +702,7 @@ func writeCredentials(plan *resolver.Plan, dir string, values []creds.Value, sw 
 		return nil
 	}
 	safeBase, err := filepath.Abs(dir)
-	if err != nil {
+	if err != nil || strings.Contains(safeBase, "..") {
 		return fmt.Errorf("refusing path outside %q", dir)
 	}
 	if err := os.MkdirAll(safeBase, 0o755); err != nil {

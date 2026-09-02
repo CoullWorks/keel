@@ -317,11 +317,9 @@ func addGitignore(dir, name string) bool {
 	if err != nil {
 		return false
 	}
-	if _, werr := f.WriteString("\n# added by keel optimize --fix\n" + name + "\n"); werr != nil {
-		f.Close()
-		return false
-	}
-	return f.Close() == nil
+	_, werr := f.WriteString("\n# added by keel optimize --fix\n" + name + "\n")
+	cerr := f.Close()
+	return werr == nil && cerr == nil
 }
 
 func exists(p string) bool { _, err := os.Stat(p); return err == nil }
