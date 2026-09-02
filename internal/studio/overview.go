@@ -383,7 +383,11 @@ func fileExists(dir string, parts ...string) bool {
 const maxFileBytes = 512 * 1024
 
 func readBounded(path string) (string, bool) {
-	f, err := os.Open(path)
+	abs, err := filepath.Abs(path)
+	if err != nil || strings.Contains(abs, "..") {
+		return "", false
+	}
+	f, err := os.Open(abs)
 	if err != nil {
 		return "", false
 	}
@@ -737,7 +741,11 @@ func nextFacts(dir string) []fact {
 // dirExists reports whether path is a directory — used to prefer app/ over
 // src/app for the route walk without counting twice.
 func dirExists(path string) bool {
-	st, err := os.Stat(path)
+	abs, err := filepath.Abs(path)
+	if err != nil || strings.Contains(abs, "..") {
+		return false
+	}
+	st, err := os.Stat(abs)
 	return err == nil && st.IsDir()
 }
 

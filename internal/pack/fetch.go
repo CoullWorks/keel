@@ -37,8 +37,10 @@ func ResolveSource(s string) string {
 	if strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://") || strings.HasPrefix(s, "git@") {
 		return s
 	}
-	if info, err := os.Stat(s); err == nil && info.IsDir() {
-		return s
+	if abs, aerr := filepath.Abs(s); aerr == nil && !strings.Contains(abs, "..") {
+		if info, err := os.Stat(abs); err == nil && info.IsDir() {
+			return s
+		}
 	}
 	// A bare owner/repo (no scheme, no leading . or /, exactly two segments) is
 	// the GitHub shorthand the help advertises. The previous guard tested for the
@@ -85,12 +87,14 @@ func Fetch(ctx context.Context, source, ref string) (dir, commit string, err err
 	if err != nil {
 		return "", "", err
 	}
-	if info, statErr := os.Stat(resolved); statErr == nil && info.IsDir() {
-		if err := copyDir(resolved, tmp); err != nil {
-			os.RemoveAll(tmp)
-			return "", "", err
+	if rabs, aerr := filepath.Abs(resolved); aerr == nil && !strings.Contains(rabs, "..") {
+		if info, statErr := os.Stat(rabs); statErr == nil && info.IsDir() {
+			if err := copyDir(rabs, tmp); err != nil {
+				os.RemoveAll(tmp)
+				return "", "", err
+			}
+			return tmp, "", nil
 		}
-		return tmp, "", nil
 	}
 	// A source or ref beginning with "-" would be read by git as an option
 	// rather than a value (--upload-pack=… runs a command), so refuse it and
