@@ -1195,16 +1195,14 @@ func handleDBCommit(w http.ResponseWriter, r *http.Request) {
 	// transaction, so a bad column can't leave a half-applied batch. Rewrite each
 	// to the schema's own column name, so the identifier threaded into SQL is a
 	// trusted value rather than the request's.
-	for i, e := range body.Edits {
-		c, ok := canonicalCol(cols, e.Column)
-		if !ok {
+	for _, e := range body.Edits {
+		if _, ok := canonicalCol(cols, e.Column); !ok {
 			writeJSON(w, map[string]any{"error": "no such column: " + e.Column})
 			return
 		}
-		body.Edits[i].Column = c
 	}
 
-	updated, err := applyEdits(ctx, db, eng, tbl, body.Edits, pk)
+	updated, err := applyEdits(ctx, db, eng, tbl, body.Edits, cols, pk)
 	if err != nil {
 		writeJSON(w, map[string]any{"error": err.Error()})
 		return
@@ -1216,14 +1214,23 @@ func handleDBCommit(w http.ResponseWriter, r *http.Request) {
 // first failure, so the browser's "Commit" is atomic. It returns the number of
 // rows changed. Split out of the handler so the transaction path is unit-tested
 // against a fake DB with no network.
-func applyEdits(ctx context.Context, db *sql.DB, eng dbEngine, table string, edits []cellEdit, pk []string) (int, error) {
+func applyEdits(ctx context.Context, db *sql.DB, eng dbEngine, table string, edits []cellEdit, cols []column, pk []string) (int, error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
 	updated := 0
 	for _, e := range edits {
-		q, args, err := buildUpdate(eng, table, e.Column, e.Value, e.Key, pk)
+		// Take the column name from the schema (cols), not the edit, so the
+		// identifier threaded into the UPDATE is a trusted value, not the request's.
+		col, ok := canonicalCol(cols, e.Column)
+		if !ok {
+			if rb := tx.Rollback(); rb != nil {
+				return 0, errors.Join(fmt.Errorf("no such column: %s", e.Column), fmt.Errorf("rollback: %w", rb))
+			}
+			return 0, fmt.Errorf("no such column: %s", e.Column)
+		}
+		q, args, err := buildUpdate(eng, table, col, e.Value, e.Key, pk)
 		if err != nil {
 			if rb := tx.Rollback(); rb != nil {
 				err = errors.Join(err, fmt.Errorf("rollback: %w", rb))
